@@ -1,0 +1,175 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug executable 'gateway'",
+      "type": "lldb",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/gateway",
+      "cargo": {
+        "args": ["run"]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in executable 'gateway'",
+      "type": "lldb",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/gateway",
+      "cargo": {
+        "args": ["test"]
+      }
+    },
+
+    {
+      "name": "Debug receiver (debug build)",
+      "type": "probe-rs-debug",
+      "request": "launch",
+      "preLaunchTask": "cargo build receiver",
+      "cwd": "${workspaceFolder}/firmware/receiver",
+      "chip": "nRF52840_xxAA",
+      "connectUnderReset": false,
+      "speed": 4000,
+      "flashingConfig": {
+        "flashingEnabled": true,
+        "haltAfterReset": false,
+        "formatOptions": {
+          "binaryFormat": "elf"
+        }
+      },
+      "coreConfigs": [
+        {
+          "coreIndex": 0,
+          "programBinary": "${workspaceFolder}/firmware/target/thumbv7em-none-eabi/debug/homescope-receiver",
+          "rttEnabled": true,
+          "rttChannelFormats": [
+            { "channelNumber": 0, "dataFormat": "Defmt", "showTimestamp": true }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Debug receiver (release build)",
+      "type": "probe-rs-debug",
+      "request": "launch",
+      "preLaunchTask": "cargo build receiver (release)",
+      "cwd": "${workspaceFolder}/firmware/receiver",
+      "chip": "nRF52840_xxAA",
+      "connectUnderReset": false,
+      "speed": 4000,
+      "flashingConfig": {
+        "flashingEnabled": true,
+        "haltAfterReset": false,
+        "formatOptions": {
+          "binaryFormat": "elf"
+        }
+      },
+      "coreConfigs": [
+        {
+          "coreIndex": 0,
+          "programBinary": "${workspaceFolder}/firmware/target/thumbv7em-none-eabi/release/homescope-receiver",
+          "rttEnabled": true,
+          "rttChannelFormats": [
+            { "channelNumber": 0, "dataFormat": "Defmt", "showTimestamp": true }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Attach receiver (no flash, reset only)",
+      "type": "probe-rs-debug",
+      "request": "attach",
+      "cwd": "${workspaceFolder}/firmware/receiver",
+      "chip": "nRF52840_xxAA",
+      "connectUnderReset": false,
+      "speed": 4000,
+      "coreConfigs": [
+        {
+          "coreIndex": 0,
+          "programBinary": "${workspaceFolder}/firmware/target/thumbv7em-none-eabi/debug/homescope-receiver",
+          "rttEnabled": true,
+          "rttChannelFormats": [
+            { "channelNumber": 0, "dataFormat": "Defmt", "showTimestamp": true }
+          ]
+        }
+      ]
+    },
+
+    {
+      "name": "Debug sensor (debug build)",
+      "type": "probe-rs-debug",
+      "request": "launch",
+      "preLaunchTask": "cargo build sensor",
+      "cwd": "${workspaceFolder}/firmware/sensor",
+      "chip": "nRF52840_xxAA",
+      "connectUnderReset": false,
+      "speed": 4000,
+      "flashingConfig": {
+        "flashingEnabled": true,
+        "haltAfterReset": false,
+        "formatOptions": {
+          "binaryFormat": "elf"
+        }
+      },
+      "coreConfigs": [
+        {
+          "coreIndex": 0,
+          "programBinary": "${workspaceFolder}/firmware/target/thumbv7em-none-eabi/debug/homescope-sensor",
+          "rttEnabled": true,
+          "rttChannelFormats": [
+            { "channelNumber": 0, "dataFormat": "Defmt", "showTimestamp": true }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Debug sensor (release build)",
+      "type": "probe-rs-debug",
+      "request": "launch",
+      "preLaunchTask": "cargo build sensor (release)",
+      "cwd": "${workspaceFolder}/firmware/sensor",
+      "chip": "nRF52840_xxAA",
+      "connectUnderReset": false,
+      "speed": 4000,
+      "flashingConfig": {
+        "flashingEnabled": true,
+        "haltAfterReset": false,
+        "formatOptions": {
+          "binaryFormat": "elf"
+        }
+      },
+      "coreConfigs": [
+        {
+          "coreIndex": 0,
+          "programBinary": "${workspaceFolder}/firmware/target/thumbv7em-none-eabi/release/homescope-sensor",
+          "rttEnabled": true,
+          "rttChannelFormats": [
+            { "channelNumber": 0, "dataFormat": "Defmt", "showTimestamp": true }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Attach sensor (no flash, reset only)",
+      "type": "probe-rs-debug",
+      "request": "attach",
+      "cwd": "${workspaceFolder}/firmware/sensor",
+      "chip": "nRF52840_xxAA",
+      "connectUnderReset": false,
+      "speed": 4000,
+      "coreConfigs": [
+        {
+          "coreIndex": 0,
+          "programBinary": "${workspaceFolder}/firmware/target/thumbv7em-none-eabi/debug/homescope-sensor",
+          "rttEnabled": true,
+          "rttChannelFormats": [
+            { "channelNumber": 0, "dataFormat": "Defmt", "showTimestamp": true }
+          ]
+        }
+      ]
+    }
+  ]
+}

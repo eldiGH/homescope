@@ -1,0 +1,13 @@
+[package]
+name = "homescope-gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+homescope-common = { workspace = true, features = ["packet", "reading"]}
+
+futures = "0.3.32"
+tokio = { version = "1.52.3", features = ["full"] }
+serial2-tokio = "0.1.24"
+tokio-util = { version = "0.7.18", features = ["codec"] }
+memchr = "2.8.0"

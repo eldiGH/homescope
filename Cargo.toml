@@ -1,0 +1,6 @@
+[workspace]
+resolver = "3"
+members = ["gateway", "common"]
+
+[workspace.dependencies]
+homescope-common = { path = "common" }

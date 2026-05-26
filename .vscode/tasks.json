@@ -1,0 +1,50 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo build receiver",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--bin", "homescope-receiver"],
+      "options": {
+        "cwd": "${workspaceFolder}/firmware/receiver"
+      },
+      "problemMatcher": ["$rustc"],
+      "group": "build"
+    },
+    {
+      "label": "cargo build receiver (release)",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--release", "--bin", "homescope-receiver"],
+      "options": {
+        "cwd": "${workspaceFolder}/firmware/receiver"
+      },
+      "problemMatcher": ["$rustc"],
+      "group": "build"
+    },
+
+    {
+      "label": "cargo build sensor",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--bin", "homescope-sensor"],
+      "options": {
+        "cwd": "${workspaceFolder}/firmware/sensor"
+      },
+      "problemMatcher": ["$rustc"],
+      "group": "build"
+    },
+    {
+      "label": "cargo build sensor (release)",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--release", "--bin", "homescope-sensor"],
+      "options": {
+        "cwd": "${workspaceFolder}/firmware/sensor"
+      },
+      "problemMatcher": ["$rustc"],
+      "group": "build"
+    }
+  ]
+}

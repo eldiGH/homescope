@@ -1,0 +1,11 @@
+/target
+/firmware/target
+/firmware/*/target
+
+/firmware/*/firmware.bin
+/firmware/*/firmware.uf2
+/firmware/*/.embed.toml.local
+
+# IDE/editor
+.idea/
+*.swp

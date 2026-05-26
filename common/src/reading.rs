@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "packet")]
-use crate::packet::SensorPacket;
+use crate::observation::SensorObservation;
 
-#[cfg(feature = "packet")]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SensorReading {
     device_id: u8,
@@ -12,11 +10,12 @@ pub struct SensorReading {
     humidity: u8,
     pressure_pa: u32,
     battery_mv: u16,
+    rssi: i8,
 }
 
-#[cfg(feature = "packet")]
-impl From<SensorPacket> for SensorReading {
-    fn from(value: SensorPacket) -> Self {
+#[cfg(feature = "wire")]
+impl From<SensorObservation> for SensorReading {
+    fn from(value: SensorObservation) -> Self {
         Self {
             battery_mv: value.battery_mv,
             device_id: value.device_id,
@@ -24,6 +23,7 @@ impl From<SensorPacket> for SensorReading {
             pressure_pa: value.pressure_pa,
             seq: value.seq,
             temp_cdegc: value.temp_cdegc,
+            rssi: value.rssi,
         }
     }
 }

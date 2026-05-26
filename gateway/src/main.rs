@@ -1,8 +1,13 @@
-use std::{io::ErrorKind, process, time::Duration};
+use std::{
+    io::ErrorKind,
+    process,
+    time::{Duration, Instant},
+};
 
 use futures::StreamExt;
 use homescope_common::{
-    packet::{SENSOR_PACKET_FRAME_LEN, SENSOR_PACKET_FRAME_MAGIC_BYTES, SensorPacket},
+    frame::{FRAME_MAGIC_BYTES, FRAME_SIZE, Frame},
+    observation::SensorObservation,
     reading::SensorReading,
 };
 use serial2_tokio::SerialPort;
@@ -14,9 +19,9 @@ use tokio_util::{
 
 const PATH: &str = "/dev/homescope-receiver";
 
-struct SensorPacketDecoder;
-impl Decoder for SensorPacketDecoder {
-    type Item = SensorPacket;
+struct SensorObservationDecoder;
+impl Decoder for SensorObservationDecoder {
+    type Item = SensorObservation;
     type Error = io::Error;
 
     fn decode(
@@ -24,25 +29,25 @@ impl Decoder for SensorPacketDecoder {
         src: &mut tokio_util::bytes::BytesMut,
     ) -> Result<Option<Self::Item>, Self::Error> {
         loop {
-            let Some(magic_index) = memchr::memchr(SENSOR_PACKET_FRAME_MAGIC_BYTES[0], src) else {
+            let Some(magic_index) = memchr::memchr(FRAME_MAGIC_BYTES[0], src) else {
                 return Ok(None);
             };
 
             src.advance(magic_index);
 
-            if src.len() < SENSOR_PACKET_FRAME_LEN {
+            if src.len() < FRAME_SIZE {
                 return Ok(None);
             }
 
-            if src[1] != SENSOR_PACKET_FRAME_MAGIC_BYTES[1] {
+            if src[1] != FRAME_MAGIC_BYTES[1] {
                 src.advance(1);
                 continue;
             }
 
-            match SensorPacket::parse_frame(&src[..SENSOR_PACKET_FRAME_LEN].try_into().unwrap()) {
-                Ok(packet) => {
-                    src.advance(SENSOR_PACKET_FRAME_LEN);
-                    return Ok(Some(packet));
+            match Frame::try_from_bytes(&src[..FRAME_SIZE].try_into().unwrap()) {
+                Ok(frame) => {
+                    src.advance(FRAME_SIZE);
+                    return Ok(Some(frame.payload));
                 }
 
                 Err(_) => {
@@ -74,7 +79,7 @@ async fn main() {
             },
         };
 
-        let mut frames = FramedRead::new(port, SensorPacketDecoder);
+        let mut frames = FramedRead::new(port, SensorObservationDecoder);
 
         while let Some(result) = frames.next().await {
             match result {

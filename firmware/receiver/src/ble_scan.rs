@@ -4,7 +4,7 @@ use defmt::info;
 use embassy_futures::join::join;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
 use embassy_time::Duration;
-use homescope_common::packet::SensorPacket;
+use homescope_common::{observation::SensorObservation, packet::SensorPacket};
 use trouble_host::prelude::*;
 
 /// Max number of connections
@@ -13,7 +13,7 @@ const L2CAP_CHANNELS_MAX: usize = 1;
 
 pub async fn run<C, const N: usize>(
     controller: C,
-    channel: &'_ Channel<NoopRawMutex, SensorPacket, N>,
+    channel: &'_ Channel<NoopRawMutex, SensorObservation, N>,
 ) where
     C: Controller + ControllerCmdSync<LeSetScanParams>,
 {
@@ -51,7 +51,7 @@ pub async fn run<C, const N: usize>(
 }
 
 struct PacketHandler<'a, const N: usize> {
-    channel: &'a Channel<NoopRawMutex, SensorPacket, N>,
+    channel: &'a Channel<NoopRawMutex, SensorObservation, N>,
 }
 
 impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
@@ -65,17 +65,30 @@ impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
                 continue;
             }
 
-            if report.data.len() == 18    // Total len (len (byte) + type (byte) + Manufacturer Id (2 bytes) + data (14 bytes))
-                && report.data[0] == 17   // Len byte (type + manufacturer id + data)
-                && report.data[1] == 0xFF // Type
-                && report.data[2] == 0xFF // Manufacturer Id (2 bytes)
-                && report.data[3] == 0xFF
-            {
-                let packet = SensorPacket::from_bytes(&report.data[4..]);
+            for ad in AdStructure::decode(report.data) {
+                if let Ok(AdStructure::ManufacturerSpecificData {
+                    company_identifier: 0xFFFF,
+                    payload,
+                }) = ad
+                    && payload.len() == size_of::<SensorPacket>()
+                {
+                    let packet = SensorPacket::from_bytes(payload);
 
-                if self.channel.try_send(packet).is_err() {
-                    let _ = self.channel.try_receive();
-                    let _ = self.channel.try_send(packet);
+                    let observation = SensorObservation {
+                        battery_mv: packet.battery_mv,
+                        device_id: packet.device_id,
+                        humidity: packet.humidity,
+                        pressure_pa: packet.pressure_pa,
+                        seq: packet.seq,
+                        temp_cdegc: packet.temp_cdegc,
+
+                        rssi: report.rssi,
+                    };
+
+                    if self.channel.is_full() {
+                        let _ = self.channel.try_receive();
+                    }
+                    let _ = self.channel.try_send(observation);
                 }
             }
         }

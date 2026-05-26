@@ -18,7 +18,8 @@ use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, State};
 use embassy_usb::{Builder, Config};
 use heapless::String;
-use homescope_common::packet::SensorPacket;
+use homescope_common::frame::Frame;
+use homescope_common::observation::SensorObservation;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
@@ -33,7 +34,7 @@ enum BlinkEvent {
 
 static BLINK_EVENTS: Channel<CriticalSectionRawMutex, BlinkEvent, 8> = Channel::new();
 
-const PACKET_CHANNEL_SIZE: usize = 1024;
+const OBSERVATION_CHANNEL_SIZE: usize = 1024;
 
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -180,9 +181,10 @@ async fn main(spawner: Spawner) {
     // Run the USB device.
     let usb_fut = usb.run();
 
-    let packet_channel: Channel<NoopRawMutex, SensorPacket, PACKET_CHANNEL_SIZE> = Channel::new();
+    let observations_channel: Channel<NoopRawMutex, SensorObservation, OBSERVATION_CHANNEL_SIZE> =
+        Channel::new();
 
-    let ble_fut = ble_scan::run(sdc, &packet_channel);
+    let ble_fut = ble_scan::run(sdc, &observations_channel);
 
     let usb_writer_fut = async {
         let mut last_seq: Option<u32> = None;
@@ -197,10 +199,11 @@ async fn main(spawner: Spawner) {
 
             loop {
                 info!("waiting for sensor packet...");
-                let packet = packet_channel.receive().await;
+                let observation = observations_channel.receive().await;
                 info!("packet received");
 
-                if last_seq.replace(packet.seq) == Some(packet.seq) {
+                // Filtering consecutive duplicate packets
+                if last_seq.replace(observation.seq) == Some(observation.seq) {
                     continue;
                 }
 
@@ -208,16 +211,16 @@ async fn main(spawner: Spawner) {
 
                 info!("unique packet received");
 
-                let frame = packet.frame();
-
                 if !cdc_sender.dtr() {
                     error!("dtr is off, retrying!");
                     led_off();
                     break;
                 }
 
+                let frame: Frame = observation.into();
+
                 let result = select(
-                    cdc_sender.write_packet(&frame),
+                    cdc_sender.write_packet(frame.as_bytes()),
                     wait_for_dtr_off(&cdc_control),
                 )
                 .await;

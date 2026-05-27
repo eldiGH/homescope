@@ -1,8 +1,4 @@
-use std::{
-    io::ErrorKind,
-    process,
-    time::{Duration, Instant},
-};
+use std::{io::ErrorKind, process, time::Duration};
 
 use futures::StreamExt;
 use homescope_common::{

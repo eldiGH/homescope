@@ -10,7 +10,7 @@ pub struct SensorReading {
     humidity: u8,
     pressure_pa: u32,
     battery_mv: u16,
-    rssi: i8,
+    pub rssi: i8,
 }
 
 #[cfg(feature = "wire")]

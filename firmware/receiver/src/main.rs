@@ -35,6 +35,7 @@ enum BlinkEvent {
 static BLINK_EVENTS: Channel<CriticalSectionRawMutex, BlinkEvent, 8> = Channel::new();
 
 const OBSERVATION_CHANNEL_SIZE: usize = 1024;
+const DTR_SETTLE_MS: u64 = 50;
 
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -181,31 +182,27 @@ async fn main(spawner: Spawner) {
     // Run the USB device.
     let usb_fut = usb.run();
 
-    let observations_channel: Channel<NoopRawMutex, SensorObservation, OBSERVATION_CHANNEL_SIZE> =
-        Channel::new();
+    let observations_channel: Channel<
+        NoopRawMutex,
+        (Instant, SensorObservation),
+        OBSERVATION_CHANNEL_SIZE,
+    > = Channel::new();
 
     let ble_fut = ble_scan::run(sdc, &observations_channel);
 
     let usb_writer_fut = async {
-        let mut last_seq: Option<u32> = None;
-
         loop {
             info!("waiting for cdc connection...");
             cdc_sender.wait_connection().await;
             info!("cdc connection established. waiting for dtr...");
             wait_for_dtr_on(&cdc_control).await;
             info!("dtr is on!");
-            Timer::after_millis(50).await;
+            Timer::after_millis(DTR_SETTLE_MS).await;
 
             loop {
                 info!("waiting for sensor packet...");
-                let observation = observations_channel.receive().await;
+                let (received_at, mut observation) = observations_channel.receive().await;
                 info!("packet received");
-
-                // Filtering consecutive duplicate packets
-                if last_seq.replace(observation.seq) == Some(observation.seq) {
-                    continue;
-                }
 
                 led_on();
 
@@ -216,6 +213,9 @@ async fn main(spawner: Spawner) {
                     led_off();
                     break;
                 }
+
+                observation.age_ms =
+                    u32::try_from((Instant::now() - received_at).as_millis()).unwrap_or(u32::MAX);
 
                 let frame: Frame = observation.into();
 

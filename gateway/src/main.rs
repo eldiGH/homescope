@@ -1,4 +1,8 @@
-use std::{io::ErrorKind, process, time::Duration};
+use std::{
+    io::ErrorKind,
+    process,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use futures::StreamExt;
 use homescope_common::{
@@ -6,14 +10,27 @@ use homescope_common::{
     observation::SensorObservation,
     reading::SensorReading,
 };
+use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
 use serial2_tokio::SerialPort;
-use tokio::{io, time::sleep};
+use tokio::{
+    io,
+    sync::mpsc::{Receiver, channel},
+    time::sleep,
+};
 use tokio_util::{
     bytes::Buf,
     codec::{Decoder, FramedRead},
 };
 
 const PATH: &str = "/dev/homescope-receiver";
+
+async fn mqtt_task(mut event_loop: EventLoop) {
+    loop {
+        if let Err(err) = event_loop.poll().await {
+            println!("mqtt err: {err}")
+        }
+    }
+}
 
 struct SensorObservationDecoder;
 impl Decoder for SensorObservationDecoder {
@@ -55,8 +72,45 @@ impl Decoder for SensorObservationDecoder {
     }
 }
 
+async fn mqtt_readings_sender(
+    mut reading_receiver: Receiver<SensorReading>,
+    mqtt_client: AsyncClient,
+) {
+    while let Some(reading) = reading_receiver.recv().await {
+        let serialized_reading = serde_json::to_vec(&reading);
+
+        match serialized_reading {
+            Ok(bytes) => {
+                if let Err(err) = mqtt_client
+                    .publish(
+                        format!("homescope/sensors/{}/reading", reading.device_id),
+                        QoS::AtLeastOnce,
+                        false,
+                        bytes,
+                    )
+                    .await
+                {
+                    println!("mqtt publish error: {err}")
+                }
+            }
+
+            Err(err) => {
+                println!("serialization error: {err}");
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    let mqtt_options = MqttOptions::new("gateway", "127.0.0.1", 1883);
+    let (client, event_loop) = AsyncClient::new(mqtt_options, 128);
+
+    let (readings_sender, readings_receiver) = channel::<SensorReading>(1024);
+
+    tokio::spawn(mqtt_task(event_loop));
+    tokio::spawn(mqtt_readings_sender(readings_receiver, client));
+
     loop {
         let port = match SerialPort::open(PATH, 115200) {
             Ok(port) => port,
@@ -79,9 +133,21 @@ async fn main() {
 
         while let Some(result) = frames.next().await {
             match result {
-                Ok(packet) => {
-                    let reading: SensorReading = packet.into();
+                Ok(observation) => {
+                    let received_at_ms = i64::try_from(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("clock before UNIX epoch")
+                            .as_millis()
+                            .saturating_sub(u128::from(observation.age_ms)),
+                    )
+                    .expect("ts overflow");
+
+                    let reading: SensorReading =
+                        SensorReading::from_observation(observation, received_at_ms);
                     println!("Got seq: {}", reading.seq);
+
+                    let _ = readings_sender.send(reading).await;
                 }
 
                 Err(err) => {

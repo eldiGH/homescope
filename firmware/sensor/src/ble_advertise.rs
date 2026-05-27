@@ -4,7 +4,7 @@ use defmt::info;
 use embassy_futures::join::join;
 use embassy_nrf::gpio::Output;
 use embassy_time::{Duration, Timer};
-use homescope_common::packet::SensorPacket;
+use homescope_common::{device_id::DeviceId, packet::SensorPacket};
 use trouble_host::prelude::*;
 
 pub async fn run<C>(controller: C, led_pin: &mut Output<'_>)
@@ -34,6 +34,13 @@ where
 
     let mut seq = 0;
 
+    let device_id = {
+        let high = u64::from(embassy_nrf::pac::FICR.deviceid(1).read());
+        let low = u64::from(embassy_nrf::pac::FICR.deviceid(0).read());
+
+        DeviceId(high << 32 | low)
+    };
+
     let _ = join(runner.run(), async {
         loop {
             led_pin.set_low();
@@ -42,7 +49,7 @@ where
                 let payload = SensorPacket {
                     seq,
                     battery_mv: 100,
-                    device_id: 1,
+                    device_id,
                     humidity: 55,
                     pressure_pa: 1000,
                     temp_cdegc: 2137,

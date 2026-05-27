@@ -2,7 +2,7 @@ use std::{
     collections::{HashSet, VecDeque},
     io::ErrorKind,
     process,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{Router, extract::State, response::Html, routing::get};
@@ -15,9 +15,12 @@ use homescope_common::{
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
 use serial2_tokio::SerialPort;
 use tokio::{
-    io, mpsc,
+    io,
+    sync::{
+        mpsc::{self, Receiver, channel},
+        watch,
+    },
     time::{self, sleep},
-    watch,
 };
 use tokio_util::{
     bytes::Buf,
@@ -407,7 +410,19 @@ async fn main() {
         while let Some(result) = frames.next().await {
             match result {
                 Ok(observation) => {
-                    let reading: SensorReading = observation.into();
+                    let received_at_ms = i64::try_from(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("clock before UNIX epoch")
+                            .as_millis()
+                            .saturating_sub(u128::from(observation.age_ms)),
+                    )
+                    .expect("ts overflow");
+
+                    let reading: SensorReading =
+                        SensorReading::from_observation(observation, received_at_ms);
+
+                    let _ = readings_sender.send(reading).await;
 
                     let _ = tx.try_send(ReadingRecord {
                         timestamp: Instant::now(),

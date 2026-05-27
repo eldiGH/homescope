@@ -68,6 +68,9 @@ where
                 let params = AdvertisementParameters {
                     interval_max: Duration::from_millis(20),
                     interval_min: Duration::from_millis(20),
+                    tx_power: TxPower::Plus8dBm,
+                    primary_phy: PhyKind::LeCoded,
+                    secondary_phy: PhyKind::LeCoded,
                     ..Default::default()
                 };
 

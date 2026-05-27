@@ -1,29 +1,32 @@
 use serde::{Deserialize, Serialize};
 
-use crate::observation::SensorObservation;
+use crate::{device_id::DeviceId, observation::SensorObservation};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SensorReading {
-    device_id: u8,
+    pub device_id: DeviceId,
     pub seq: u32,
-    temp_cdegc: i16,
-    humidity: u8,
-    pressure_pa: u32,
-    battery_mv: u16,
+    pub temp_degc: f64,
+    pub humidity: u8,
+    pub pressure_pa: u32,
+    pub battery_mv: u16,
     pub rssi: i8,
+    pub received_at_ms: i64,
 }
 
-#[cfg(feature = "wire")]
-impl From<SensorObservation> for SensorReading {
-    fn from(value: SensorObservation) -> Self {
+impl SensorReading {
+    #[cfg(feature = "wire")]
+    pub fn from_observation(observation: SensorObservation, received_at_ms: i64) -> Self {
         Self {
-            battery_mv: value.battery_mv,
-            device_id: value.device_id,
-            humidity: value.humidity,
-            pressure_pa: value.pressure_pa,
-            seq: value.seq,
-            temp_cdegc: value.temp_cdegc,
-            rssi: value.rssi,
+            battery_mv: observation.battery_mv,
+            device_id: observation.device_id,
+            humidity: observation.humidity,
+            pressure_pa: observation.pressure_pa,
+            seq: observation.seq,
+            temp_degc: f64::from(observation.temp_cdegc) / 100.0,
+            rssi: observation.rssi,
+            received_at_ms,
         }
     }
 }

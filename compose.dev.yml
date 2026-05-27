@@ -1,0 +1,39 @@
+volumes:
+  pgdata:
+
+services:
+  mqtt-broker:
+    image: eclipse-mosquitto:2-openssl
+    ports:
+      - "127.0.0.1:1883:1883"
+
+    volumes:
+      - "./deploy/mosquitto/mosquitto.dev.conf:/mosquitto/config/mosquitto.conf:ro"
+
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+      start_interval: 500ms
+
+  db:
+    image: timescale/timescaledb:latest-pg18
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: homescope
+
+    volumes:
+      - pgdata:/var/lib/postgresql
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+      start_interval: 500ms

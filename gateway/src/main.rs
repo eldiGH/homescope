@@ -2,7 +2,7 @@ use std::{
     collections::{HashSet, VecDeque},
     io::ErrorKind,
     process,
-    time::{Duration, Instant},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{Router, extract::State, response::Html, routing::get};
@@ -12,11 +12,12 @@ use homescope_common::{
     observation::SensorObservation,
     reading::SensorReading,
 };
+use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
 use serial2_tokio::SerialPort;
 use tokio::{
-    io,
-    sync::{mpsc, watch},
+    io, mpsc,
     time::{self, sleep},
+    watch,
 };
 use tokio_util::{
     bytes::Buf,
@@ -24,6 +25,14 @@ use tokio_util::{
 };
 
 const PATH: &str = "/dev/homescope-receiver";
+
+async fn mqtt_task(mut event_loop: EventLoop) {
+    loop {
+        if let Err(err) = event_loop.poll().await {
+            println!("mqtt err: {err}")
+        }
+    }
+}
 
 struct SensorObservationDecoder;
 impl Decoder for SensorObservationDecoder {
@@ -60,6 +69,35 @@ impl Decoder for SensorObservationDecoder {
                     src.advance(1);
                     continue;
                 }
+            }
+        }
+    }
+}
+
+async fn mqtt_readings_sender(
+    mut reading_receiver: Receiver<SensorReading>,
+    mqtt_client: AsyncClient,
+) {
+    while let Some(reading) = reading_receiver.recv().await {
+        let serialized_reading = serde_json::to_vec(&reading);
+
+        match serialized_reading {
+            Ok(bytes) => {
+                if let Err(err) = mqtt_client
+                    .publish(
+                        format!("homescope/sensors/{}/reading", reading.device_id),
+                        QoS::AtLeastOnce,
+                        false,
+                        bytes,
+                    )
+                    .await
+                {
+                    println!("mqtt publish error: {err}")
+                }
+            }
+
+            Err(err) => {
+                println!("serialization error: {err}");
             }
         }
     }
@@ -108,6 +146,14 @@ async fn serve_ui(State(rx): State<watch::Receiver<String>>) -> Html<String> {
 
 #[tokio::main]
 async fn main() {
+    let mqtt_options = MqttOptions::new("gateway", "127.0.0.1", 1883);
+    let (client, event_loop) = AsyncClient::new(mqtt_options, 128);
+
+    let (readings_sender, readings_receiver) = channel::<SensorReading>(1024);
+
+    tokio::spawn(mqtt_task(event_loop));
+    tokio::spawn(mqtt_readings_sender(readings_receiver, client));
+
     let (tx, mut rx) = mpsc::channel::<ReadingRecord>(10000);
     let (ui_tx, ui_rx) = watch::channel("Waiting for first benchmark tick...".to_string());
 

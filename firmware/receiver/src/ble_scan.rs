@@ -1,9 +1,11 @@
+use core::cell::Cell;
+
 use bt_hci::cmd::le::LeSetScanParams;
 use bt_hci::controller::ControllerCmdSync;
 use defmt::info;
 use embassy_futures::join::join;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
-use embassy_time::Duration;
+use embassy_time::{Duration, Instant};
 use homescope_common::{observation::SensorObservation, packet::SensorPacket};
 use trouble_host::prelude::*;
 
@@ -13,7 +15,7 @@ const L2CAP_CHANNELS_MAX: usize = 1;
 
 pub async fn run<C, const N: usize>(
     controller: C,
-    channel: &'_ Channel<NoopRawMutex, SensorObservation, N>,
+    channel: &'_ Channel<NoopRawMutex, (Instant, SensorObservation), N>,
 ) where
     C: Controller + ControllerCmdSync<LeSetScanParams>,
 {
@@ -31,7 +33,10 @@ pub async fn run<C, const N: usize>(
     let central = stack.central();
     let mut runner = stack.runner();
 
-    let packet_handler = PacketHandler::<N> { channel };
+    let packet_handler = PacketHandler::<N> {
+        channel,
+        last_seq: Cell::new(None),
+    };
 
     let mut scanner = Scanner::new(central);
     let _ = join(runner.run_with_handler(&packet_handler), async {
@@ -51,7 +56,8 @@ pub async fn run<C, const N: usize>(
 }
 
 struct PacketHandler<'a, const N: usize> {
-    channel: &'a Channel<NoopRawMutex, SensorObservation, N>,
+    channel: &'a Channel<NoopRawMutex, (Instant, SensorObservation), N>,
+    last_seq: Cell<Option<u32>>,
 }
 
 impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
@@ -74,6 +80,11 @@ impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
                 {
                     let packet = SensorPacket::from_bytes(payload);
 
+                    let prev = self.last_seq.replace(Some(packet.seq));
+                    if prev == Some(packet.seq) {
+                        continue; // immediate duplicate
+                    }
+
                     let observation = SensorObservation {
                         battery_mv: packet.battery_mv,
                         device_id: packet.device_id,
@@ -83,12 +94,13 @@ impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
                         temp_cdegc: packet.temp_cdegc,
 
                         rssi: report.rssi,
+                        age_ms: 0,
                     };
 
                     if self.channel.is_full() {
                         let _ = self.channel.try_receive();
                     }
-                    let _ = self.channel.try_send(observation);
+                    let _ = self.channel.try_send((Instant::now(), observation));
                 }
             }
         }

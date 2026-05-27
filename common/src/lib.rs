@@ -11,3 +11,5 @@ pub mod reading;
 
 #[cfg(feature = "wire")]
 pub mod frame;
+
+pub mod device_id;

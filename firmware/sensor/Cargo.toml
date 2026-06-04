@@ -19,6 +19,7 @@ nrf-sdc = { version = "0.4.0", features = ["defmt", "nrf52840", "peripheral"] }
 panic-probe = "1.0.0"
 static_cell = "2.1.1"
 trouble-host = { version = "0.6.0", features = ["defmt"] }
+bme680 = "0.6.0"
 
 [[bin]]
 name = "homescope-sensor"

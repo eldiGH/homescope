@@ -1,17 +1,21 @@
 #![no_std]
 #![no_main]
 
+use crate::bme688::read_bme;
 use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_nrf::mode::Async;
-use embassy_nrf::peripherals::RNG;
-use embassy_nrf::{bind_interrupts, rng};
+use embassy_nrf::peripherals::{self, RNG};
+use embassy_nrf::twim::Twim;
+use embassy_nrf::{bind_interrupts, rng, twim};
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
+
 use {defmt_rtt as _, panic_probe as _};
 
 mod ble_advertise;
+mod bme688;
 
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -20,6 +24,7 @@ bind_interrupts!(struct Irqs {
     RADIO => nrf_sdc::mpsl::HighPrioInterruptHandler;
     TIMER0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
     RTC0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
+    TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
 });
 
 #[embassy_executor::task]
@@ -38,6 +43,14 @@ fn build_sdc<'d, const N: usize>(
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
+
+    let config = twim::Config::default();
+    static RAM_BUFFER: ConstStaticCell<[u8; 16]> = ConstStaticCell::new([0; _]);
+
+    let twim = Twim::new(p.TWISPI0, Irqs, p.P0_04, p.P0_05, config, RAM_BUFFER.take());
+    let _ = read_bme(twim).await;
+
+    return;
 
     let mut led = embassy_nrf::gpio::Output::new(
         p.P0_30,

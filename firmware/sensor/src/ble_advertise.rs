@@ -1,6 +1,6 @@
 use bt_hci::cmd::le::*;
 use bt_hci::controller::ControllerCmdSync;
-use defmt::info;
+use defmt::{info, unwrap};
 use embassy_futures::join::join;
 use embassy_nrf::gpio::Output;
 use embassy_time::{Duration, Timer};
@@ -56,32 +56,33 @@ where
                 };
                 seq += 1;
 
-                let len = AdStructure::encode_slice(
+                let len = unwrap!(AdStructure::encode_slice(
                     &[AdStructure::ManufacturerSpecificData {
                         company_identifier: 0xFFFF,
                         payload: payload.as_bytes(),
                     }],
                     &mut adv_data[..],
-                )
-                .unwrap();
-
+                ));
                 let params = AdvertisementParameters {
                     interval_max: Duration::from_millis(20),
                     interval_min: Duration::from_millis(20),
                     ..Default::default()
                 };
 
-                let _advertiser = peripheral
-                    .advertise(
-                        &params,
-                        Advertisement::NonconnectableNonscannableUndirected {
-                            adv_data: &adv_data[..len],
-                        },
-                    )
-                    .await
-                    .unwrap();
+                let sets = [AdvertisementSet {
+                    params,
+                    data: Advertisement::ExtNonconnectableNonscannableUndirected {
+                        anonymous: false,
+                        adv_data: &adv_data[..len],
+                    },
+                    address: None,
+                }];
 
-                Timer::after_millis(60).await;
+                let mut handles = AdvertisementSet::handles(&sets);
+
+                let _advertiser = unwrap!(peripheral.advertise_ext(&sets, &mut handles).await);
+
+                Timer::after_millis(150).await;
             }
 
             led_pin.set_high();

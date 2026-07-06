@@ -16,7 +16,7 @@ embassy-futures = "0.1.2"
 embassy-nrf = { version = "0.10.0", features = ["defmt", "nrf52840", "time", "time-driver-rtc1"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }
 nrf-sdc = { version = "0.4.0", features = ["defmt", "nrf52840", "peripheral", "central"] }
-panic-probe = "1.0.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 static_cell = "2.1.1"
 trouble-host = { version = "0.6.0", features = ["defmt", "scan"] }
 heapless = "0.9.3"

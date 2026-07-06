@@ -32,7 +32,11 @@ fn build_sdc<'d, const N: usize>(
     mpsl: &'d MultiprotocolServiceLayer,
     mem: &'d mut sdc::Mem<N>,
 ) -> Result<nrf_sdc::SoftdeviceController<'d>, nrf_sdc::Error> {
-    sdc::Builder::new()?.support_adv().build(p, rng, mpsl, mem)
+    sdc::Builder::new()?
+        .support_ext_adv()
+        .support_le_coded_phy()
+        .default_tx_power(8)?
+        .build(p, rng, mpsl, mem)
 }
 
 #[embassy_executor::main]

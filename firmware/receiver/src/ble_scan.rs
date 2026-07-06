@@ -1,8 +1,8 @@
 use core::cell::Cell;
 
-use bt_hci::cmd::le::LeSetScanParams;
+use bt_hci::cmd::le::{LeSetExtScanEnable, LeSetExtScanParams};
 use bt_hci::controller::ControllerCmdSync;
-use defmt::info;
+use defmt::{info, unwrap};
 use embassy_futures::join::join;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
 use embassy_time::{Duration, Instant};
@@ -17,7 +17,7 @@ pub async fn run<C, const N: usize>(
     controller: C,
     channel: &'_ Channel<NoopRawMutex, (Instant, SensorObservation), N>,
 ) where
-    C: Controller + ControllerCmdSync<LeSetScanParams>,
+    C: Controller + ControllerCmdSync<LeSetExtScanParams> + ControllerCmdSync<LeSetExtScanEnable>,
 {
     // Using a fixed "random" address can be useful for testing. In real scenarios, one would
     // use e.g. the MAC 6 byte array as the address (how to get that varies by the platform).
@@ -47,7 +47,7 @@ pub async fn run<C, const N: usize>(
             window: Duration::from_secs(1),
             ..Default::default()
         };
-        let mut _session = scanner.scan(&config).await.unwrap();
+        let mut _session = unwrap!(scanner.scan_ext(&config).await);
         // Scan forever
 
         core::future::pending::<()>().await
@@ -61,7 +61,7 @@ struct PacketHandler<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
-    fn on_adv_reports(&self, reports: bt_hci::param::LeAdvReportsIter) {
+    fn on_ext_adv_reports(&self, reports: bt_hci::param::LeExtAdvReportsIter) {
         for report in reports {
             let Ok(report) = report else {
                 continue;

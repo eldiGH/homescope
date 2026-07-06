@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     io::ErrorKind,
     process,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -8,6 +8,7 @@ use std::{
 use axum::{Router, extract::State, response::Html, routing::get};
 use futures::StreamExt;
 use homescope_common::{
+    device_id::DeviceId,
     frame::{FRAME_MAGIC_BYTES, FRAME_SIZE, Frame},
     observation::SensorObservation,
     reading::SensorReading,
@@ -170,220 +171,172 @@ async fn main() {
     });
 
     tokio::spawn(async move {
-        // --- 1. SLIDING WINDOW SETUP ---
+        // --- SLIDING WINDOW BENCHMARK ---
+        //
+        // The window holds every packet from the last `window_duration`.
+        // Within one sensor run seqs are strictly increasing, so the number of
+        // packets the sensor actually sent inside the window is simply
+        // `last_seq - first_seq + 1` — reliability needs no cadence config.
         let mut interval = time::interval(Duration::from_secs(1));
-        let mut window_buffer: VecDeque<ReadingRecord> = VecDeque::new();
-        let window_duration = Duration::from_secs(5);
+        let mut window: VecDeque<ReadingRecord> = VecDeque::new();
+        let window_duration = Duration::from_secs(10);
 
-        // --- 2. GLOBAL BENCHMARK STATE ---
-        let mut global_count: u64 = 0;
-        let mut global_rssi_min: i8 = i8::MAX;
-        let mut global_rssi_max: i8 = i8::MIN;
-        let mut global_rssi_sum: i64 = 0;
-        let mut global_rssi_histogram = [0u64; 256];
+        // Lock onto the first device seen; packets from other sensors are
+        // counted and ignored so they cannot corrupt the numbers.
+        let mut device: Option<DeviceId> = None;
+        let mut other_device_packets: u64 = 0;
 
-        // Sequence & Reliability Tracking
+        // Per-run state. A "run" ends when the sensor reboots, detected by
+        // seq going backwards; all counters below then start over.
         let mut first_seq: Option<u32> = None;
         let mut highest_seq: Option<u32> = None;
-        let mut seen_seqs: HashSet<u32> = HashSet::new();
-
-        let mut total_dupes: u64 = 0;
-        let mut max_consecutive_drops: u64 = 0;
-        let mut current_consecutive_drops: u64 = 0;
+        let mut run_received: u64 = 0;
+        let mut run_dupes: u64 = 0;
+        let mut run_started = Instant::now();
+        let mut restarts: u32 = 0;
+        let mut last_packet_at: Option<Instant> = None;
 
         loop {
             tokio::select! {
-                            // ==========================================
-                            // EVENT A: 1-SECOND TICK (REPORTING)
-                            // ==========================================
-                            _ = interval.tick() => {
-                                let now = Instant::now();
+                // ==========================================
+                // EVENT A: 1-SECOND TICK (REPORTING)
+                // ==========================================
+                _ = interval.tick() => {
+                    let now = Instant::now();
 
-                                // 1. Sliding Window: Pop records older than 5 seconds
-                                while let Some(record) = window_buffer.front() {
-                                    if now.duration_since(record.timestamp) > window_duration {
-                                        window_buffer.pop_front();
-                                    } else {
-                                        break; // Front is within 5s, so the rest are too
-                                    }
-                                }
+                    while let Some(record) = window.front() {
+                        if now.duration_since(record.timestamp) > window_duration {
+                            window.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
 
-                                if window_buffer.is_empty() {
-                                    println!("--- [Sliding 5s Window: NO DATA] ---");
-                                    continue;
-                                }
+                    let win_secs = window_duration.as_secs();
 
-                                let window_count = window_buffer.len();
+                    let window_part = if window.is_empty() {
+                        let last_seen = match last_packet_at {
+                            Some(t) => format!("last packet {:.1}s ago", now.duration_since(t).as_secs_f32()),
+                            None => "no packet seen yet".to_string(),
+                        };
+                        format!("⛔ [LAST {win_secs}s] NO PACKETS — {last_seen}")
+                    } else {
+                        let win_first_seq = window.front().unwrap().reading.seq;
+                        let win_last_seq = window.back().unwrap().reading.seq;
+                        let last_age = now
+                            .duration_since(window.back().unwrap().timestamp)
+                            .as_secs_f32();
 
-                                // 2. LOCAL RSSI STATS (Min, Max, Avg, Median)
-                                let mut window_rssis: Vec<i8> = window_buffer.iter().map(|r| r.reading.rssi).collect();
-                                window_rssis.sort_unstable();
+                        let expected = u64::from(win_last_seq - win_first_seq) + 1;
+                        let received = window.len() as u64;
+                        let reliability = received as f64 / expected as f64 * 100.0;
 
-                                let window_rssi_min = window_rssis.first().copied().unwrap_or(0);
-                                let window_rssi_max = window_rssis.last().copied().unwrap_or(0);
-                                let window_rssi_sum: i32 = window_rssis.iter().map(|&r| r as i32).sum();
-                                let window_rssi_avg = window_rssi_sum as f32 / window_count as f32;
+                        let mut rssis: Vec<i8> = window.iter().map(|r| r.reading.rssi).collect();
+                        rssis.sort_unstable();
+                        let rssi_min = rssis[0];
+                        let rssi_max = rssis[rssis.len() - 1];
+                        let rssi_med = if rssis.len().is_multiple_of(2) {
+                            (rssis[rssis.len() / 2 - 1] as f32 + rssis[rssis.len() / 2] as f32) / 2.0
+                        } else {
+                            rssis[rssis.len() / 2] as f32
+                        };
 
-                                let window_rssi_med = if window_count == 0 {
-                                    0.0
-                                } else if window_count.is_multiple_of(2){
-                                    let mid = window_count / 2;
-                                    (window_rssis[mid - 1] as f32 + window_rssis[mid] as f32) / 2.0
-                                } else {
-                                    window_rssis[window_count / 2] as f32
-                                };
-
-                                // 3. LOCAL TIMING STATS (Intervals & Jitter)
-                                let mut intervals_ms = Vec::with_capacity(window_count.saturating_sub(1));
-
-                                // .make_contiguous() safely gives us a flat slice to run .windows() on
-                                for pair in window_buffer.make_contiguous().windows(2) {
-                                    let diff = pair[1].timestamp.duration_since(pair[0].timestamp).as_secs_f32() * 1000.0;
-                                    intervals_ms.push(diff);
-                                }
-                                intervals_ms.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-
-                                let (int_min, int_max, int_avg, int_med) = if intervals_ms.is_empty() {
-                                    (0.0, 0.0, 0.0, 0.0)
-                                } else {
-                                    let min = *intervals_ms.first().unwrap();
-                                    let max = *intervals_ms.last().unwrap();
-                                    let sum: f32 = intervals_ms.iter().sum();
-                                    let avg = sum / intervals_ms.len() as f32;
-
-                                    let mid = intervals_ms.len() / 2;
-                                    let med = if intervals_ms.len() % 2 == 0 {
-                                        (intervals_ms[mid - 1] + intervals_ms[mid]) / 2.0
-                                    } else {
-                                        intervals_ms[mid]
-                                    };
-                                    (min, max, avg, med)
-                                };
-
-            // 4. GLOBAL RELIABILITY & RSSI STATS
-                                let highest = highest_seq.unwrap_or(0);
-                                let first = first_seq.unwrap_or(0);
-
-                                let expected_packets = (highest + 1).saturating_sub(first) as u64;
-                                let unique_received = global_count.saturating_sub(total_dupes);
-                                let total_dropped = expected_packets.saturating_sub(unique_received);
-
-                                let reliability_pct = if expected_packets > 0 {
-                                    (unique_received as f64 / expected_packets as f64) * 100.0
-                                } else {
-                                    100.0
-                                };
-
-                                // -> NEW: Calculate Global Average
-                                let global_rssi_avg = if global_count > 0 {
-                                    global_rssi_sum as f64 / global_count as f64
-                                } else {
-                                    0.0
-                                };
-
-                                // -> NEW: Calculate Global Median from the Histogram
-                                let mut global_rssi_med = 0.0;
-                                if global_count > 0 {
-                                    let mut running_count = 0;
-                                    let target = global_count / 2;
-                                    for (idx, &count) in global_rssi_histogram.iter().enumerate() {
-                                        running_count += count;
-                                        if running_count > target {
-                                            // Map the index (0..255) back to the RSSI value (-128..127)
-                                            global_rssi_med = (idx as i16 - 128) as f64;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // 5. PRINT BENCHMARK REPORT
-                                let latest_info = if let Some(latest) = window_buffer.back() {
-                                    format!(
-                                        "📡 RSSI: {}dBm | 🔢 Seq: {} | ⏱️ Interval: {:.1}ms",
-                                        latest.reading.rssi,
-                                        latest.reading.seq,
-                                        intervals_ms.last().unwrap_or(&0.0)
-                                    )
-                                } else {
-                                    "No current data".to_string()
-                                };
-
-                                let report = format!(
-                                    "========== BENCHMARK TICK ==========\n\
-                                    📊 [5s SLIDING] Packets: {}  Total Packets: {}\n\
-                                    📡   RSSI     (Min/Med/Avg/Max): {} / {:.1} / {:.1} / {}\n\
-                                    ⏱️   Interval (Min/Med/Avg/Max): {:.1}ms / {:.1}ms / {:.1}ms / {:.1}ms\n\
-                                    🌍 [GLOBAL]     Reliability: {:.3}% | Total Dropped: {}\n\
-                                                    RSSI (Min/Med/Avg/Max): {} / {:.1} / {:.1} / {}\n\
-                                    ⚠️ [HEALTH]     Dupes: {} | Max Consecutive Drops: {}\n\
-                                    ====================================\n\
-                                    📥 [LATEST]     {}\n\
-                                    ====================================\n",
-                                    window_count, unique_received,
-                                    window_rssi_min, window_rssi_med, window_rssi_avg, window_rssi_max,
-                                    int_min, int_med, int_avg, int_max,
-                                    reliability_pct, total_dropped,
-                                    global_rssi_min, global_rssi_med, global_rssi_avg, global_rssi_max,
-                                    total_dupes, max_consecutive_drops,
-                                    latest_info
-                                );
-
-                                println!("{}", report);
-
-                                let _ = ui_tx.send(report);
-
-                                // Prevent memory leak: Prune the HashSet of old sequences (keep last 1000)
-                                seen_seqs.retain(|&s| s > highest.saturating_sub(1000));
-                            }
-
-                            // ==========================================
-                            // EVENT B: NEW PACKET RECEIVED
-                            // ==========================================
-                            Some(record) = rx.recv() => {
-                                let seq = record.reading.seq;
-                                let rssi = record.reading.rssi;
-
-                                // 1. Global RSSI Tracking
-                                global_count += 1;
-                                global_rssi_sum += rssi as i64;
-                                global_rssi_min = global_rssi_min.min(rssi);
-                                global_rssi_max = global_rssi_max.max(rssi);
-
-                                // Safely map -128..127 to index 0..255 for the zero-overhead histogram
-                                let hist_idx = (rssi as i16 + 128) as usize;
-                                global_rssi_histogram[hist_idx] += 1;
-
-                                // 2. Sequence and Dupe Tracking
-                                if first_seq.is_none() {
-                                    first_seq = Some(seq);
-                                }
-
-                                // .insert() returns false if the item was already in the set
-                                if !seen_seqs.insert(seq) {
-                                    total_dupes += 1;
-                                }
-
-                                // 3. Consecutive Drop Tracking
-                                if let Some(highest) = highest_seq {
-                                    if seq > highest + 1 {
-                                        // A gap is detected! (e.g. expected 5, got 8 -> gap of 2)
-                                        let gap = (seq - highest - 1) as u64;
-                                        current_consecutive_drops += gap;
-                                        max_consecutive_drops = max_consecutive_drops.max(current_consecutive_drops);
-                                    } else if seq == highest + 1 {
-                                        // Perfect continuity, reset consecutive drop counter
-                                        current_consecutive_drops = 0;
-                                    }
-
-                                    highest_seq = Some(highest.max(seq));
-                                } else {
-                                    highest_seq = Some(seq);
-                                }
-
-                                // 4. Add to the back of the Sliding Window
-                                window_buffer.push_back(record);
+                        // Longest blackout inside the window
+                        let mut worst_gap_packets: u64 = 0;
+                        let mut worst_gap_secs: f32 = 0.0;
+                        for pair in window.make_contiguous().windows(2) {
+                            let gap = u64::from(pair[1].reading.seq - pair[0].reading.seq) - 1;
+                            if gap > worst_gap_packets {
+                                worst_gap_packets = gap;
+                                worst_gap_secs = pair[1]
+                                    .timestamp
+                                    .duration_since(pair[0].timestamp)
+                                    .as_secs_f32();
                             }
                         }
+
+                        format!(
+                            "🎯 [LAST {win_secs}s] RELIABILITY: {reliability:.0}%  ({received}/{expected})\n\
+                             📡 RSSI (min/med/max): {rssi_min} / {rssi_med:.1} / {rssi_max} dBm\n\
+                             🕳 worst gap: {worst_gap_packets} packets ({worst_gap_secs:.1}s) | last packet {last_age:.1}s ago"
+                        )
+                    };
+
+                    let run_part = {
+                        let expected = match (first_seq, highest_seq) {
+                            (Some(first), Some(highest)) => u64::from(highest - first) + 1,
+                            _ => 0,
+                        };
+                        let reliability = if expected > 0 {
+                            run_received as f64 / expected as f64 * 100.0
+                        } else {
+                            100.0
+                        };
+                        let run_secs = now.duration_since(run_started).as_secs();
+
+                        format!(
+                            "🌍 [RUN] {reliability:.1}% ({run_received}/{expected}) over {run_secs}s | dupes: {run_dupes}\n\
+                             ⚠️ [HEALTH] sensor restarts: {restarts} | foreign packets ignored: {other_device_packets}"
+                        )
+                    };
+
+                    let report = format!(
+                        "========== BENCHMARK TICK ==========\n\
+                         {window_part}\n\
+                         ------------------------------------\n\
+                         {run_part}\n\
+                         ====================================\n"
+                    );
+
+                    println!("{report}");
+                    let _ = ui_tx.send(report);
+                }
+
+                // ==========================================
+                // EVENT B: NEW PACKET RECEIVED
+                // ==========================================
+                Some(record) = rx.recv() => {
+                    match device {
+                        None => device = Some(record.reading.device_id),
+                        Some(locked) if locked != record.reading.device_id => {
+                            other_device_packets += 1;
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    let seq = record.reading.seq;
+                    last_packet_at = Some(record.timestamp);
+
+                    match highest_seq {
+                        // Same seq again: a duplicate slipped past the receiver's dedup
+                        Some(highest) if seq == highest => run_dupes += 1,
+
+                        // Seq went backwards: the sensor rebooted — start a fresh run
+                        Some(highest) if seq < highest => {
+                            restarts += 1;
+                            window.clear();
+                            first_seq = Some(seq);
+                            highest_seq = Some(seq);
+                            run_received = 1;
+                            run_dupes = 0;
+                            run_started = record.timestamp;
+                            window.push_back(record);
+                        }
+
+                        // Normal case: a new, higher seq
+                        _ => {
+                            if first_seq.is_none() {
+                                first_seq = Some(seq);
+                                run_started = record.timestamp;
+                            }
+                            highest_seq = Some(seq);
+                            run_received += 1;
+                            window.push_back(record);
+                        }
+                    }
+                }
+            }
         }
     });
 

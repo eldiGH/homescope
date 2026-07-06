@@ -1,6 +1,6 @@
 # Homescope — project orientation
 
-**Homescope** is an ambient-sensor stack: battery-powered BLE 5.0 sensors (Seeed XIAO nRF52840 Plus) broadcasting temperature / humidity / pressure data, picked up by a dedicated **nRF52840 USB-CDC receiver dongle** plugged into a Raspberry Pi gateway, which decodes the framed packets and (will) decrypt + publish them to a local Mosquitto MQTT broker. A separate API service will subscribe to MQTT and store data in TimescaleDB for visualization in Grafana.
+**Homescope** is an ambient-sensor stack: battery-powered BLE 5.0 sensors broadcasting temperature / humidity / pressure via **Coded-PHY extended advertising**, picked up by a dedicated **nRF52840 USB-CDC receiver dongle** plugged into a Raspberry Pi gateway, which decodes the framed packets and publishes them to a local Mosquitto MQTT broker (payload crypto planned). A separate API service will subscribe to MQTT and store data in TimescaleDB for visualization in Grafana. Hardware is mid-migration (2026-07): XIAO nRF52840 Plus dev boards (retired from RF duty — measured antenna verdict below) → Raytac MDBT50Q-DB-40 eval boards → custom PCB with the MDBT50Q module.
 
 Layout: monorepo with two Cargo workspaces split by target architecture (firmware vs host), plus a shared `common` crate referenced by both.
 
@@ -23,9 +23,12 @@ homescope/
 ├── common/                 # shared types — homescope-common (no_std-by-default)
 │   └── src/
 │       ├── lib.rs
-│       ├── packet.rs       # SensorPacket (repr(C, packed)), framing, CRC
+│       ├── device_id.rs    # DeviceId(u64) newtype (FICR-sourced)
+│       ├── packet.rs       # SensorPacket (repr(C, packed)) — over-the-air payload
+│       ├── observation.rs  # SensorObservation = packet + receiver RSSI/age
+│       ├── frame.rs        # Frame: magic + payload + CRC-16/IBM-SDLC
 │       └── reading.rs      # SensorReading (serde, human units)
-├── gateway/                # Pi-side receiver decoder + (future) MQTT publisher
+├── gateway/                # Pi-side receiver decoder + MQTT publisher + benchmark page
 │   └── src/main.rs         # homescope-gateway
 ├── firmware/
 │   ├── Cargo.toml          # firmware workspace: sensor, receiver
@@ -58,11 +61,12 @@ homescope/
 
 ## Current state
 
-- ✅ **Sensor firmware** (`firmware/sensor/`): BLE advertising works end-to-end. Broadcasts a `ManufacturerSpecificData` packet every 5 seconds via the `NonconnectableNonscannableUndirected` extended-advertising mode, visible in nRF Connect. 20 ms interval × 3 events per burst (~60 ms total radio time, spec minimum). LED heartbeat blinks once per burst.
-- ✅ **Receiver firmware** (`firmware/receiver/`): Scans for our manufacturer-ID advertisements (Coded PHY S=2), framed packets emitted over USB-CDC. Robust to host disconnect/reconnect — DTR-aware writes with disconnect-race in `select`, drop-oldest backlog channel, sequence-based dedup, post-DTR grace period to avoid hammering kernel before its post-open ioctl chain completes.
-- ✅ **Common crate**: `SensorPacket` (wire), `SensorReading` (app), `write_frame` / `parse_frame` / `checksum` / `frame()` helpers, CRC-16/IBM-SDLC. Frame layout (magic + payload + CRC) is fully encapsulated.
-- ✅ **Gateway v1 receiver path**: `serial2-tokio` + `tokio_util::codec::Decoder<Item = SensorPacket>` over `BytesMut`. Reads `/dev/ttyACM0` (or `/dev/homescope-receiver` via udev symlink), validates magic + CRC, decodes packet, prints.
-- ⏳ **Gateway v1 MQTT publish**: not yet wired.
+- ✅ **Sensor firmware** (`firmware/sensor/`): true extended advertising on Coded PHY via `advertise_ext` (`ExtNonconnectableNonscannableUndirected`; trouble's plain `advertise()` is legacy-only — it burned us, see field findings). 20 ms interval, advertiser held ~400 ms → ~20 events/burst. TX +8 dBm via `Builder::default_tx_power(8)` (the per-set HCI field is ignored by the SDC).
+- ✅ **Receiver firmware** (`firmware/receiver/`): extended scanning on Coded PHY (`scan_ext` + `on_ext_adv_reports`), framed `SensorObservation`s (packet + RSSI + age_ms) over USB-CDC. Robust to host disconnect/reconnect — DTR-aware writes with disconnect-race in `select`, drop-oldest backlog channel, sequence-based dedup, post-DTR grace period.
+- ✅ **Common crate**: `SensorPacket` (air), `SensorObservation` (receiver→gateway), `SensorReading` (app), `DeviceId`, `Frame` (magic + payload + CRC-16/IBM-SDLC) — see docs/protocol.md v0.2 (30-byte frames).
+- ✅ **Gateway**: serial decode (`tokio_util` `Decoder` over `BytesMut`), MQTT publish to `homescope/sensors/<device-id>/reading`, and a live range-survey page on port 3000 (10 s rolling delivery %, RSSI stats, sensor-reboot-safe).
+- ⏳ **S=8 forcing** (raw-HCI `LeSetExtAdvParamsV2` on the sensor) — next firmware task, worth +4-5 dB.
+- ⏳ **Hardware migration**: order 2× Raytac MDBT50Q-DB-40 → re-run house survey → custom PCB (MDBT50Q module, VDDH battery topology).
 - ⏳ **API, deploy, sensor drivers, crypto, sleep optimization**: not yet started.
 
 ## Build & flash
@@ -95,7 +99,7 @@ To flash: double-tap RESET on the XIAO so the bootloader USB drive appears, then
 
 ## Key facts
 
-- **Board**: Seeed XIAO nRF52840 **Plus** — the "Plus" variant matters; see flash layout below
+- **Boards**: Seeed XIAO nRF52840 **Plus** on the bench (retired from RF/range duty 2026-07 — chip antenna measured ~10 dB short: −67 dBm @ 1 m @ +8 dBm) → Raytac **MDBT50Q-DB-40** eval boards (to order) → custom PCB with the MDBT50Q module. The XIAO-specific flash layout below applies to XIAO units only.
 - **Target**: `thumbv7em-none-eabi` (Cortex-M4F on nRF52840)
 - **Bootloader**: Adafruit UF2 v0.9.2 **with Nordic SoftDevice S140 7.3.0 pre-installed** (Board-ID: `nRF52840-SeeedXiao-v1`)
 - **Flash layout** (1 MB total):
@@ -104,26 +108,29 @@ To flash: double-tap RESET on the XIAO so the bootloader USB drive appears, then
   - `0x00027000+`: Application (868 KB available)
 - **UF2 family ID**: `0xADA52840` (Adafruit nRF52 series)
 - **Application base address**: `0x00027000` — set in each `firmware/*/memory.x` and in the `--base` arg of `tools/uf2/uf2conv.py`
-- **Power (sensor)**: 2× AA Energizer Lithium L91 → XIAO 3V3 pin direct (no external regulator). See [docs/architecture.md](docs/architecture.md#power).
+- **Power (sensor)**: 2× AA Energizer Lithium L91 (Li-FeS₂) → XIAO 3V3 pin direct on dev boards; the custom PCB feeds **VDDH** instead (internal REG0 buck, `REGOUT0 = 3.0 V`) to eliminate the fresh-pair ~3.6 V absolute-max edge. See [docs/architecture.md](docs/architecture.md#power).
 - **Power (receiver)**: USB bus power from the Pi. Plug-and-play.
+- **Sensors (decided 2026-05, revised 2026-07)**: all battery nodes use **SHT45** (T/H, ±0.1 °C / ±1 % RH, no heater). **Pressure (BMP581) on exactly one designated *indoor* node** — pressure is house-wide and indoor ≈ outdoor, so the barometer gets friendly conditions and the gateway stays a pure bridge (supersedes the earlier BMP390-on-outdoor-node plan; BMP581 = newer part, async `bmp5` Rust driver). Outdoor node: SHT45 + optional **LTR390** (light/UV). **BME688 / air quality dropped from the battery fleet** (raw gas ≠ IAQ without BSEC, and the gas heater self-heats T/H); IAQ deferred to an optional USB/mains-powered BME68x + BSEC node. Node variants are one codebase behind Cargo features. See [docs/architecture.md](docs/architecture.md#sensors).
+- **BLE/SDC gotchas (hard-won 2026-07)**: SDC features are build-time opt-ins (`support_ext_adv`, `support_le_coded_phy`, `support_ext_scan`); ext adv / coded PHY / ext scan exist **only in the multirole SDC library** (enable both `peripheral` + `central` cargo features on nrf-sdc); TX power only via `default_tx_power()`; trouble's `advertise()` is legacy-only (use `advertise_ext`); `panic-probe` needs the `print-defmt` feature or panics are silent halts. Full list: [docs/architecture.md — field findings](docs/architecture.md#field-findings--rf-debugging-2026-07).
 - **Probe**: SWD probe (Pi Pico DAPLink or similar) wired and working. Enables defmt-RTT log capture and breakpoint debugging via the VSCode probe-rs-debugger extension.
 - **Logging**: `defmt-rtt`. Logs visible in the VSCode Debug Console during a debug session.
 
 ## BLE design summary
 
-- **Advertising mode**: non-connectable, non-scannable, undirected (`ADV_NONCONN_IND` via BLE 5.0 extended advertising)
-- **PHY**: Coded PHY S=2 by default (~4× range vs 1M PHY at 2× airtime)
-- **Interval**: 20 ms (spec minimum for extended non-connectable); 3 events per burst → ~60 ms radio time
-- **Burst cadence**: every 5 s during testing; production target is 1–5 min with System OFF sleep between bursts
-- **Payload**: `ManufacturerSpecificData` with company ID `0xFFFF` (testing) carrying a `#[repr(C, packed)]` `SensorPacket` struct — direct binary, no serialization framework
+- **Advertising mode**: non-connectable, non-scannable, undirected **extended advertising** (`ExtNonconnectableNonscannableUndirected` via `Peripheral::advertise_ext`)
+- **PHY**: Coded PHY (primary + secondary). Coding is currently the SDC default; forcing **S=8** (−103 dBm sensitivity) via `LeSetExtAdvParamsV2` is the next firmware task
+- **TX power**: +8 dBm via nrf-sdc `Builder::default_tx_power(8)` — the per-set HCI request field is ignored by the SDC
+- **Interval/burst**: 20 ms × ~20 events (~400 ms); AUX payloads channel-hop per event, so a burst doubles as frequency diversity (per-packet RSSI swings ±10-15 dB indoors — judge medians)
+- **Burst cadence**: ~0.5 s during benchmarking; production target is 1–5 min with System OFF sleep between bursts
+- **Payload**: `ManufacturerSpecificData` with company ID `0xFFFF` (testing) carrying a `#[repr(C, packed)]` `SensorPacket` struct — direct binary, no serialization framework; extended adv gives 254 B headroom (the planned AEAD tag never fit legacy's 31 B)
 - **Security (planned)**: ChaCha20-Poly1305 AEAD with per-device keys, 4-byte sequence counter for replay protection. Not implemented yet.
 
 ## USB-CDC wire protocol (receiver → gateway)
 
 See [docs/protocol.md](docs/protocol.md) for the full spec. Quick summary:
 
-- 18-byte frame: 2-byte magic `HS` + 14-byte `SensorPacket` + 2-byte CRC-16/IBM-SDLC over the payload (little-endian on the wire).
-- Gateway uses `tokio_util::codec::Decoder` over `BytesMut` with magic-search via `memchr` and frame validation via `SensorPacket::parse_frame`.
+- 30-byte frame: 2-byte magic `HS` + 26-byte `SensorObservation` (air-packet fields + receiver-side `rssi`/`age_ms` + 64-bit `DeviceId`) + 2-byte CRC-16/IBM-SDLC over the payload (little-endian on the wire).
+- Gateway uses `tokio_util::codec::Decoder` over `BytesMut` with magic-search via `memchr` and frame validation via `Frame::try_from_bytes`.
 - The actual decoder implementation is shorter than the spec — `common` encapsulates magic/CRC/serialization.
 
 ## Where to find things

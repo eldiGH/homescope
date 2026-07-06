@@ -79,6 +79,8 @@ struct SensorObservation {
 
 Fields marked "receiver" are observed/computed by the receiver dongle and are not part of the over-the-air BLE payload — they live only in the gateway-bound `SensorObservation`. The sensor-side type (`SensorPacket`, defined in [common/src/packet.rs](../common/src/packet.rs)) is a strict subset.
 
+> **Note — most nodes carry no barometer.** Exactly one designated **indoor** node has a BMP581 (pressure is house-wide; see [architecture.md](architecture.md#sensors)). Until the planned type discriminator (see [Known limitations](#known-limitations-will-change-in-future-versions)) makes the field optional, barometer-less nodes send `pressure_pa = 0`; consumers should treat `0` as "no reading," not a real 0 Pa.
+
 ## Age and timestamps
 
 Sensors are battery-powered deep-sleep nodes with no wall clock. The receiver

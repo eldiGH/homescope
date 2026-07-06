@@ -1,6 +1,6 @@
 # Homescope
 
-Battery-powered ambient sensors (temperature, humidity, pressure) → BLE 5.0 advertising → nRF52840 USB-CDC receiver dongle → Raspberry Pi gateway → (planned) MQTT → TimescaleDB → Grafana.
+Battery-powered ambient sensors (temperature & humidity per room, plus barometric pressure on one designated indoor node) → BLE 5.0 Coded-PHY extended advertising → nRF52840 USB-CDC receiver dongle → Raspberry Pi gateway → MQTT → (planned) TimescaleDB → Grafana.
 
 Designed for **multi-year battery life** on 2× AA lithium cells, with **per-device encrypted payloads** (planned) and a deliberately simple wire protocol. See [docs/architecture.md](docs/architecture.md) for the full design rationale and tradeoffs.
 
@@ -17,8 +17,9 @@ This repo is a monorepo with **two Cargo workspaces** split by target architectu
 
 ## Hardware
 
-- **Sensor & receiver MCU**: Seeed XIAO nRF52840 **Plus** (Cortex-M4F, BLE 5.x). The Plus variant matters — it ships with Nordic SoftDevice S140 in flash, so the application offset is `0x27000`. See [docs/flashing.md](docs/flashing.md).
-- **Sensor power**: 2× AA Energizer Lithium L91 → XIAO 3V3 pin direct. Expected battery life 5–10+ years at 1–5 min reporting cadence.
+- **Sensor & receiver MCU**: nRF52840 (Cortex-M4F, BLE 5.x). Currently Seeed XIAO nRF52840 **Plus** dev boards — being replaced for range reasons (the chip antenna measured ~10 dB short); next: Raytac MDBT50Q-DB-40 eval boards, then a custom PCB with the pre-certified MDBT50Q module. The XIAO ships with Nordic SoftDevice S140 in flash, so its application offset is `0x27000`. See [docs/flashing.md](docs/flashing.md) and [docs/architecture.md](docs/architecture.md#hardware-platform).
+- **Sensors**: SHT45 (temperature/humidity) on every node; BMP581 (pressure) on one designated indoor node, since pressure is house-wide; optionally LTR390 (light/UV) on the outdoor node. Air quality (BME68x + BSEC) is an optional future, separately-powered node. See [docs/architecture.md](docs/architecture.md#sensors).
+- **Sensor power**: 2× AA Energizer Lithium L91 (Li-FeS₂) → XIAO 3V3 pin direct on dev boards; the custom PCB will use the nRF52840's VDDH input instead. Expected battery life 5–10+ years at 1–5 min reporting cadence.
 - **Receiver power**: USB bus power from the Pi.
 - **Gateway host**: Raspberry Pi (any model with USB-A or USB-C and Linux), Mosquitto broker, Rust services as Podman quadlets (planned).
 
@@ -59,22 +60,23 @@ Reads from `/dev/ttyACM0` (or `/dev/homescope-receiver` if a udev symlink is con
 
 ## Wire protocol (receiver → gateway)
 
-18-byte frames over USB-CDC:
+30-byte frames over USB-CDC:
 
 ```text
-+--------+--------+--------------------+---------------+
-| 0x48   | 0x53   | SensorPacket (14B) | CRC-16 (2B LE)|
-+--------+--------+--------------------+---------------+
++--------+--------+--------------------------+---------------+
+| 0x48   | 0x53   | SensorObservation (26 B) | CRC-16 (2B LE)|
++--------+--------+--------------------------+---------------+
 ```
 
-CRC is CRC-16/IBM-SDLC over the payload bytes. Both ends share serialization via `SensorPacket::write_frame` / `parse_frame` from `common`. See [docs/protocol.md](docs/protocol.md) for the full spec.
+CRC is CRC-16/IBM-SDLC over the payload bytes. `SensorObservation` is the over-the-air `SensorPacket` plus receiver-observed metadata (RSSI, age). Both ends share framing via `Frame` from `common`. See [docs/protocol.md](docs/protocol.md) for the full spec.
 
 ## Status
 
-- ✅ Sensor firmware: BLE advertising works end-to-end
-- ✅ Receiver firmware: USB-CDC framing, robust to host disconnect/reconnect
-- ✅ Gateway: USB-CDC reader + frame decoder
-- ⏳ Gateway MQTT publish, API service, TimescaleDB, Grafana, container packaging
+- ✅ Sensor firmware: Coded-PHY extended advertising, +8 dBm, ~20-event bursts
+- ✅ Receiver firmware: coded extended scanning, USB-CDC framing, robust to host disconnect/reconnect
+- ✅ Gateway: USB-CDC decoder, MQTT publish, live range-benchmark page (port 3000)
+- ⏳ S=8 coding refactor; Raytac MDBT50Q hardware migration (the XIAO antenna is the measured bottleneck)
+- ⏳ API service, TimescaleDB, Grafana, container packaging
 - ⏳ Per-device ChaCha20-Poly1305 AEAD with sequence-counter replay protection
 - ⏳ Sleep/power optimization (System OFF + RTC wakeup), sensor drivers
 

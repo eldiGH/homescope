@@ -90,7 +90,7 @@ async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
 
     let mut led = embassy_nrf::gpio::Output::new(
-        p.P0_30,
+        homescope_board::led_pin!(p),
         embassy_nrf::gpio::Level::High,
         embassy_nrf::gpio::OutputDrive::Standard,
     );

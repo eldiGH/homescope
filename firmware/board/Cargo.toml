@@ -1,0 +1,15 @@
+[package]
+name = "homescope-board"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+db40 = []
+xiao = []
+
+[package.metadata.embassy]
+build = [
+  { target = "thumbv7em-none-eabi", artifact-dir = "out/examples/receiver" }
+]
+
+

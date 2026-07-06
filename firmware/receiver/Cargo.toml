@@ -3,8 +3,14 @@ name = "homescope-receiver"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["board-db40"]
+board-db40 = ["homescope-board/db40"]
+board-xiao = ["homescope-board/xiao"]
+
 [dependencies]
 homescope-common = { workspace = true, features = ["wire"] }
+homescope-board = { workspace = true }
 
 bt-hci = { version = "0.8", features = ["defmt"] }
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }

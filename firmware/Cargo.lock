@@ -810,6 +810,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "homescope-board"
+version = "0.1.0"
+
+[[package]]
 name = "homescope-common"
 version = "0.1.0"
 dependencies = [
@@ -833,6 +837,7 @@ dependencies = [
  "embassy-time",
  "embassy-usb",
  "heapless 0.9.3",
+ "homescope-board",
  "homescope-common",
  "nrf-sdc",
  "panic-probe",
@@ -853,6 +858,7 @@ dependencies = [
  "embassy-futures",
  "embassy-nrf",
  "embassy-time",
+ "homescope-board",
  "homescope-common",
  "nrf-sdc",
  "panic-probe",

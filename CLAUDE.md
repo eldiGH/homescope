@@ -66,7 +66,7 @@ homescope/
 - ✅ **Common crate**: `SensorPacket` (air), `SensorObservation` (receiver→gateway), `SensorReading` (app), `DeviceId`, `Frame` (magic + payload + CRC-16/IBM-SDLC) — see docs/protocol.md v0.2 (30-byte frames).
 - ✅ **Gateway**: serial decode (`tokio_util` `Decoder` over `BytesMut`), MQTT publish to `homescope/sensors/<device-id>/reading`, and a live range-survey page on port 3000 (10 s rolling delivery %, RSSI stats, sensor-reboot-safe).
 - ⏳ **S=8 forcing** (raw-HCI `LeSetExtAdvParamsV2` on the sensor) — next firmware task, worth +4-5 dB.
-- ⏳ **Hardware migration**: order 2× Raytac MDBT50Q-DB-40 → re-run house survey → custom PCB (MDBT50Q module, VDDH battery topology).
+- ✅ **Hardware migration, stage 1 (2026-07-03)**: 2× Raytac MDBT50Q-DB-40 in hand, whole-house survey **passed** (worst spot ≥85 % delivery after minor repositioning) → **MDBT50Q-1MV2 validated as the production module**. Remaining: custom PCB (MDBT50Q module, VDDH battery topology).
 - ⏳ **API, deploy, sensor drivers, crypto, sleep optimization**: not yet started.
 
 ## Build & flash
@@ -99,7 +99,8 @@ To flash: double-tap RESET on the XIAO so the bootloader USB drive appears, then
 
 ## Key facts
 
-- **Boards**: Seeed XIAO nRF52840 **Plus** on the bench (retired from RF/range duty 2026-07 — chip antenna measured ~10 dB short: −67 dBm @ 1 m @ +8 dBm) → Raytac **MDBT50Q-DB-40** eval boards (to order) → custom PCB with the MDBT50Q module. The XIAO-specific flash layout below applies to XIAO units only.
+- **Boards**: Raytac **MDBT50Q-DB-40** eval boards are primary since 2026-07-03 (house survey passed) → custom PCB with the validated MDBT50Q-1MV2 module next. Seeed XIAO nRF52840 **Plus** stays as a bench mule only (retired from RF duty — chip antenna ~10 dB short: −67 dBm @ 1 m @ +8 dBm). The XIAO-specific flash layout below applies to XIAO units only.
+- **DB-40 board facts**: no factory bootloader or SoftDevice — application links at `0x00000000` (own `memory.x`, full 1 MB); LEDs LED1/2/3 = P0.13/14/15 (XIAO LED was P0.30), buttons P0.11/12/24/25; SWD via the 1.27 mm Cortex debug header (J1; a 1.27→2.54 adapter bridges to the Pico probe); mini-USB is the nRF52840's own USBD (receiver firmware works as-is). Optional: flash the Adafruit UF2 bootloader (supported target) to restore drag-drop updates — that moves the app base, adjust `memory.x` accordingly.
 - **Target**: `thumbv7em-none-eabi` (Cortex-M4F on nRF52840)
 - **Bootloader**: Adafruit UF2 v0.9.2 **with Nordic SoftDevice S140 7.3.0 pre-installed** (Board-ID: `nRF52840-SeeedXiao-v1`)
 - **Flash layout** (1 MB total):

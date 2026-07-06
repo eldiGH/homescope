@@ -27,8 +27,8 @@ Re-affirmed 2026-07 after a full architecture review: battery life is shelf-life
 **Board strategy (revised 2026-07):**
 
 - **Seeed XIAO nRF52840 Plus** — the original dev-and-production board, now **retired from RF duty**: its chip antenna measured ~10 dB below a proper module (−67 dBm @ 1 m @ +8 dBm against a phone referee, identical on two units; ~0 % delivery through 2 concrete walls at 15 m). Still useful as bench mules for non-RF work. USB-C, UF2 bootloader (Adafruit v0.9.2), LiPo charger.
-- **Raytac MDBT50Q-DB-40 eval boards** — next purchase (2×): the production module family (MDBT50Q, nRF52840) on a correctly designed board, flashable with the existing SWD probe and UF2-capable. Used to re-run the house range survey before committing to a PCB.
-- **Custom PCB with a Raytac MDBT50Q module** (chip-antenna 1MV2 or PCB-antenna P1MV2 — no external antenna) — the deployment target. Pre-certified (FCC/IC/CE/Telec). If the DB-40 survey passes, deploy the 1MV2 — exactly what was tested. Follow the datasheet antenna keep-out (no copper, battery, or enclosure ribs in the zone): this ground-plane discipline is precisely what the XIAO physically couldn't provide.
+- **Raytac MDBT50Q-DB-40 eval boards** — in hand (2×) and **survey-passed 2026-07-03**: whole-house coverage, worst-spot delivery ≥85 % after minor repositioning. Board facts: SWD via 1.27 mm Cortex header (J1), no factory bootloader — app links at `0x0`; LEDs P0.13-15, buttons P0.11/12/24/25; mini-USB = nRF USBD.
+- **Custom PCB with the Raytac MDBT50Q-1MV2** (chip antenna — no external antenna) — the deployment target, validated by the DB-40 survey: we ship exactly what was tested. Pre-certified (FCC/IC/CE/Telec). Follow the datasheet antenna keep-out (no copper, battery, or enclosure ribs in the zone): this ground-plane discipline is precisely what the XIAO physically couldn't provide. Include a 1.27 mm Cortex debug header.
 
 **XIAO flash layout note** (XIAO boards only): the Plus variant ships with Nordic SoftDevice S140 7.3.0 pre-installed (`0x1000–0x26FFF`, 152 KB). Application must start at `0x27000`, not `0x26000`. The SoftDevice is never started by our firmware — we use `nrf-sdc` directly — but it occupies the flash region. See [docs/flashing.md](flashing.md#critical-this-board-ships-with-softdevice-s140-installed). The custom PCB will carry the open-source Adafruit UF2 bootloader (ported board definition) to keep the sealed-enclosure update flow.
 
@@ -276,7 +276,7 @@ homescope/
 │   ├── sensor/            # `homescope-sensor` — BLE-advertising sensor firmware
 │   │   ├── Cargo.toml
 │   │   ├── build.rs
-│   │   ├── memory.x       # FLASH @ 0x27000, RAM @ 0x20000000 (256 K)
+│   │   ├── memory.x       # per-board flash origin: XIAO 0x27000 (UF2 bootloader), DB-40 0x0 (bare)
 │   │   ├── flash_uf2.sh   # UF2 backup flow (calls tools/uf2/uf2conv.py)
 │   │   └── src/
 │   │       ├── main.rs
@@ -324,7 +324,7 @@ Rationale:
 6. ✅ **Gateway v1 MQTT publish + benchmark page** — `rumqttc` publishing JSON readings to `homescope/sensors/<device-id>/reading`, plus a live range-survey page (axum, port 3000): 10 s rolling delivery %, RSSI stats, worst gap, sensor-reboot detection.
 7. ✅ **Actual Coded PHY + RF field campaign (2026-07)** — migrated to real extended advertising (`advertise_ext` / `scan_ext` / `on_ext_adv_reports`), enabled the SDC feature gates + multirole library, TX power via `default_tx_power(8)`, ~20-event bursts. Verdict: the XIAO antenna is the limiting factor → module migration. See [Field findings](#field-findings--rf-debugging-2026-07).
 8. ⏳ **S=8 coding refactor** — drive sensor advertising with raw HCI (`LeSetExtAdvParamsV2` + PHY options) to force S=8 and log the controller-selected TX power; a beacon doesn't need a host stack.
-9. ⏳ **Hardware migration** — 2× Raytac MDBT50Q-DB-40 eval boards → re-run the house survey → custom PCB with the validated MDBT50Q module (VDDH topology, antenna keep-out, SHT45 thermal moat, BMP581 footprint on all boards, populated on one).
+9. 🔶 **Hardware migration** — ✅ 2× MDBT50Q-DB-40 acquired, house survey passed (2026-07-03, worst spot ≥85 %), MDBT50Q-1MV2 confirmed as production module. ⏳ Custom PCB (VDDH topology, antenna keep-out, SHT45 thermal moat, BMP581/LTR390 footprints on all boards with selective population, 1.27 mm Cortex debug header).
 10. ⏳ **API v1** — Rust + `rumqttc` subscribes to sensor topics, validates, stores into TimescaleDB hypertables. **Deduplicates by `(device_id, seq)`** so N receivers can feed the same broker. Plain Postgres metadata tables for device registry.
 11. ⏳ **Grafana** — TimescaleDB datasource, per-sensor dashboards, kiosk mode. Include per-device delivery-rate panels derived from seq gaps (permanent reliability telemetry).
 12. ⏳ **Containerization** — Podman quadlets composing mosquitto + gateway + api + grafana. `.kube` unit files referencing a Kubernetes Pod YAML.

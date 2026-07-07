@@ -7,6 +7,10 @@ edition = "2024"
 db40 = []
 xiao = []
 
+[lib]
+bench=false
+test=false
+
 [package.metadata.embassy]
 build = [
   { target = "thumbv7em-none-eabi", artifact-dir = "out/examples/receiver" }

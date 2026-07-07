@@ -8,8 +8,7 @@ pub struct SensorPacket {
     pub device_id: DeviceId,
     pub seq: u32,
     pub temp_cdegc: i16,
-    pub humidity: u8,
-    pub pressure_pa: u32,
+    pub rh_cpercent: u16,
     pub battery_mv: u16,
 }
 

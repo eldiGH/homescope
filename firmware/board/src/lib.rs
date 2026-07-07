@@ -20,3 +20,19 @@ macro_rules! led_pin {
         $p.P0_30
     };
 }
+
+#[cfg(feature = "db40")]
+#[macro_export]
+macro_rules! i2c_sda_pin {
+    ($p:ident) => {
+        $p.P0_26
+    };
+}
+
+#[cfg(feature = "db40")]
+#[macro_export]
+macro_rules! i2c_scl_pin {
+    ($p:ident) => {
+        $p.P0_27
+    };
+}

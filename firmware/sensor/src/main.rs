@@ -1,17 +1,23 @@
 #![no_std]
 #![no_main]
 
+use crate::sensors::{ReadingsSignal, Sensors};
 use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_nrf::mode::Async;
-use embassy_nrf::peripherals::RNG;
-use embassy_nrf::{bind_interrupts, rng};
+use embassy_nrf::peripherals::{self, RNG};
+use embassy_nrf::{bind_interrupts, rng, twim};
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Timer};
+use homescope_board::{i2c_scl_pin, i2c_sda_pin};
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
+
 use {defmt_rtt as _, panic_probe as _};
 
 mod ble_advertise;
+mod sensors;
 
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -20,6 +26,7 @@ bind_interrupts!(struct Irqs {
     RADIO => nrf_sdc::mpsl::HighPrioInterruptHandler;
     TIMER0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
     RTC0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
+    TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
 });
 
 #[embassy_executor::task]
@@ -39,15 +46,53 @@ fn build_sdc<'d, const N: usize>(
         .build(p, rng, mpsl, mem)
 }
 
+const CADENCE_DURATION: Duration = Duration::from_secs(1);
+static READINGS_SIGNAL: ReadingsSignal = Signal::new();
+
+#[embassy_executor::task]
+async fn sensor_task(mut sensors: Sensors, readings_signal: &'static ReadingsSignal) -> ! {
+    loop {
+        match sensors.read().await {
+            Ok(readings) => {
+                readings_signal.signal(readings);
+            }
+
+            Err(error) => {
+                defmt::error!("errors while reading: {}", error);
+            }
+        };
+
+        Timer::after(CADENCE_DURATION).await;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_nrf::init(Default::default());
+    let p = embassy_nrf::init( Default::default());
 
     let mut led = embassy_nrf::gpio::Output::new(
         homescope_board::led_pin!(p),
         embassy_nrf::gpio::Level::High,
         embassy_nrf::gpio::OutputDrive::Standard,
     );
+
+    let sensors_power_pin = embassy_nrf::gpio::Output::new(
+        p.P0_05,
+        embassy_nrf::gpio::Level::High,
+        embassy_nrf::gpio::OutputDrive::HighDrive,
+    );
+
+    let twim = twim::Twim::new(
+        p.TWISPI0,
+        Irqs,
+        i2c_sda_pin!(p),
+        i2c_scl_pin!(p),
+        twim::Config::default(),
+        &mut [],
+    );
+
+    let sensors = Sensors::new(twim, sensors_power_pin);
+    spawner.spawn(unwrap!(sensor_task(sensors, &READINGS_SIGNAL)));
 
     let mpsl_p =
         mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
@@ -74,9 +119,9 @@ async fn main(spawner: Spawner) {
 
     let mut rng = rng::Rng::new(p.RNG, Irqs);
 
-    let mut sdc_mem = sdc::Mem::<4096>::new();
+    let mut sdc_mem = sdc::Mem::<1120>::new();
 
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
-    ble_advertise::run(sdc, &mut led).await;
+    ble_advertise::run(sdc, &mut led, &READINGS_SIGNAL).await;
 }

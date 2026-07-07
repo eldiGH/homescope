@@ -7,8 +7,15 @@ use embassy_time::{Duration, Timer};
 use homescope_common::{device_id::DeviceId, packet::SensorPacket};
 use trouble_host::prelude::*;
 
-pub async fn run<C>(controller: C, led_pin: &mut Output<'_>)
-where
+use crate::sensors::ReadingsSignal;
+
+const BURST_DURATION: Duration = Duration::from_millis(400);
+
+pub async fn run<C>(
+    controller: C,
+    led_pin: &mut Output<'_>,
+    readings_signal: &'static ReadingsSignal,
+) where
     C: Controller
         + for<'t> ControllerCmdSync<LeSetExtAdvData<'t>>
         + ControllerCmdSync<LeClearAdvSets>
@@ -43,6 +50,7 @@ where
 
     let _ = join(runner.run(), async {
         loop {
+            let readings = readings_signal.wait().await;
             led_pin.set_low();
 
             {
@@ -50,9 +58,8 @@ where
                     seq,
                     battery_mv: 100,
                     device_id,
-                    humidity: 55,
-                    pressure_pa: 1000,
-                    temp_cdegc: 2137,
+                    rh_cpercent: readings.rh_cpercent,
+                    temp_cdegc: readings.temp_cdegc,
                 };
                 seq += 1;
 
@@ -82,11 +89,10 @@ where
 
                 let _advertiser = unwrap!(peripheral.advertise_ext(&sets, &mut handles).await);
 
-                Timer::after_millis(150).await;
+                Timer::after(BURST_DURATION).await;
             }
 
             led_pin.set_high();
-            Timer::after_millis(100).await;
         }
     })
     .await;

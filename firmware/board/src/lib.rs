@@ -40,14 +40,14 @@ macro_rules! i2c_scl_pin {
 #[macro_export]
 macro_rules! i2c_sda_pin {
     ($p:ident) => {
-        $p.P0_04
+        $p.P1_14
     };
 }
 #[cfg(feature = "xiao")]
 #[macro_export]
 macro_rules! i2c_scl_pin {
     ($p:ident) => {
-        $p.P0_05
+        $p.P1_13
     };
 }
 
@@ -78,6 +78,7 @@ macro_rules! sensors_power_rail_pin {
 #[macro_export]
 macro_rules! sensors_power_rail_pin {
     ($p:ident) => {
-        None::<::embassy_nrf::Peri<'static, ::embassy_nrf::gpio::AnyPin>>
+        // in case we do not control sensors power: None::<::embassy_nrf::Peri<'static, ::embassy_nrf::gpio::AnyPin>>
+        Some($p.P1_15)
     }
 }

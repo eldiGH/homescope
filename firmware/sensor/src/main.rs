@@ -53,7 +53,7 @@ fn build_sdc<'d, const N: usize>(
         .build(p, rng, mpsl, mem)
 }
 
-const CADENCE_DURATION: Duration = Duration::from_secs(1);
+const CADENCE_DURATION: Duration = Duration::from_secs(60);
 static PACKET_SIGNAL: PacketSignal = Signal::new();
 
 #[embassy_executor::task]

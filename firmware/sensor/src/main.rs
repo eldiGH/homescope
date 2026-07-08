@@ -12,7 +12,9 @@ use embassy_nrf::peripherals::{self, RNG};
 use embassy_nrf::{bind_interrupts, rng, twim};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
-use homescope_board::{BATTERY_DIVIDER_RATIO, battery_adc_input, i2c_scl_pin, i2c_sda_pin};
+use homescope_board::{
+    BATTERY_DIVIDER_RATIO, battery_adc_input, i2c_scl_pin, i2c_sda_pin, sensors_power_rail_pin,
+};
 use homescope_common::device_id::DeviceId;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
@@ -102,11 +104,13 @@ async fn main(spawner: Spawner) {
         embassy_nrf::gpio::OutputDrive::Standard,
     );
 
-    let sensors_power_pin = embassy_nrf::gpio::Output::new(
-        p.P0_05,
-        embassy_nrf::gpio::Level::High,
-        embassy_nrf::gpio::OutputDrive::HighDrive,
-    );
+    let sensors_power_pin = sensors_power_rail_pin!(p).map(|pin| {
+        embassy_nrf::gpio::Output::new(
+            pin,
+            embassy_nrf::gpio::Level::High,
+            embassy_nrf::gpio::OutputDrive::HighDrive,
+        )
+    });
 
     let twim = twim::Twim::new(
         p.TWISPI0,

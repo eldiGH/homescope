@@ -28,12 +28,26 @@ macro_rules! i2c_sda_pin {
         $p.P0_26
     };
 }
-
 #[cfg(feature = "db40")]
 #[macro_export]
 macro_rules! i2c_scl_pin {
     ($p:ident) => {
         $p.P0_27
+    };
+}
+
+#[cfg(feature = "xiao")]
+#[macro_export]
+macro_rules! i2c_sda_pin {
+    ($p:ident) => {
+        $p.P0_04
+    };
+}
+#[cfg(feature = "xiao")]
+#[macro_export]
+macro_rules! i2c_scl_pin {
+    ($p:ident) => {
+        $p.P0_05
     };
 }
 
@@ -51,3 +65,19 @@ macro_rules! battery_adc_input {
 pub const BATTERY_DIVIDER_RATIO: u32 = 1;
 // production board #[cfg(feature = )]
 // pub const BATTERY_DIVIDER_RATIO: usize = 5
+
+#[cfg(feature = "db40")]
+#[macro_export]
+macro_rules! sensors_power_rail_pin {
+    ($p:ident) => {
+        Some($p.P0_05)
+    };
+}
+
+#[cfg(feature = "xiao")]
+#[macro_export]
+macro_rules! sensors_power_rail_pin {
+    ($p:ident) => {
+        None::<::embassy_nrf::Peri<'static, ::embassy_nrf::gpio::AnyPin>>
+    }
+}

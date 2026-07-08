@@ -7,17 +7,19 @@ const SHT4X_POWER_UP_DURATION: Duration = Duration::from_millis(10);
 
 pub struct Sensors {
     sht: Sht4xAsync<Twim<'static>, Delay>,
-    power: Output<'static>,
+    power: Option<Output<'static>>,
     enabled_at: Option<Instant>,
 }
 
 impl Sensors {
-    pub fn new(twim: Twim<'static>, power: Output<'static>) -> Self {
-        let enabled_at = if power.is_set_high() {
-            Some(Instant::now())
-        } else {
-            None
-        };
+    pub fn new(twim: Twim<'static>, power: Option<Output<'static>>) -> Self {
+        let enabled_at = power.as_ref().and_then(|power| {
+            if power.is_set_high() {
+                Some(Instant::now())
+            } else {
+                None
+            }
+        });
 
         Self {
             sht: Sht4xAsync::new(twim),
@@ -27,24 +29,36 @@ impl Sensors {
     }
 
     fn enable(&mut self) {
-        if self.power.is_set_high() {
+        let Some(power) = &mut self.power else {
+            return;
+        };
+
+        if power.is_set_high() {
             return;
         }
 
-        self.power.set_high();
+        power.set_high();
         self.enabled_at = Some(Instant::now());
     }
 
     fn disable(&mut self) {
-        if self.power.is_set_low() {
+        let Some(power) = &mut self.power else {
+            return;
+        };
+
+        if power.is_set_low() {
             return;
         }
 
-        self.power.set_low();
+        power.set_low();
         self.enabled_at = None;
     }
 
     async fn settle(&self, duration: Duration) {
+        if self.power.is_none() {
+            return;
+        }
+
         Timer::at(expect!(self.enabled_at, "sensor power pin is off") + duration).await;
     }
 

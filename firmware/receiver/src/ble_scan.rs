@@ -88,8 +88,7 @@ impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
                     let observation = SensorObservation {
                         battery_mv: packet.battery_mv,
                         device_id: packet.device_id,
-                        humidity: packet.humidity,
-                        pressure_pa: packet.pressure_pa,
+                        rh_cpercent: packet.rh_cpercent,
                         seq: packet.seq,
                         temp_cdegc: packet.temp_cdegc,
 

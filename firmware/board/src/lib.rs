@@ -36,3 +36,18 @@ macro_rules! i2c_scl_pin {
         $p.P0_27
     };
 }
+
+#[cfg(any(feature = "db40", feature = "xiao"))]
+#[macro_export]
+macro_rules! battery_adc_input {
+    () => {
+        ::embassy_nrf::saadc::VddInput
+    };
+}
+
+// for production board, it should be VddhDiv5Input
+
+#[cfg(any(feature = "db40", feature = "xiao"))]
+pub const BATTERY_DIVIDER_RATIO: u32 = 1;
+// production board #[cfg(feature = )]
+// pub const BATTERY_DIVIDER_RATIO: usize = 5

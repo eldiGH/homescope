@@ -1,22 +1,28 @@
 #![no_std]
 #![no_main]
 
-use crate::sensors::{ReadingsSignal, Sensors};
+use crate::battery::Battery;
+use crate::packet_builder::{PacketBuilder, PacketSignal};
+use crate::sensors::Sensors;
 use defmt::unwrap;
 use embassy_executor::Spawner;
+use embassy_nrf::interrupt::InterruptExt;
 use embassy_nrf::mode::Async;
 use embassy_nrf::peripherals::{self, RNG};
 use embassy_nrf::{bind_interrupts, rng, twim};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
-use homescope_board::{i2c_scl_pin, i2c_sda_pin};
+use homescope_board::{BATTERY_DIVIDER_RATIO, battery_adc_input, i2c_scl_pin, i2c_sda_pin};
+use homescope_common::device_id::DeviceId;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
 
 use {defmt_rtt as _, panic_probe as _};
 
+mod battery;
 mod ble_advertise;
+mod packet_builder;
 mod sensors;
 
 bind_interrupts!(struct Irqs {
@@ -27,6 +33,7 @@ bind_interrupts!(struct Irqs {
     TIMER0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
     RTC0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    SAADC => embassy_nrf::saadc::InterruptHandler;
 });
 
 #[embassy_executor::task]
@@ -47,14 +54,26 @@ fn build_sdc<'d, const N: usize>(
 }
 
 const CADENCE_DURATION: Duration = Duration::from_secs(1);
-static READINGS_SIGNAL: ReadingsSignal = Signal::new();
+static PACKET_SIGNAL: PacketSignal = Signal::new();
 
 #[embassy_executor::task]
-async fn sensor_task(mut sensors: Sensors, readings_signal: &'static ReadingsSignal) -> ! {
+async fn telemetry_task(
+    mut sensors: Sensors,
+    mut battery: Battery,
+    packet_signal: &'static PacketSignal,
+) -> ! {
+    let mut packet_builder = PacketBuilder::new(device_id());
+
     loop {
         match sensors.read().await {
             Ok(readings) => {
-                readings_signal.signal(readings);
+                // TODO(bitmap) - we could send battery_mv when bitmap will be added, even if
+                // sensors.read fail
+                let battery_mv = battery.read_mv().await;
+
+                let packet = packet_builder.build(readings, battery_mv);
+
+                packet_signal.signal(packet);
             }
 
             Err(error) => {
@@ -68,7 +87,14 @@ async fn sensor_task(mut sensors: Sensors, readings_signal: &'static ReadingsSig
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_nrf::init( Default::default());
+    let mut config = embassy_nrf::config::Config::default();
+    config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
+
+    let p = embassy_nrf::init(config);
+
+    embassy_nrf::interrupt::RNG.set_priority(embassy_nrf::interrupt::Priority::P2);
+    embassy_nrf::interrupt::TWISPI0.set_priority(embassy_nrf::interrupt::Priority::P2);
+    embassy_nrf::interrupt::SAADC.set_priority(embassy_nrf::interrupt::Priority::P2);
 
     let mut led = embassy_nrf::gpio::Output::new(
         homescope_board::led_pin!(p),
@@ -92,7 +118,20 @@ async fn main(spawner: Spawner) {
     );
 
     let sensors = Sensors::new(twim, sensors_power_pin);
-    spawner.spawn(unwrap!(sensor_task(sensors, &READINGS_SIGNAL)));
+
+    let channel = embassy_nrf::saadc::ChannelConfig::single_ended(battery_adc_input!());
+    let battery = Battery::init(
+        embassy_nrf::saadc::Saadc::new(
+            p.SAADC,
+            Irqs,
+            embassy_nrf::saadc::Config::default(),
+            [channel],
+        ),
+        BATTERY_DIVIDER_RATIO,
+    )
+    .await;
+
+    spawner.spawn(unwrap!(telemetry_task(sensors, battery, &PACKET_SIGNAL)));
 
     let mpsl_p =
         mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
@@ -123,5 +162,12 @@ async fn main(spawner: Spawner) {
 
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
-    ble_advertise::run(sdc, &mut led, &READINGS_SIGNAL).await;
+    ble_advertise::run(sdc, &mut led, &PACKET_SIGNAL).await;
+}
+
+fn device_id() -> DeviceId {
+    let high = u64::from(embassy_nrf::pac::FICR.deviceid(1).read());
+    let low = u64::from(embassy_nrf::pac::FICR.deviceid(0).read());
+
+    DeviceId(high << 32 | low)
 }

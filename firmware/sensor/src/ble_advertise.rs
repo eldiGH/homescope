@@ -4,18 +4,14 @@ use defmt::{info, unwrap};
 use embassy_futures::join::join;
 use embassy_nrf::gpio::Output;
 use embassy_time::{Duration, Timer};
-use homescope_common::{device_id::DeviceId, packet::SensorPacket};
 use trouble_host::prelude::*;
 
-use crate::sensors::ReadingsSignal;
+use crate::packet_builder::PacketSignal;
 
 const BURST_DURATION: Duration = Duration::from_millis(400);
 
-pub async fn run<C>(
-    controller: C,
-    led_pin: &mut Output<'_>,
-    readings_signal: &'static ReadingsSignal,
-) where
+pub async fn run<C>(controller: C, led_pin: &mut Output<'_>, packet_signal: &'static PacketSignal)
+where
     C: Controller
         + for<'t> ControllerCmdSync<LeSetExtAdvData<'t>>
         + ControllerCmdSync<LeClearAdvSets>
@@ -35,38 +31,22 @@ pub async fn run<C>(
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
 
-    let mut adv_data = [0; 31];
+    // Max extended-advertising data in a single AUX_ADV_IND (no chaining).
+    const ADV_DATA_MAX: usize = 254;
+    let mut adv_data = [0; ADV_DATA_MAX];
 
     info!("Starting advertising");
 
-    let mut seq = 0;
-
-    let device_id = {
-        let high = u64::from(embassy_nrf::pac::FICR.deviceid(1).read());
-        let low = u64::from(embassy_nrf::pac::FICR.deviceid(0).read());
-
-        DeviceId(high << 32 | low)
-    };
-
     let _ = join(runner.run(), async {
         loop {
-            let readings = readings_signal.wait().await;
+            let packet = packet_signal.wait().await;
             led_pin.set_low();
 
             {
-                let payload = SensorPacket {
-                    seq,
-                    battery_mv: 100,
-                    device_id,
-                    rh_cpercent: readings.rh_cpercent,
-                    temp_cdegc: readings.temp_cdegc,
-                };
-                seq += 1;
-
                 let len = unwrap!(AdStructure::encode_slice(
                     &[AdStructure::ManufacturerSpecificData {
                         company_identifier: 0xFFFF,
-                        payload: payload.as_bytes(),
+                        payload: packet.as_bytes(),
                     }],
                     &mut adv_data[..],
                 ));

@@ -1,6 +1,5 @@
 use defmt::{expect, info};
 use embassy_nrf::{gpio::Output, twim::Twim};
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use embassy_time::{Delay, Duration, Instant, Timer, with_timeout};
 use sht4x::{Measurement, Sht4xAsync};
 
@@ -108,5 +107,3 @@ impl From<embassy_time::TimeoutError> for SensorError {
         Self::Timeout
     }
 }
-
-pub type ReadingsSignal = Signal<ThreadModeRawMutex, Readings>;

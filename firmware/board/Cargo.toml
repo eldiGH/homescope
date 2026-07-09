@@ -11,6 +11,9 @@ xiao = []
 bench=false
 test=false
 
+[dependencies]
+embassy-nrf = { version = "0.10.0", features = ["nrf52840"] }
+
 [package.metadata.embassy]
 build = [
   { target = "thumbv7em-none-eabi", artifact-dir = "out/examples/receiver" }

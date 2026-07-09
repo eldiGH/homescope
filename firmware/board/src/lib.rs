@@ -1,84 +1,47 @@
 #![no_std]
 
+use embassy_nrf::{Peri, gpio::AnyPin, saadc::AnyInput};
+
 #[cfg(all(feature = "xiao", feature = "db40"))]
 compile_error!("enable exactly one board feature");
 #[cfg(not(any(feature = "xiao", feature = "db40")))]
 compile_error!("enable a board feature: `xiao` or `db40`");
 
+pub struct Board {
+    pub led: Peri<'static, AnyPin>,
+    pub i2c_sda: Peri<'static, AnyPin>,
+    pub i2c_scl: Peri<'static, AnyPin>,
+    pub sensors_power: Option<Peri<'static, AnyPin>>,
+    pub battery_adc: AnyInput<'static>,
+    pub battery_divider_ratio: u32,
+}
+
 #[cfg(feature = "db40")]
 #[macro_export]
-macro_rules! led_pin {
+macro_rules! board {
     ($p:ident) => {
-        $p.P0_13
+        $crate::Board {
+            led: $p.P0_13.into(),
+            i2c_sda: $p.P0_26.into(),
+            i2c_scl: $p.P0_27.into(),
+            sensors_power: ::core::option::Option::Some($p.P0_05.into()),
+            battery_adc: ::embassy_nrf::saadc::Input::degrade_saadc(::embassy_nrf::saadc::VddInput),
+            battery_divider_ratio: 1,
+        }
     };
 }
 
 #[cfg(feature = "xiao")]
 #[macro_export]
-macro_rules! led_pin {
+macro_rules! board {
     ($p:ident) => {
-        $p.P0_30
+        $crate::Board {
+            led: $p.P0_30.into(),
+            i2c_sda: $p.P1_14.into(),
+            i2c_scl: $p.P1_13.into(),
+            sensors_power: ::core::option::Option::Some($p.P1_15.into()),
+            battery_adc: ::embassy_nrf::saadc::Input::degrade_saadc(::embassy_nrf::saadc::VddInput),
+            battery_divider_ratio: 1,
+        }
     };
-}
-
-#[cfg(feature = "db40")]
-#[macro_export]
-macro_rules! i2c_sda_pin {
-    ($p:ident) => {
-        $p.P0_26
-    };
-}
-#[cfg(feature = "db40")]
-#[macro_export]
-macro_rules! i2c_scl_pin {
-    ($p:ident) => {
-        $p.P0_27
-    };
-}
-
-#[cfg(feature = "xiao")]
-#[macro_export]
-macro_rules! i2c_sda_pin {
-    ($p:ident) => {
-        $p.P1_14
-    };
-}
-#[cfg(feature = "xiao")]
-#[macro_export]
-macro_rules! i2c_scl_pin {
-    ($p:ident) => {
-        $p.P1_13
-    };
-}
-
-#[cfg(any(feature = "db40", feature = "xiao"))]
-#[macro_export]
-macro_rules! battery_adc_input {
-    () => {
-        ::embassy_nrf::saadc::VddInput
-    };
-}
-
-// for production board, it should be VddhDiv5Input
-
-#[cfg(any(feature = "db40", feature = "xiao"))]
-pub const BATTERY_DIVIDER_RATIO: u32 = 1;
-// production board #[cfg(feature = )]
-// pub const BATTERY_DIVIDER_RATIO: usize = 5
-
-#[cfg(feature = "db40")]
-#[macro_export]
-macro_rules! sensors_power_rail_pin {
-    ($p:ident) => {
-        Some($p.P0_05)
-    };
-}
-
-#[cfg(feature = "xiao")]
-#[macro_export]
-macro_rules! sensors_power_rail_pin {
-    ($p:ident) => {
-        // in case we do not control sensors power: None::<::embassy_nrf::Peri<'static, ::embassy_nrf::gpio::AnyPin>>
-        Some($p.P1_15)
-    }
 }

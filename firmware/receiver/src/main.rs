@@ -18,6 +18,7 @@ use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, State};
 use embassy_usb::{Builder, Config};
 use heapless::String;
+use homescope_board::board;
 use homescope_common::frame::Frame;
 use homescope_common::observation::SensorObservation;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
@@ -89,8 +90,10 @@ async fn wait_for_dtr_on(cdc_control: &ControlChanged<'_>) {
 async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
 
+    let board = board!(p);
+
     let mut led = embassy_nrf::gpio::Output::new(
-        homescope_board::led_pin!(p),
+        board.led,
         embassy_nrf::gpio::Level::High,
         embassy_nrf::gpio::OutputDrive::Standard,
     );

@@ -12,9 +12,7 @@ use embassy_nrf::peripherals::{self, RNG};
 use embassy_nrf::{bind_interrupts, rng, twim};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
-use homescope_board::{
-    BATTERY_DIVIDER_RATIO, battery_adc_input, i2c_scl_pin, i2c_sda_pin, sensors_power_rail_pin,
-};
+use homescope_board::board;
 use homescope_common::device_id::DeviceId;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
@@ -98,13 +96,15 @@ async fn main(spawner: Spawner) {
     embassy_nrf::interrupt::TWISPI0.set_priority(embassy_nrf::interrupt::Priority::P2);
     embassy_nrf::interrupt::SAADC.set_priority(embassy_nrf::interrupt::Priority::P2);
 
+    let board = board!(p);
+
     let mut led = embassy_nrf::gpio::Output::new(
-        homescope_board::led_pin!(p),
+        board.led,
         embassy_nrf::gpio::Level::High,
         embassy_nrf::gpio::OutputDrive::Standard,
     );
 
-    let sensors_power_pin = sensors_power_rail_pin!(p).map(|pin| {
+    let sensors_power_pin = board.sensors_power.map(|pin| {
         embassy_nrf::gpio::Output::new(
             pin,
             embassy_nrf::gpio::Level::High,
@@ -115,15 +115,15 @@ async fn main(spawner: Spawner) {
     let twim = twim::Twim::new(
         p.TWISPI0,
         Irqs,
-        i2c_sda_pin!(p),
-        i2c_scl_pin!(p),
+        board.i2c_sda,
+        board.i2c_scl,
         twim::Config::default(),
         &mut [],
     );
 
     let sensors = Sensors::new(twim, sensors_power_pin);
 
-    let channel = embassy_nrf::saadc::ChannelConfig::single_ended(battery_adc_input!());
+    let channel = embassy_nrf::saadc::ChannelConfig::single_ended(board.battery_adc);
     let battery = Battery::init(
         embassy_nrf::saadc::Saadc::new(
             p.SAADC,
@@ -131,7 +131,7 @@ async fn main(spawner: Spawner) {
             embassy_nrf::saadc::Config::default(),
             [channel],
         ),
-        BATTERY_DIVIDER_RATIO,
+        board.battery_divider_ratio,
     )
     .await;
 

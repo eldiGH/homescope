@@ -1,0 +1,12 @@
+layout {
+    pane split_direction="vertical" {
+        pane {
+            command "just"
+            args "gateway-watch"
+        }
+        pane {
+            command "just"
+            args "api-watch"
+        }
+    }
+}

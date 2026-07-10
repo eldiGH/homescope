@@ -6,10 +6,11 @@ edition = "2024"
 [features]
 default = []
 wire = ["dep:bytemuck", "dep:crc"]
-serde = ["dep:serde", "dep:heapless"]
+serde = ["dep:serde", "dep:heapless", "dep:chrono"]
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"], optional = true }
+chrono = { version = "0.4.45", default-features = false, features = ["serde"], optional = true }
 crc = { version = "3.4.0", optional = true }
 heapless = { version = "0.9.3", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }

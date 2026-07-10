@@ -18,10 +18,20 @@ deps:
 gateway: deps-gateway
     cargo run -p homescope-gateway
 
+gateway-watch: deps-gateway
+    watchexec -r --exts rs,toml -w gateway -w common -- cargo run -p homescope-gateway
+
 # Run the API (auto-starts MQTT broker + Postgres)
 api: deps-api
     cargo run -p homescope-api
 
+api-watch: deps-api
+    watchexec -r --exts rs,toml -w api -w common -- cargo run -p homescope-api
+
+dev: deps
+    zellij --layout deploy/dev-layout.kdl
+
 # Stop the dev stack (keeps volumes)
 down:
     podman compose -f compose.dev.yml down
+

@@ -1,9 +1,6 @@
-use std::{
-    io::ErrorKind,
-    process,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{io::ErrorKind, process, time::Duration};
 
+use chrono::Utc;
 use futures::StreamExt;
 use homescope_common::{
     frame::{FRAME_MAGIC_BYTES, FRAME_SIZE, Frame},
@@ -134,17 +131,10 @@ async fn main() {
         while let Some(result) = frames.next().await {
             match result {
                 Ok(observation) => {
-                    let received_at_ms = i64::try_from(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("clock before UNIX epoch")
-                            .as_millis()
-                            .saturating_sub(u128::from(observation.age_ms)),
-                    )
-                    .expect("ts overflow");
-
+                    let received_at =
+                        Utc::now() - chrono::TimeDelta::milliseconds(observation.age_ms.into());
                     let reading: SensorReading =
-                        SensorReading::from_observation(observation, received_at_ms);
+                        SensorReading::from_observation(observation, received_at);
                     println!("Got seq: {}", reading.seq);
 
                     let _ = readings_sender.send(reading).await;

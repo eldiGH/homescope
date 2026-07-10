@@ -31,15 +31,18 @@ homescope/
 ├── gateway/                # Pi-side receiver decoder + MQTT publisher + benchmark page
 │   └── src/main.rs         # homescope-gateway
 ├── firmware/
-│   ├── Cargo.toml          # firmware workspace: sensor, receiver
+│   ├── Cargo.toml          # firmware workspace: sensor, receiver, board
 │   ├── .cargo/config.toml  # cross-compile target (thumbv7em-none-eabi)
 │   ├── rust-toolchain.toml
+│   ├── board/              # homescope-board — Board struct + board!(p) macro (features: db40 / xiao)
+│   │   ├── build.rs        # picks memory-*.x by board feature
+│   │   ├── memory-db40.x   # bare board — app at 0x00000000
+│   │   ├── memory-xiao.x   # UF2 bootloader — app at 0x00027000
+│   │   └── src/lib.rs
 │   ├── sensor/             # homescope-sensor — BLE-advertising firmware
-│   │   ├── memory.x
 │   │   ├── flash_uf2.sh    # UF2 backup flow (calls tools/uf2/uf2conv.py)
 │   │   └── src/
 │   └── receiver/           # homescope-receiver — USB-CDC BLE scanner dongle
-│       ├── memory.x
 │       ├── flash_uf2.sh
 │       └── src/
 ├── tools/
@@ -61,13 +64,15 @@ homescope/
 
 ## Current state
 
-- ✅ **Sensor firmware** (`firmware/sensor/`): true extended advertising on Coded PHY via `advertise_ext` (`ExtNonconnectableNonscannableUndirected`; trouble's plain `advertise()` is legacy-only — it burned us, see field findings). 20 ms interval, advertiser held ~400 ms → ~20 events/burst. TX +8 dBm via `Builder::default_tx_power(8)` (the per-set HCI field is ignored by the SDC).
+- ✅ **Sensor firmware** (`firmware/sensor/`): true extended advertising on Coded PHY via `advertise_ext` (`ExtNonconnectableNonscannableUndirected`; trouble's plain `advertise()` is legacy-only — it burned us, see field findings), `primary_phy`/`secondary_phy` explicitly `LeCoded` (trouble defaults to 1M — that also burned us). 20 ms interval, advertiser held ~400 ms → ~20 events/burst. TX +8 dBm via `Builder::default_tx_power(8)` (the per-set HCI field is ignored by the SDC). Reads **SHT45** over async TWIM (`sht4x` driver, optional power-gated rail), samples battery voltage via SAADC, packet cadence 60 s.
+- ✅ **Board abstraction** (`firmware/board/`): `Board` struct holds *only board-varying* resources (LED / I²C / sensor-power-gate pins as `Peri<'static, AnyPin>`, SAADC battery input as `AnyInput`, divider ratio); the cfg'd `board!(p)` macro constructs it via partial moves so `Peripherals` stays usable in `main` for chip-fixed peripherals (RNG, PPI, TWIM, SAADC, MPSL set). Deliberately **not** an owning BSP struct — see docs/architecture.md. Caveat: cfg'd macro arms only compile under their own feature — check both configs (`cargo clippy --workspace` per board) before calling a change done.
+- ⏳ **XIAO alkaline soak test** (planned 2026-07-10): bare XIAO Plus (no expansion board) + 2× AA alkaline → 3V3 pin; SHT45 direct-wired (SDA P1.14, SCL P1.13, power-gate P1.15); UF2-flashed, no probe attached (SWD debug mode inflates sleep current). Measures delivery reliability + battery longevity of *current pre-sleep-optimization* firmware via per-minute battery_mv telemetry on the gateway. Prerequisite advised: watchdog — without a probe, a panic is a silent HardFault spin that drains the pack.
 - ✅ **Receiver firmware** (`firmware/receiver/`): extended scanning on Coded PHY (`scan_ext` + `on_ext_adv_reports`), framed `SensorObservation`s (packet + RSSI + age_ms) over USB-CDC. Robust to host disconnect/reconnect — DTR-aware writes with disconnect-race in `select`, drop-oldest backlog channel, sequence-based dedup, post-DTR grace period.
 - ✅ **Common crate**: `SensorPacket` (air), `SensorObservation` (receiver→gateway), `SensorReading` (app), `DeviceId`, `Frame` (magic + payload + CRC-16/IBM-SDLC) — see docs/protocol.md v0.2 (30-byte frames).
 - ✅ **Gateway**: serial decode (`tokio_util` `Decoder` over `BytesMut`), MQTT publish to `homescope/sensors/<device-id>/reading`, and a live range-survey page on port 3000 (10 s rolling delivery %, RSSI stats, sensor-reboot-safe).
 - ⏳ **S=8 forcing** (raw-HCI `LeSetExtAdvParamsV2` on the sensor) — next firmware task, worth +4-5 dB.
-- ✅ **Hardware migration, stage 1 (2026-07-03)**: 2× Raytac MDBT50Q-DB-40 in hand, whole-house survey **passed** (worst spot ≥85 % delivery after minor repositioning) → **MDBT50Q-1MV2 validated as the production module**. Remaining: custom PCB (MDBT50Q module, VDDH battery topology).
-- ⏳ **API, deploy, sensor drivers, crypto, sleep optimization**: not yet started.
+- ✅ **Hardware migration, stage 1 (2026-07-03)**: 2× Raytac MDBT50Q-DB-40 in hand, whole-house survey **passed** (worst spot ≥85 % delivery after minor repositioning) → **MDBT50Q-1MV2 validated as the production module**. Remaining: custom PCB (MDBT50Q module, VDDH + gated sensor-rail LDO power topology — see Key facts).
+- ⏳ **API, deploy, remaining sensor drivers (BMP581, LTR390), crypto, sleep optimization, watchdog**: not yet started.
 
 ## Build & flash
 
@@ -76,6 +81,16 @@ homescope/
 The standard workflow uses **probe-rs** with a SWD probe (e.g., Pi Pico DAPLink) for both flashing and debugging. VSCode launch configs in `.vscode/launch.json` provide one-click flash + run + RTT log capture for both sensor and receiver firmware. See **"Debug nrf52840-* (debug build)"** launches.
 
 The `firmware/.cargo/config.toml` sets `runner = "probe-rs run --chip nRF52840_xxAA"`, so `cargo run` from inside any firmware crate also flashes via probe and streams defmt-RTT logs.
+
+### Board selection
+
+`board-db40` is the **default feature** on both firmware crates. XIAO builds need `--no-default-features` (Cargo features are additive — `--features board-xiao` alone enables *both* boards and trips the `compile_error!` guard):
+
+```bash
+cargo run --release --no-default-features --features board-xiao
+```
+
+The board feature selects the `board!` macro arm *and* the linker script (`memory-db40.x` = app at `0x0`, `memory-xiao.x` = app at `0x27000` above the UF2 bootloader). ⚠️ Flashing a DB-40-linked image to a XIAO over probe-rs erases the XIAO's MBR/SoftDevice/UF2 bootloader. ⚠️ `flash_uf2.sh` currently builds with default features — pass/patch in the XIAO flags before using it, or the UF2 will contain a `0x0`-linked (DB-40) image.
 
 ### Backup path: UF2 via mass-storage bootloader
 
@@ -99,7 +114,7 @@ To flash: double-tap RESET on the XIAO so the bootloader USB drive appears, then
 
 ## Key facts
 
-- **Boards**: Raytac **MDBT50Q-DB-40** eval boards are primary since 2026-07-03 (house survey passed) → custom PCB with the validated MDBT50Q-1MV2 module next. Seeed XIAO nRF52840 **Plus** stays as a bench mule only (retired from RF duty — chip antenna ~10 dB short: −67 dBm @ 1 m @ +8 dBm). The XIAO-specific flash layout below applies to XIAO units only.
+- **Boards**: Raytac **MDBT50Q-DB-40** eval boards are primary since 2026-07-03 (house survey passed) → custom PCB with the validated MDBT50Q-1MV2 module next. Seeed XIAO nRF52840 **Plus** stays as a bench mule and alkaline soak-test node (retired from RF duty — chip antenna ~10 dB short: −67 dBm @ 1 m @ +8 dBm). The XIAO-specific flash layout below applies to XIAO units only.
 - **DB-40 board facts**: no factory bootloader or SoftDevice — application links at `0x00000000` (own `memory.x`, full 1 MB); LEDs LED1/2/3 = P0.13/14/15 (XIAO LED was P0.30), buttons P0.11/12/24/25; SWD via the 1.27 mm Cortex debug header (J1; a 1.27→2.54 adapter bridges to the Pico probe); mini-USB is the nRF52840's own USBD (receiver firmware works as-is). Optional: flash the Adafruit UF2 bootloader (supported target) to restore drag-drop updates — that moves the app base, adjust `memory.x` accordingly.
 - **Target**: `thumbv7em-none-eabi` (Cortex-M4F on nRF52840)
 - **Bootloader**: Adafruit UF2 v0.9.2 **with Nordic SoftDevice S140 7.3.0 pre-installed** (Board-ID: `nRF52840-SeeedXiao-v1`)
@@ -109,9 +124,9 @@ To flash: double-tap RESET on the XIAO so the bootloader USB drive appears, then
   - `0x00027000+`: Application (868 KB available)
 - **UF2 family ID**: `0xADA52840` (Adafruit nRF52 series)
 - **Application base address**: `0x00027000` — set in each `firmware/*/memory.x` and in the `--base` arg of `tools/uf2/uf2conv.py`
-- **Power (sensor)**: 2× AA Energizer Lithium L91 (Li-FeS₂) → XIAO 3V3 pin direct on dev boards; the custom PCB feeds **VDDH** instead (internal REG0 buck, `REGOUT0 = 3.0 V`) to eliminate the fresh-pair ~3.6 V absolute-max edge. See [docs/architecture.md](docs/architecture.md#power).
+- **Power (sensor, revised 2026-07-10)**: dev boards: 2× AA → `3V3` pin direct (L91 lithium for deployment-representative tests; plain alkaline for bench soak — ~3.2 V fresh, safely inside limits; **never battery + USB together** — the on-board LDO back-feeds/trickle-charges the pack). Custom PCB: battery → **VDDH** (internal REG0 buck, `REGOUT0 = 3.0 V`, **powers the nRF only** — kills the fresh-L91 ~3.6 V absolute-max edge) **plus a separate enable-gated LDO** off the battery rail powering all peripherals (SHT45/BMP581/LTR390 + I²C pull-ups). A GPIO drives the LDO EN (supersedes the dev-board GPIO-as-power-rail trick): true zero sensor sleep draw, clean regulated supply, and headroom for the SHT45 heater's ~75 mA pulses without touching the MCU rail. Battery ADC follows the rail the battery is on: `VddInput`/ratio 1 on dev boards, `VddhDiv5Input`/ratio 5 on the custom PCB. See [docs/architecture.md](docs/architecture.md#power).
 - **Power (receiver)**: USB bus power from the Pi. Plug-and-play.
-- **Sensors (decided 2026-05, revised 2026-07)**: all battery nodes use **SHT45** (T/H, ±0.1 °C / ±1 % RH, no heater). **Pressure (BMP581) on exactly one designated *indoor* node** — pressure is house-wide and indoor ≈ outdoor, so the barometer gets friendly conditions and the gateway stays a pure bridge (supersedes the earlier BMP390-on-outdoor-node plan; BMP581 = newer part, async `bmp5` Rust driver). Outdoor node: SHT45 + optional **LTR390** (light/UV). **BME688 / air quality dropped from the battery fleet** (raw gas ≠ IAQ without BSEC, and the gas heater self-heats T/H); IAQ deferred to an optional USB/mains-powered BME68x + BSEC node. Node variants are one codebase behind Cargo features. See [docs/architecture.md](docs/architecture.md#sensors).
+- **Sensors (decided 2026-05, revised 2026-07)**: all battery nodes use **SHT45** (T/H, ±0.1 °C / ±1 % RH; its on-die heater — for condensation recovery, mainly outdoors — is freely usable on the custom PCB's gated LDO rail as of 2026-07-10; the "heater" objection below was about the BME688 *gas* heater). **Pressure (BMP581) on exactly one designated *indoor* node** — pressure is house-wide and indoor ≈ outdoor, so the barometer gets friendly conditions and the gateway stays a pure bridge (supersedes the earlier BMP390-on-outdoor-node plan; BMP581 = newer part, async `bmp5` Rust driver). Outdoor node: SHT45 + optional **LTR390** (light/UV). **BME688 / air quality dropped from the battery fleet** (raw gas ≠ IAQ without BSEC, and the gas heater self-heats T/H); IAQ deferred to an optional USB/mains-powered BME68x + BSEC node. Node variants are one codebase behind Cargo features. See [docs/architecture.md](docs/architecture.md#sensors).
 - **BLE/SDC gotchas (hard-won 2026-07)**: SDC features are build-time opt-ins (`support_ext_adv`, `support_le_coded_phy`, `support_ext_scan`); ext adv / coded PHY / ext scan exist **only in the multirole SDC library** (enable both `peripheral` + `central` cargo features on nrf-sdc); TX power only via `default_tx_power()`; trouble's `advertise()` is legacy-only (use `advertise_ext`); `panic-probe` needs the `print-defmt` feature or panics are silent halts. Full list: [docs/architecture.md — field findings](docs/architecture.md#field-findings--rf-debugging-2026-07).
 - **Probe**: SWD probe (Pi Pico DAPLink or similar) wired and working. Enables defmt-RTT log capture and breakpoint debugging via the VSCode probe-rs-debugger extension.
 - **Logging**: `defmt-rtt`. Logs visible in the VSCode Debug Console during a debug session.

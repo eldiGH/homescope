@@ -32,7 +32,7 @@ image crate:
     podman build -f {{crate}}/Containerfile -t homescope-{{crate}} .
 
 dev: deps
-    zellij --layout deploy/dev-layout.kdl
+    zellij --layout .dev/dev-layout.kdl
 
 # Stop the dev stack (keeps volumes)
 down:

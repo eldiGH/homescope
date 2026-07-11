@@ -1,0 +1,21 @@
+name: build-gateway
+on:
+  push:
+    branches: [main]
+    paths:
+      - "gateway/**"
+      - "common/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".containerignore"
+      - ".github/workflows/build-gateway.yml"
+      - ".github/workflows/build-image.yml"
+
+jobs:
+  gateway:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      crate: gateway
+    permissions:
+      contents: read
+      packages: write

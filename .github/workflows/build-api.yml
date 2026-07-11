@@ -1,0 +1,21 @@
+name: build-api
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/**"
+      - "common/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".containerignore"
+      - ".github/workflows/build-api.yml"
+      - ".github/workflows/build-image.yml"
+
+jobs:
+  api:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      crate: api
+    permissions:
+      contents: read
+      packages: write

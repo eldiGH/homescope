@@ -1,6 +1,7 @@
 #![no_std]
 
 use embassy_nrf::{Peri, gpio::AnyPin, saadc::AnyInput};
+use homescope_common::device_id::DeviceId;
 
 #[cfg(all(feature = "xiao", feature = "db40"))]
 compile_error!("enable exactly one board feature");
@@ -44,4 +45,11 @@ macro_rules! board {
             battery_divider_ratio: 1,
         }
     };
+}
+
+pub fn device_id() -> DeviceId {
+    let high = u64::from(embassy_nrf::pac::FICR.deviceid(1).read());
+    let low = u64::from(embassy_nrf::pac::FICR.deviceid(0).read());
+
+    DeviceId(high << 32 | low)
 }

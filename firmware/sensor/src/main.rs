@@ -13,7 +13,6 @@ use embassy_nrf::{bind_interrupts, rng, twim};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use homescope_board::board;
-use homescope_common::device_id::DeviceId;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
@@ -62,7 +61,7 @@ async fn telemetry_task(
     mut battery: Battery,
     packet_signal: &'static PacketSignal,
 ) -> ! {
-    let mut packet_builder = PacketBuilder::new(device_id());
+    let mut packet_builder = PacketBuilder::new(homescope_board::device_id());
 
     loop {
         match sensors.read().await {
@@ -167,11 +166,4 @@ async fn main(spawner: Spawner) {
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
     ble_advertise::run(sdc, &mut led, &PACKET_SIGNAL).await;
-}
-
-fn device_id() -> DeviceId {
-    let high = u64::from(embassy_nrf::pac::FICR.deviceid(1).read());
-    let low = u64::from(embassy_nrf::pac::FICR.deviceid(0).read());
-
-    DeviceId(high << 32 | low)
 }

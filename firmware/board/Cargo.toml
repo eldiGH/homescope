@@ -12,6 +12,8 @@ bench=false
 test=false
 
 [dependencies]
+homescope-common = { workspace = true }
+
 embassy-nrf = { version = "0.10.0", features = ["nrf52840"] }
 
 [package.metadata.embassy]

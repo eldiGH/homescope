@@ -6,9 +6,21 @@ use bytemuck::{Pod, Zeroable};
 #[cfg_attr(feature = "wire", derive(Pod, Zeroable))]
 pub struct DeviceId(pub u64);
 
+impl DeviceId {
+    pub fn encode_hex<'a>(&self, buf: &'a mut [u8; 16]) -> &'a str {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = HEX[((self.0 >> (60 - 4 * i)) & 0xF) as usize];
+        }
+        core::str::from_utf8(buf).expect("every byte comes from hex array")
+    }
+}
+
 impl core::fmt::Display for DeviceId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:08X}-{:08X}", (self.0 >> 32) as u32, self.0 as u32)
+        let mut buf = [0u8; 16];
+
+        f.write_str(self.encode_hex(&mut buf))
     }
 }
 
@@ -21,7 +33,7 @@ pub enum DeviceIdParseError {
 impl core::fmt::Display for DeviceIdParseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::BadFormat => f.write_str("expected format XXXXXXXX-XXXXXXXX"),
+            Self::BadFormat => f.write_str("expected format XXXXXXXXXXXXXXXX"),
             Self::NotHex => f.write_str("contains non-hex characters"),
         }
     }
@@ -33,15 +45,17 @@ impl core::str::FromStr for DeviceId {
     type Err = DeviceIdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (h, l) = s.split_once('-').ok_or(DeviceIdParseError::BadFormat)?;
-        if h.len() != 8 || l.len() != 8 {
+        if s.len() != 16 {
             return Err(DeviceIdParseError::BadFormat);
         }
 
-        let high = u32::from_str_radix(h, 16).map_err(|_| DeviceIdParseError::NotHex)?;
-        let low = u32::from_str_radix(l, 16).map_err(|_| DeviceIdParseError::NotHex)?;
+        if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(DeviceIdParseError::NotHex);
+        }
 
-        Ok(Self((u64::from(high) << 32) | u64::from(low)))
+        let device_id = u64::from_str_radix(s, 16).map_err(|_| DeviceIdParseError::NotHex)?;
+
+        Ok(Self(device_id))
     }
 }
 
@@ -51,12 +65,9 @@ impl serde::Serialize for DeviceId {
     where
         S: serde::Serializer,
     {
-        use core::fmt::Write;
-        let mut buf: heapless::String<17> = heapless::String::new();
+        let mut buf = [0u8; 16];
 
-        write!(buf, "{}", self).map_err(serde::ser::Error::custom)?;
-
-        serializer.serialize_str(&buf)
+        serializer.serialize_str(self.encode_hex(&mut buf))
     }
 }
 

@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-use core::fmt::Write;
 use defmt::{error, info, unwrap};
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
@@ -17,7 +16,6 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, State};
 use embassy_usb::{Builder, Config};
-use heapless::String;
 use homescope_board::board;
 use homescope_common::frame::Frame;
 use homescope_common::observation::SensorObservation;
@@ -136,23 +134,13 @@ async fn main(spawner: Spawner) {
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-    let mut device_id: String<16> = String::new();
-    let _ = write!(
-        device_id,
-        "{:08X}",
-        embassy_nrf::pac::FICR.deviceid(1).read()
-    );
-    let _ = write!(
-        device_id,
-        "{:08X}",
-        embassy_nrf::pac::FICR.deviceid(0).read()
-    );
+    let mut serial_buf = [0u8; 16];
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Homescope");
-    config.product = Some("Receiver");
-    config.serial_number = Some(&device_id);
+    config.product = Some("Homescope Receiver");
+    config.serial_number = Some(homescope_board::device_id().encode_hex(&mut serial_buf));
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 

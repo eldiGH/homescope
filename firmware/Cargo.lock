@@ -830,6 +830,7 @@ name = "homescope-board"
 version = "0.1.0"
 dependencies = [
  "embassy-nrf",
+ "homescope-common",
 ]
 
 [[package]]

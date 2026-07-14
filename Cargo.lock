@@ -742,6 +742,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "homescope-common",
+ "homescope-host-util",
  "rumqttc",
  "serde",
  "serde_json",
@@ -768,15 +769,29 @@ dependencies = [
 name = "homescope-gateway"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
+ "dotenvy",
  "futures",
  "homescope-common",
+ "homescope-host-util",
  "memchr",
  "rumqttc",
  "serde_json",
  "serial2-tokio",
  "tokio",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "homescope-host-util"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dotenvy",
+ "tracing-subscriber",
 ]
 
 [[package]]

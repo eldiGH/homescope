@@ -1,13 +1,15 @@
-use std::env::{
-    VarError::{NotPresent, NotUnicode},
-    var,
-};
+use std::env::var;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
+use homescope_host_util::env::env_var_or;
 
 pub struct ApiConfig {
-    pub db_url: String,
-    pub db_max_connections: u32,
+    pub db_user: String,
+    pub db_password: String,
+    pub db_database: String,
+    pub db_host: String,
+    pub db_port: u16,
+    pub db_pool_max_connections: u32,
     pub run_migrations: bool,
     pub mqtt_host: String,
     pub mqtt_port: u16,
@@ -16,33 +18,15 @@ pub struct ApiConfig {
 impl ApiConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            db_url: var("DATABASE_URL").context("DATABASE_URL must be set")?,
-            db_max_connections: {
-                match var("DATABASE_CONNECTION_POOL") {
-                    Ok(connection_pool) => connection_pool
-                        .parse::<u32>()
-                        .context("DATABASE_CONNECTION_POOL must be valid pool size number")?,
-
-                    Err(NotPresent) => 10,
-
-                    Err(NotUnicode(_)) => bail!("DATABASE_CONNECTION_POOL is not valid unicode"),
-                }
-            },
-            run_migrations: var("RUN_MIGRATIONS")
-                .map(|v| v.trim().eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            mqtt_host: var("MQTT_HOST").unwrap_or("127.0.0.1".to_owned()),
-            mqtt_port: {
-                match var("MQTT_PORT") {
-                    Ok(port) => port
-                        .parse::<u16>()
-                        .context("MQTT_PORT must be a valid port number")?,
-
-                    Err(NotPresent) => 1883,
-
-                    Err(NotUnicode(_)) => bail!("MQTT_PORT is not valid unicode"),
-                }
-            },
+            db_user: var("DB_USER").context("DB_USER must be set")?,
+            db_password: var("DB_PASSWORD").context("DB_PASSWORD must be set")?,
+            db_database: var("DB_DATABASE").context("DB_DATABASE must be set")?,
+            db_host: var("DB_HOST").context("DB_HOST must be set")?,
+            db_port: env_var_or("DB_PORT", 5432)?,
+            db_pool_max_connections: env_var_or("DB_POOL_MAX_CONNECTIONS", 10)?,
+            run_migrations: env_var_or("RUN_MIGRATIONS", false)?,
+            mqtt_host: var("MQTT_HOST").context("MQTT_HOST must be set")?,
+            mqtt_port: env_var_or("MQTT_PORT", 1883)?,
         })
     }
 }

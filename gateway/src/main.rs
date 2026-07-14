@@ -1,70 +1,28 @@
-use std::{io::ErrorKind, process, time::Duration};
+use std::time::Duration;
 
+use anyhow::{Context as _, bail};
 use chrono::Utc;
 use futures::StreamExt;
-use homescope_common::{
-    frame::{FRAME_MAGIC_BYTES, FRAME_SIZE, Frame},
-    observation::SensorObservation,
-    reading::SensorReading,
-};
+use homescope_common::reading::SensorReading;
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
 use serial2_tokio::SerialPort;
 use tokio::{
-    io,
     sync::mpsc::{Receiver, channel},
     time::sleep,
 };
-use tokio_util::{
-    bytes::Buf,
-    codec::{Decoder, FramedRead},
-};
+use tokio_util::codec::FramedRead;
+use tracing::{debug, error};
 
-const PATH: &str = "/dev/homescope-receiver";
+use crate::{config::GatewayConfig, decoder::SensorObservationDecoder};
+
+mod config;
+mod decoder;
 
 async fn mqtt_task(mut event_loop: EventLoop) {
     loop {
         if let Err(err) = event_loop.poll().await {
-            println!("mqtt err: {err}")
-        }
-    }
-}
-
-struct SensorObservationDecoder;
-impl Decoder for SensorObservationDecoder {
-    type Item = SensorObservation;
-    type Error = io::Error;
-
-    fn decode(
-        &mut self,
-        src: &mut tokio_util::bytes::BytesMut,
-    ) -> Result<Option<Self::Item>, Self::Error> {
-        loop {
-            let Some(magic_index) = memchr::memchr(FRAME_MAGIC_BYTES[0], src) else {
-                return Ok(None);
-            };
-
-            src.advance(magic_index);
-
-            if src.len() < FRAME_SIZE {
-                return Ok(None);
-            }
-
-            if src[1] != FRAME_MAGIC_BYTES[1] {
-                src.advance(1);
-                continue;
-            }
-
-            match Frame::try_from_bytes(&src[..FRAME_SIZE].try_into().unwrap()) {
-                Ok(frame) => {
-                    src.advance(FRAME_SIZE);
-                    return Ok(Some(frame.payload));
-                }
-
-                Err(_) => {
-                    src.advance(1);
-                    continue;
-                }
-            }
+            error!("mqtt err: {err}");
+            sleep(Duration::from_secs(1)).await;
         }
     }
 }
@@ -74,9 +32,7 @@ async fn mqtt_readings_sender(
     mqtt_client: AsyncClient,
 ) {
     while let Some(reading) = reading_receiver.recv().await {
-        let serialized_reading = serde_json::to_vec(&reading);
-
-        match serialized_reading {
+        match serde_json::to_vec(&reading) {
             Ok(bytes) => {
                 if let Err(err) = mqtt_client
                     .publish(
@@ -87,20 +43,23 @@ async fn mqtt_readings_sender(
                     )
                     .await
                 {
-                    println!("mqtt publish error: {err}")
+                    error!("mqtt publish error: {err}")
                 }
             }
 
             Err(err) => {
-                println!("serialization error: {err}");
+                error!("serialization error: {err}");
             }
         }
     }
 }
 
 #[tokio::main]
-async fn main() {
-    let mqtt_options = MqttOptions::new("gateway", "127.0.0.1", 1883);
+async fn main() -> anyhow::Result<()> {
+    homescope_host_util::init();
+    let config = GatewayConfig::from_env()?;
+
+    let mqtt_options = MqttOptions::new("gateway", &config.mqtt_host, config.mqtt_port);
     let (client, event_loop) = AsyncClient::new(mqtt_options, 128);
 
     let (readings_sender, readings_receiver) = channel::<SensorReading>(1024);
@@ -108,43 +67,28 @@ async fn main() {
     tokio::spawn(mqtt_task(event_loop));
     tokio::spawn(mqtt_readings_sender(readings_receiver, client));
 
-    loop {
-        let port = match SerialPort::open(PATH, 115200) {
-            Ok(port) => port,
+    let port = SerialPort::open(&config.receiver_path, 115200)
+        .with_context(|| format!("opening {}", &config.receiver_path))?;
 
-            Err(err) => match err.kind() {
-                ErrorKind::PermissionDenied => {
-                    println!("permission denied to port: {PATH} ");
-                    process::exit(1);
-                }
+    let mut frames = FramedRead::new(port, SensorObservationDecoder);
 
-                err => {
-                    println!("error: {err} - retrying");
-                    sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            },
-        };
+    while let Some(result) = frames.next().await {
+        match result {
+            Ok(observation) => {
+                let received_at =
+                    Utc::now() - chrono::TimeDelta::milliseconds(observation.age_ms.into());
+                let reading: SensorReading =
+                    SensorReading::from_observation(observation, received_at);
+                debug!("packet: {}", reading);
 
-        let mut frames = FramedRead::new(port, SensorObservationDecoder);
-
-        while let Some(result) = frames.next().await {
-            match result {
-                Ok(observation) => {
-                    let received_at =
-                        Utc::now() - chrono::TimeDelta::milliseconds(observation.age_ms.into());
-                    let reading: SensorReading =
-                        SensorReading::from_observation(observation, received_at);
-                    println!("Got seq: {}", reading.seq);
-
-                    let _ = readings_sender.send(reading).await;
-                }
-
-                Err(err) => {
-                    println!("Err: {err}");
-                    break;
+                if readings_sender.send(reading).await.is_err() {
+                    bail!("readings channel closed. fatal error")
                 }
             }
+
+            Err(err) => bail!("serial read error: {err}"),
         }
     }
+
+    bail!("serial stream ended");
 }

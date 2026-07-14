@@ -1,8 +1,7 @@
 use homescope_common::reading::SensorReading;
 use sqlx::PgPool;
 use tokio::sync::mpsc::{Receiver, channel};
-use tracing::{debug, error, level_filters::LevelFilter};
-use tracing_subscriber::EnvFilter;
+use tracing::{debug, error};
 
 mod config;
 mod db;
@@ -20,18 +19,11 @@ async fn store_readings(pool: PgPool, mut readings_receiver: Receiver<SensorRead
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    homescope_host_util::init();
+
     let config = config::ApiConfig::from_env()?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
-
-    let pool = db::connect(&config.db_url, config.db_max_connections).await?;
+    let pool = db::connect(&config).await?;
 
     if config.run_migrations {
         sqlx::migrate!().run(&pool).await?;

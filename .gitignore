@@ -9,3 +9,5 @@
 # IDE/editor
 .idea/
 *.swp
+
+.env

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 homescope-common = { workspace = true, features = ["wire", "serde"]}
+homescope-host-util = { workspace = true }
 
 futures = "0.3.32"
 tokio = { version = "1.52.3", features = ["full"] }
@@ -14,3 +15,7 @@ memchr = "2.8.0"
 rumqttc = "0.25.1"
 serde_json = "1.0.150"
 chrono = { version = "0.4.45", features = ["serde"] }
+anyhow = "1.0.103"
+dotenvy = "0.15.7"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

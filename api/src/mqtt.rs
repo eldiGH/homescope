@@ -9,7 +9,9 @@ pub async fn run(
     port: u16,
     readings_sender: Sender<SensorReading>,
 ) -> anyhow::Result<()> {
-    let mqtt_options = MqttOptions::new("api", host, port);
+    let mut mqtt_options = MqttOptions::new("api", host, port);
+    mqtt_options.set_clean_session(false);
+
     let (client, mut event_loop) = AsyncClient::new(mqtt_options, 128);
 
     loop {

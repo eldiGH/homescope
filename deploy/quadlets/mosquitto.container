@@ -1,6 +1,7 @@
 [Container]
 Image=docker.io/eclipse-mosquitto:2-openssl
 ContainerName=homescope-mqtt
+Volume=mosquitto-data.volume:/mosquitto/data
 Volume=%h/.config/homescope/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
 Network=homescope.network
 AutoUpdate=registry

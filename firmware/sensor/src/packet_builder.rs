@@ -1,21 +1,21 @@
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
-use homescope_common::{device_id::DeviceId, packet::SensorPacket};
+use homescope_common::{hardware_id::HardwareId, packet::SensorPacket};
 
 use crate::sensors::Readings;
 
 pub struct PacketBuilder {
     seq: u32,
-    device_id: DeviceId,
+    hardware_id: HardwareId,
 }
 
 impl PacketBuilder {
-    pub fn new(device_id: DeviceId) -> Self {
-        Self { seq: 0, device_id }
+    pub fn new(hardware_id: HardwareId) -> Self {
+        Self { seq: 0, hardware_id }
     }
 
     pub fn build(&mut self, readings: Readings, battery_mv: u16) -> SensorPacket {
         let packet = SensorPacket {
-            device_id: self.device_id,
+            hardware_id: self.hardware_id,
             seq: self.seq,
             temp_cdegc: readings.temp_cdegc,
             rh_cpercent: readings.rh_cpercent,

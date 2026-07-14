@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO readings (time, device_id, seq, temp_degc, rh_percent, battery_mv, rssi) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int4",
+        "Int8",
+        "Float8",
+        "Float8",
+        "Int4",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ebeaf104ec4f208fb61dfea9cccb03b40e6bebcfd7e192c4f1f34dc2fe60d3c6"
+}

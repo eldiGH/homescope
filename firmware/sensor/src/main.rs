@@ -61,7 +61,7 @@ async fn telemetry_task(
     mut battery: Battery,
     packet_signal: &'static PacketSignal,
 ) -> ! {
-    let mut packet_builder = PacketBuilder::new(homescope_board::device_id());
+    let mut packet_builder = PacketBuilder::new(homescope_board::hardware_id());
 
     loop {
         match sensors.read().await {

@@ -36,7 +36,7 @@ async fn mqtt_readings_sender(
             Ok(bytes) => {
                 if let Err(err) = mqtt_client
                     .publish(
-                        format!("homescope/sensors/{}/reading", reading.device_id),
+                        format!("homescope/sensors/{}/reading", reading.hardware_id),
                         QoS::AtLeastOnce,
                         false,
                         bytes,

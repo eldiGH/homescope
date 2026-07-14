@@ -10,16 +10,41 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::{config::ApiConfig, db};
+use crate::{config::ApiConfig, db, devices::DeviceRegistry, ingest::unknown::Report};
+
+mod unknown;
 
 async fn store_readings(
     pool: PgPool,
     mut readings_receiver: Receiver<SensorReading>,
+    devices: DeviceRegistry,
 ) -> anyhow::Result<Infallible> {
+    let mut unknown = unknown::UnknownDevices::default();
+
     while let Some(reading) = readings_receiver.recv().await {
         debug!("reading to insert: {reading}");
 
-        if let Err(err) = db::insert_reading(&pool, &reading).await {
+        let Some(device) = devices.get(reading.hardware_id) else {
+            match unknown.record(reading.hardware_id) {
+                Some(Report::New) => {
+                    warn!(hardware_id = %reading.hardware_id, "unknown device, dropping its readings")
+                }
+                Some(Report::Repeat { count, since }) => {
+                    warn!(hardware_id = %reading.hardware_id, count, ?since,
+                  "unknown device still transmitting")
+                }
+                Some(Report::Overflow { packets }) => {
+                    warn!(
+                        packets,
+                        "packets from unknown devices beyond tracking capacity"
+                    )
+                }
+                None => {}
+            }
+            continue;
+        };
+
+        if let Err(err) = db::insert_reading(&pool, &reading, device.id).await {
             error!("db error: {err}");
         }
     }
@@ -85,11 +110,15 @@ async fn subscribe_mqtt(
     }
 }
 
-pub async fn run(config: &ApiConfig, pool: PgPool) -> anyhow::Result<Infallible> {
+pub async fn run(
+    config: &ApiConfig,
+    pool: PgPool,
+    devices: DeviceRegistry,
+) -> anyhow::Result<Infallible> {
     let (readings_sender, readings_receiver) = channel::<SensorReading>(256);
 
     tokio::select! {
         r = subscribe_mqtt(&config.mqtt_host, config.mqtt_port, readings_sender) => r,
-        r = store_readings(pool, readings_receiver) => r
+        r = store_readings(pool, readings_receiver, devices) => r
     }
 }

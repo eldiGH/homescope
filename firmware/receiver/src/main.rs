@@ -140,7 +140,7 @@ async fn main(spawner: Spawner) {
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Homescope");
     config.product = Some("Homescope Receiver");
-    config.serial_number = Some(homescope_board::device_id().encode_hex(&mut serial_buf));
+    config.serial_number = Some(homescope_board::hardware_id().encode_hex(&mut serial_buf));
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 

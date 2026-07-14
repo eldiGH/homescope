@@ -22,11 +22,12 @@ pub async fn connect(config: &ApiConfig) -> anyhow::Result<sqlx::postgres::PgPoo
 pub async fn insert_reading(
     pool: &sqlx::PgPool,
     reading: &SensorReading,
+    device_id: i32,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
-                    "INSERT INTO readings (time, device_id, seq, temp_degc, rh_percent, battery_mv, rssi) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    "INSERT INTO readings (time, device_id, seq, temp_degc, rh_percent, battery_mv, rssi) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
                     reading.received_at,
-                    reading.device_id.0 as i64,
+                    device_id,
                     reading.seq as i64,
                     reading.temp_degc,
                     reading.rh_percent,

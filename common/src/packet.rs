@@ -1,11 +1,11 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::device_id::DeviceId;
+use crate::hardware_id::HardwareId;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct SensorPacket {
-    pub device_id: DeviceId,
+    pub hardware_id: HardwareId,
     pub seq: u32,
     pub temp_cdegc: i16,
     pub rh_cpercent: u16,

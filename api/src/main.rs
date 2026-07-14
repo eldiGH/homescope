@@ -1,7 +1,10 @@
 use std::convert::Infallible;
 
+use crate::devices::DeviceRegistry;
+
 mod config;
 mod db;
+mod devices;
 mod ingest;
 
 #[tokio::main]
@@ -16,5 +19,7 @@ async fn main() -> anyhow::Result<Infallible> {
         sqlx::migrate!().run(&pool).await?;
     }
 
-    tokio::select! { r = ingest::run(&config, pool.clone()) => {r} }
+    let devices = DeviceRegistry::load(pool.clone()).await?;
+
+    tokio::select! { r = ingest::run(&config, pool, devices) => {r} }
 }

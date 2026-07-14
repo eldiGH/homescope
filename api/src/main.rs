@@ -1,24 +1,11 @@
-use homescope_common::reading::SensorReading;
-use sqlx::PgPool;
-use tokio::sync::mpsc::{Receiver, channel};
-use tracing::{debug, error};
+use std::convert::Infallible;
 
 mod config;
 mod db;
-mod mqtt;
-
-async fn store_readings(pool: PgPool, mut readings_receiver: Receiver<SensorReading>) {
-    while let Some(reading) = readings_receiver.recv().await {
-        debug!("reading to insert: {reading}");
-
-        if let Err(err) = db::insert_reading(&pool, &reading).await {
-            error!("db error: {err}");
-        }
-    }
-}
+mod ingest;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<Infallible> {
     homescope_host_util::init();
 
     let config = config::ApiConfig::from_env()?;
@@ -29,11 +16,5 @@ async fn main() -> anyhow::Result<()> {
         sqlx::migrate!().run(&pool).await?;
     }
 
-    let (readings_sender, readings_receiver) = channel::<SensorReading>(256);
-
-    tokio::spawn(store_readings(pool.clone(), readings_receiver));
-
-    mqtt::run(&config.mqtt_host, config.mqtt_port, readings_sender).await?;
-
-    Ok(())
+    tokio::select! { r = ingest::run(&config, pool.clone()) => {r} }
 }

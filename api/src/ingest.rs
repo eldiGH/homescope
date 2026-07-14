@@ -1,14 +1,37 @@
+use std::{convert::Infallible, time::Duration};
+
 use anyhow::bail;
 use homescope_common::reading::SensorReading;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS::AtLeastOnce};
-use tokio::sync::mpsc::{Sender, error::TrySendError};
+use sqlx::PgPool;
+use tokio::{
+    sync::mpsc::{Receiver, Sender, channel, error::TrySendError},
+    time::sleep,
+};
 use tracing::{debug, error, info, warn};
 
-pub async fn run(
+use crate::{config::ApiConfig, db};
+
+async fn store_readings(
+    pool: PgPool,
+    mut readings_receiver: Receiver<SensorReading>,
+) -> anyhow::Result<Infallible> {
+    while let Some(reading) = readings_receiver.recv().await {
+        debug!("reading to insert: {reading}");
+
+        if let Err(err) = db::insert_reading(&pool, &reading).await {
+            error!("db error: {err}");
+        }
+    }
+
+    bail!("ingestion channel closed");
+}
+
+async fn subscribe_mqtt(
     host: &str,
     port: u16,
     readings_sender: Sender<SensorReading>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Infallible> {
     let mut mqtt_options = MqttOptions::new("api", host, port);
     mqtt_options.set_clean_session(false);
 
@@ -17,7 +40,8 @@ pub async fn run(
     loop {
         match event_loop.poll().await {
             Err(err) => {
-                error!("mqtt err: {err}")
+                error!("mqtt err: {err}");
+                sleep(Duration::from_secs(1)).await;
             }
 
             Ok(Event::Incoming(Packet::Publish(publish))) => {
@@ -58,5 +82,14 @@ pub async fn run(
 
             _ => {}
         }
+    }
+}
+
+pub async fn run(config: &ApiConfig, pool: PgPool) -> anyhow::Result<Infallible> {
+    let (readings_sender, readings_receiver) = channel::<SensorReading>(256);
+
+    tokio::select! {
+        r = subscribe_mqtt(&config.mqtt_host, config.mqtt_port, readings_sender) => r,
+        r = store_readings(pool, readings_receiver) => r
     }
 }

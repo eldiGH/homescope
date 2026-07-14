@@ -1,0 +1,12 @@
+[Container]
+Image=eclipse-mosquitto:2-openssl
+ContainerName=homescope-mqtt
+Volume=%h/.config/homescope/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+Network=homescope.network
+AutoUpdate=registry
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

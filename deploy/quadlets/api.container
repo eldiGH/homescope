@@ -1,0 +1,25 @@
+[Unit]
+After=timescaledb.service mosquitto.service
+Wants=timescaledb.service mosquitto.service
+
+[Container]
+ContainerName=homescope-api
+Image=ghcr.io/eldigh/homescope-api:latest
+Network=homescope.network
+AutoUpdate=registry
+EnvironmentFile=%h/.config/homescope/api.env
+
+Environment=DB_HOST=homescope-db
+Environment=DB_PORT=5432
+Environment=DB_DATABASE=homescope
+Environment=DB_POOL_MAX_CONNECTIONS=10
+Environment=MQTT_HOST=homescope-mqtt
+Environment=MQTT_PORT=1883
+Environment=RUN_MIGRATIONS=true
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

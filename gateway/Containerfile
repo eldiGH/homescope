@@ -14,6 +14,7 @@ RUN cargo chef cook --release -p homescope-gateway --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY gateway ./gateway
 COPY common ./common
+COPY host-util ./host-util
 COPY api ./api
 
 RUN cargo build --release -p homescope-gateway

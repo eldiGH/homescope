@@ -1,0 +1,14 @@
+[Container]
+Image=timescale/timescaledb:2.28.2-pg18
+ContainerName=homescope-db
+Volume=timescaledb-data.volume:/var/lib/postgresql
+Volume=%h/.config/homescope/timescaledb-init:/docker-entrypoint-initdb.d:ro
+Network=homescope.network
+EnvironmentFile=%h/.config/homescope/db.env
+AutoUpdate=registry
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

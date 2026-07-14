@@ -5,6 +5,7 @@ on:
     paths:
       - "gateway/**"
       - "common/**"
+      - "host-util/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".containerignore"

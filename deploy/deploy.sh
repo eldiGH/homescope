@@ -6,6 +6,13 @@
 #
 #     git pull && sudo ./deploy/deploy.sh
 #
+# Runs in two phases: root does only what needs root (user creation, udev
+# rule), then drops to $HOMESCOPE_USER for everything else, so all
+# deploy-managed files get the right owner at creation time. In particular,
+# nothing here may ever chown into ~/.local/share/containers — podman's
+# storage holds files owned by subuids (the containers' own users), and a
+# recursive chown corrupts every image and volume in it.
+#
 # Secrets are generated once and never overwritten on reruns.
 
 set -euo pipefail
@@ -32,13 +39,11 @@ generate_password() {
 	openssl rand -hex 24
 }
 
-homescope_systemctl() {
-	systemctl --user -M "$HOMESCOPE_USER@" "$@"
-}
+### Root phase ################################################################
 
 preflight_checks() {
 	local tool
-	for tool in podman rsync openssl udevadm loginctl; do
+	for tool in podman rsync openssl udevadm loginctl runuser; do
 		if ! command -v "$tool" > /dev/null; then
 			die "Missing required tool: $tool"
 		fi
@@ -88,6 +93,32 @@ setup_user() {
 	#     systemctl restart user@$(id -u homescope).service
 	loginctl enable-linger "$HOMESCOPE_USER"
 }
+
+setup_udev_rule() {
+	local rule="99-homescope-receiver.rules"
+
+	# cmp guard skips the udev reload when the rule is unchanged;
+	# the copy itself would be harmless to repeat.
+	if ! cmp -s "$SCRIPT_DIR/udev/$rule" "/etc/udev/rules.d/$rule"; then
+		log "Installing udev rule $rule"
+		cp "$SCRIPT_DIR/udev/$rule" /etc/udev/rules.d/
+		udevadm control --reload-rules
+		udevadm trigger --subsystem-match=tty
+	fi
+}
+
+# Shell functions don't survive into a child process on their own; export -f
+# carries them through the environment, so the runuser'd bash below runs the
+# exact functions defined in this file — no flags, no second script.
+drop_to_homescope() {
+	export SCRIPT_DIR HOMESCOPE_USER HOMESCOPE_DIR CONFIG_DIR QUADLET_DIR
+	export -f log die generate_password setup_secrets setup_configs \
+		setup_quadlets setup_autoupdate_timer start_services homescope_phase
+
+	exec runuser -u "$HOMESCOPE_USER" -- bash -c 'set -euo pipefail; homescope_phase'
+}
+
+### Homescope phase ###########################################################
 
 setup_secrets() {
 	local db_env="$CONFIG_DIR/db.env"
@@ -152,19 +183,6 @@ setup_configs() {
 	rsync -a --delete "$SCRIPT_DIR/grafana/dashboards/" "$CONFIG_DIR/grafana-dashboards/"
 }
 
-setup_udev_rule() {
-	local rule="99-homescope-receiver.rules"
-
-	# cmp guard skips the udev reload when the rule is unchanged;
-	# the copy itself would be harmless to repeat.
-	if ! cmp -s "$SCRIPT_DIR/udev/$rule" "/etc/udev/rules.d/$rule"; then
-		log "Installing udev rule $rule"
-		cp "$SCRIPT_DIR/udev/$rule" /etc/udev/rules.d/
-		udevadm control --reload-rules
-		udevadm trigger --subsystem-match=tty
-	fi
-}
-
 setup_quadlets() {
 	log "Syncing quadlets"
 
@@ -180,28 +198,22 @@ setup_autoupdate_timer() {
 	cp "$SCRIPT_DIR/systemd/podman-auto-update.timer.d/override.conf" "$dropin_dir/"
 }
 
-# Single ownership pass instead of per-step chowns: every earlier step runs as
-# root and may leave root-owned files inside homescope's home.
-fix_ownership() {
-	chown -R "$HOMESCOPE_USER:$HOMESCOPE_USER" "$HOMESCOPE_DIR"
-}
-
 start_services() {
 	log "Reloading systemd and (re)starting services"
 
 	# daemon-reload runs the quadlet generator and picks up the timer
 	# drop-in — it must precede enable/restart.
-	homescope_systemctl daemon-reload
-	homescope_systemctl enable --now podman-auto-update.timer
+	systemctl --user daemon-reload
+	systemctl --user enable --now podman-auto-update.timer
 
 	# 'restart' below reuses locally cached images and never contacts the
 	# registry — without this pull pass a deploy would restart services on
 	# stale code. Same oneshot unit the timer fires (incl. auto-rollback);
 	# 'start' blocks until it finishes. No-op for not-yet-running containers
 	# (first deploy pulls happen in the restarts below instead).
-	homescope_systemctl start podman-auto-update.service
+	systemctl --user start podman-auto-update.service
 
-	homescope_systemctl restart \
+	systemctl --user restart \
 		mosquitto.service \
 		timescaledb.service \
 		api.service \
@@ -211,16 +223,29 @@ start_services() {
 	log "Done. Check status with: sudo systemctl --user -M $HOMESCOPE_USER@ status <unit>"
 }
 
+homescope_phase() {
+	# runuser resets HOME/USER to the target user but keeps the rest of the
+	# caller's environment; systemctl --user finds the user's systemd manager
+	# through XDG_RUNTIME_DIR, which still points at root's — fix it.
+	XDG_RUNTIME_DIR="/run/user/$(id -u)"
+	export XDG_RUNTIME_DIR
+
+	if [[ ! -S "$XDG_RUNTIME_DIR/bus" ]]; then
+		die "No user manager for $HOMESCOPE_USER at $XDG_RUNTIME_DIR — linger not active yet?"
+	fi
+
+	setup_configs
+	setup_secrets
+	setup_quadlets
+	setup_autoupdate_timer
+	start_services
+}
+
 main() {
 	preflight_checks
 	setup_user
-	setup_configs
-	setup_secrets
 	setup_udev_rule
-	setup_quadlets
-	setup_autoupdate_timer
-	fix_ownership
-	start_services
+	drop_to_homescope
 }
 
 main "$@"

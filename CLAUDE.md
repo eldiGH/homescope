@@ -1,8 +1,10 @@
 # Homescope — project orientation
 
-**Homescope** is an ambient-sensor stack: battery-powered BLE 5.0 sensors broadcasting temperature / humidity / pressure via **Coded-PHY extended advertising**, picked up by a dedicated **nRF52840 USB-CDC receiver dongle** plugged into a Raspberry Pi gateway, which decodes the framed packets and publishes them to a local Mosquitto MQTT broker (payload crypto planned). A separate API service will subscribe to MQTT and store data in TimescaleDB for visualization in Grafana. Hardware is mid-migration (2026-07): XIAO nRF52840 Plus dev boards (retired from RF duty — measured antenna verdict below) → Raytac MDBT50Q-DB-40 eval boards → custom PCB with the MDBT50Q module.
+**Homescope** is an ambient-sensor stack: battery-powered BLE 5.0 sensors broadcasting temperature / humidity / pressure via **Coded-PHY extended advertising**, picked up by a dedicated **nRF52840 USB-CDC receiver dongle** plugged into a Raspberry Pi gateway, which decodes the framed packets and publishes them to a Mosquitto MQTT broker (payload crypto planned — decrypt happens in the API, not the gateway). The **`homescope-api`** service subscribes to MQTT and stores readings in **TimescaleDB**, visualized in **Grafana**; everything Pi-side runs as rootless Podman quadlets with CI-built images. Hardware is mid-migration (2026-07): XIAO nRF52840 Plus dev boards (retired from RF duty — measured antenna verdict below) → Raytac MDBT50Q-DB-40 eval boards → custom PCB with the MDBT50Q module.
 
 Layout: monorepo with two Cargo workspaces split by target architecture (firmware vs host), plus a shared `common` crate referenced by both.
+
+**Uncommitted scratch plans**: `NOTES-*.md` files at the repo root (untracked by design) hold the owner's worked-out plans for upcoming backend/deploy tasks — graceful shutdown, ingest DB-error handling / manual acks, site+room topology, mosquitto ACLs, udev device activation, USB-CDC tightening. When one of those topics comes up, read the matching NOTES file first; the decisions in them are settled.
 
 ## How to collaborate with the project owner
 
@@ -19,17 +21,25 @@ The owner is learning Rust, Embassy, and embedded systems through this project. 
 
 ```text
 homescope/
-├── Cargo.toml              # host-target workspace: gateway, common
-├── common/                 # shared types — homescope-common (no_std-by-default)
+├── Cargo.toml              # host-target workspace: gateway, api, common, host-util
+├── justfile                # dev workflow: just api / gateway / db-seed / grafana-pull / dev
+├── compose.dev.yml         # dev stack: mosquitto + TimescaleDB + Grafana (localhost:4000)
+├── common/                 # shared types — homescope-common (no_std-by-default; features: wire, serde)
 │   └── src/
 │       ├── lib.rs
-│       ├── device_id.rs    # DeviceId(u64) newtype (FICR-sourced)
-│       ├── packet.rs       # SensorPacket (repr(C, packed)) — over-the-air payload
-│       ├── observation.rs  # SensorObservation = packet + receiver RSSI/age
-│       ├── frame.rs        # Frame: magic + payload + CRC-16/IBM-SDLC
-│       └── reading.rs      # SensorReading (serde, human units)
-├── gateway/                # Pi-side receiver decoder + MQTT publisher + benchmark page
-│   └── src/main.rs         # homescope-gateway
+│       ├── hardware_id.rs  # HardwareId(u64) newtype (FICR-sourced), 16-hex Display/serde
+│       ├── packet.rs       # SensorPacket (repr(C, packed)) — over-the-air payload (18 B)
+│       ├── observation.rs  # SensorObservation = packet + receiver RSSI/age (23 B)
+│       ├── frame.rs        # Frame: magic + payload + CRC-16/IBM-SDLC (27 B)
+│       └── reading.rs      # SensorReading (serde camelCase, human units) — MQTT JSON payload
+├── gateway/                # Pi-side bridge: USB-CDC decode → MQTT publish — homescope-gateway
+│   ├── Containerfile
+│   └── src/                # main.rs, config.rs (env), decoder.rs (tokio_util Decoder)
+├── api/                    # homescope-api — MQTT → TimescaleDB ingest (HTTP endpoints next; axum staged)
+│   ├── Containerfile
+│   ├── migrations/         # sqlx: readings hypertable, devices table
+│   └── src/                # main.rs, config.rs, db.rs, ingest/ (+unknown.rs), devices/ (registry/cache/store)
+├── host-util/              # homescope-host-util — shared init() (dotenv+tracing) + env_var_or
 ├── firmware/
 │   ├── Cargo.toml          # firmware workspace: sensor, receiver, board
 │   ├── .cargo/config.toml  # cross-compile target (thumbv7em-none-eabi)
@@ -41,22 +51,27 @@ homescope/
 │   │   └── src/lib.rs
 │   ├── sensor/             # homescope-sensor — BLE-advertising firmware
 │   │   ├── flash_uf2.sh    # UF2 backup flow (calls tools/uf2/uf2conv.py)
-│   │   └── src/
+│   │   └── src/            # main.rs, ble_advertise.rs, sensors.rs, battery.rs, packet_builder.rs
 │   └── receiver/           # homescope-receiver — USB-CDC BLE scanner dongle
 │       ├── flash_uf2.sh
-│       └── src/
+│       └── src/            # main.rs, ble_scan.rs
+├── deploy/                 # production deployment (Pi)
+│   ├── deploy.sh           # idempotent converge script (root phase + homescope-user phase)
+│   ├── backup-db.sh
+│   ├── quadlets/           # mosquitto/timescaledb/api/gateway/grafana .container + network/volumes
+│   ├── grafana/            # provisioning + committed dashboard JSON (round-trip: just grafana-pull)
+│   ├── mosquitto/          # mosquitto.conf (prod: persistence) + mosquitto.dev.conf
+│   ├── timescaledb/        # init roles + seed.dev.sql
+│   ├── systemd/            # podman-auto-update timer override
+│   └── udev/               # 99-homescope-receiver.rules → /dev/homescope-receiver
+├── .github/workflows/      # build-{gateway,api}.yml → build-image.yml: ARM images → ghcr.io/eldigh/*
 ├── tools/
 │   └── uf2/                # vendored microsoft/uf2 tooling (MIT) — see tools/uf2/README.md
-│       ├── uf2conv.py
-│       ├── uf2families.json
-│       ├── LICENSE
-│       └── README.md
-├── api/                    # (planned) HTTP API + MQTT subscriber + TimescaleDB
-├── deploy/                 # (planned) Podman quadlets + k8s pod YAML for Pi
 ├── docs/
 │   ├── architecture.md
 │   ├── flashing.md
 │   └── protocol.md         # USB-CDC wire protocol between receiver and gateway
+├── NOTES-*.md              # untracked scratch plans for upcoming work (see intro)
 └── CLAUDE.md
 ```
 
@@ -68,11 +83,15 @@ homescope/
 - ✅ **Board abstraction** (`firmware/board/`): `Board` struct holds *only board-varying* resources (LED / I²C / sensor-power-gate pins as `Peri<'static, AnyPin>`, SAADC battery input as `AnyInput`, divider ratio); the cfg'd `board!(p)` macro constructs it via partial moves so `Peripherals` stays usable in `main` for chip-fixed peripherals (RNG, PPI, TWIM, SAADC, MPSL set). Deliberately **not** an owning BSP struct — see docs/architecture.md. Caveat: cfg'd macro arms only compile under their own feature — check both configs (`cargo clippy --workspace` per board) before calling a change done.
 - ⏳ **XIAO alkaline soak test** (planned 2026-07-10): bare XIAO Plus (no expansion board) + 2× AA alkaline → 3V3 pin; SHT45 direct-wired (SDA P1.14, SCL P1.13, power-gate P1.15); UF2-flashed, no probe attached (SWD debug mode inflates sleep current). Measures delivery reliability + battery longevity of *current pre-sleep-optimization* firmware via per-minute battery_mv telemetry on the gateway. Prerequisite advised: watchdog — without a probe, a panic is a silent HardFault spin that drains the pack.
 - ✅ **Receiver firmware** (`firmware/receiver/`): extended scanning on Coded PHY (`scan_ext` + `on_ext_adv_reports`), framed `SensorObservation`s (packet + RSSI + age_ms) over USB-CDC. Robust to host disconnect/reconnect — DTR-aware writes with disconnect-race in `select`, drop-oldest backlog channel, sequence-based dedup, post-DTR grace period.
-- ✅ **Common crate**: `SensorPacket` (air), `SensorObservation` (receiver→gateway), `SensorReading` (app), `DeviceId`, `Frame` (magic + payload + CRC-16/IBM-SDLC) — see docs/protocol.md v0.2 (30-byte frames).
-- ✅ **Gateway**: serial decode (`tokio_util` `Decoder` over `BytesMut`), MQTT publish to `homescope/sensors/<device-id>/reading`, and a live range-survey page on port 3000 (10 s rolling delivery %, RSSI stats, sensor-reboot-safe).
+- ✅ **Common crate**: `SensorPacket` (air, 18 B), `SensorObservation` (receiver→gateway, 23 B), `SensorReading` (app/JSON), `HardwareId` (u64, FICR, 16-hex-uppercase rendering), `Frame` (magic + payload + CRC-16/IBM-SDLC) — see docs/protocol.md v0.3 (**27-byte frames**; pressure field removed, `rh_cpercent: u16`). Features: `wire` (bytemuck/crc), `serde`.
+- ✅ **Gateway**: a pure bridge now — serial decode (`tokio_util` `Decoder` in `decoder.rs`), `received_at = now − age_ms`, JSON publish (QoS 1) to `homescope/sensors/<hardware-id>/reading`. Env-configured (`MQTT_HOST`, `MQTT_PORT`, `RECEIVER_PATH` default `/dev/homescope-receiver`) via `host-util`. The old range-survey page (port 3000) was retired to the `reliability-benchmark` branch — check it out to rerun a survey.
+- ✅ **API** (`homescope-api`): MQTT→TimescaleDB ingest — rumqttc durable session (`clean_session=false`, QoS 1, client id `api`) subscribing `homescope/sensors/+/reading` → bounded mpsc(256, try_send drop+warn) → sqlx writer. `devices` table (id, hardware_id unique, name) loaded into a `DeviceRegistry` cache at startup; readings FK to `devices.id`; **unknown devices warn-once + drop, no auto-registration** (table becomes the key registry when AEAD lands). Migrations at startup with `RUN_MIGRATIONS=true`. HTTP endpoints not started (axum in deps). ⚠️ Known gap: DB insert errors log-and-continue while rumqttc auto-acks → readings lost during DB outages (see NOTES-ingest-db-error-handling.md; end-state = manual acks + seq dedup).
+- ✅ **Deployment**: rootless Podman quadlets (mosquitto w/ persistence, TimescaleDB 2.x/PG18, api, gateway, grafana) under a `homescope` user; ARM images from GitHub Actions → ghcr.io/eldigh/* with `AutoUpdate=registry` + auto-update timer; idempotent `deploy/deploy.sh` (secrets generated once); udev symlink rule; `backup-db.sh`. Grafana: provisioned datasource + committed dashboard, anonymous viewer, port 4000.
+- ✅ **Dev workflow**: `justfile` + `compose.dev.yml` — `just api`/`just gateway` auto-start deps, `just db-seed` (~90 days fake data), `just grafana-pull` (dashboard → repo), `just dev` (zellij).
 - ⏳ **S=8 forcing** (raw-HCI `LeSetExtAdvParamsV2` on the sensor) — next firmware task, worth +4-5 dB.
 - ✅ **Hardware migration, stage 1 (2026-07-03)**: 2× Raytac MDBT50Q-DB-40 in hand, whole-house survey **passed** (worst spot ≥85 % delivery after minor repositioning) → **MDBT50Q-1MV2 validated as the production module**. Remaining: custom PCB (MDBT50Q module, VDDH + gated sensor-rail LDO power topology — see Key facts).
-- ⏳ **API, deploy, remaining sensor drivers (BMP581, LTR390), crypto, sleep optimization, watchdog**: not yet started.
+- ⏳ **Planned backend/deploy work** (each has a worked-out NOTES-*.md at repo root): API graceful shutdown; ingest DB-error handling → manual MQTT acks + per-device seq check (replay/dedup/idempotency, one mechanism); `devices.site`/`room` columns + gateway `SITE` topic prefix (`homescope/<site>/sensors/...`, one PR); mosquitto password_file + per-gateway ACLs (before the two-house VPN rollout); udev-driven gateway activation (`TAG+="systemd"` + `BindsTo=`); real VID/PID (pid.codes) replacing embassy's `0xc0de:0xcafe`.
+- ⏳ **Remaining firmware work**: watchdog (soak-test prerequisite), BMP581 + LTR390 drivers, crypto (decrypt-in-API), sleep optimization, HTTP API.
 
 ## Build & flash
 
@@ -145,14 +164,17 @@ To flash: double-tap RESET on the XIAO so the bootloader USB drive appears, then
 
 See [docs/protocol.md](docs/protocol.md) for the full spec. Quick summary:
 
-- 30-byte frame: 2-byte magic `HS` + 26-byte `SensorObservation` (air-packet fields + receiver-side `rssi`/`age_ms` + 64-bit `DeviceId`) + 2-byte CRC-16/IBM-SDLC over the payload (little-endian on the wire).
-- Gateway uses `tokio_util::codec::Decoder` over `BytesMut` with magic-search via `memchr` and frame validation via `Frame::try_from_bytes`.
+- 27-byte frame: 2-byte magic `HS` + 23-byte `SensorObservation` (air-packet fields + receiver-side `rssi`/`age_ms` + 64-bit `HardwareId`; no pressure field — that arrives later via a typed payload) + 2-byte CRC-16/IBM-SDLC over the payload (little-endian on the wire).
+- Gateway uses `tokio_util::codec::Decoder` over `BytesMut` (`gateway/src/decoder.rs`) with magic-search via `memchr` and frame validation via `Frame::try_from_bytes`.
 - The actual decoder implementation is shorter than the spec — `common` encapsulates magic/CRC/serialization.
+- Downstream of the gateway, readings travel as JSON (`SensorReading`, serde camelCase) on `homescope/sensors/<hardware-id>/reading`; planned topic shape adds a per-gateway site prefix (`homescope/<site>/sensors/...`).
 
 ## Where to find things
 
 - [README.md](README.md) — top-level overview, pointers into the crates
-- [docs/architecture.md](docs/architecture.md) — full design rationale: protocol choice, sensor selection, power topology, security model, BLE vs ESB tradeoff analysis
-- [docs/protocol.md](docs/protocol.md) — USB-CDC wire protocol between receiver and gateway
-- [docs/flashing.md](docs/flashing.md) — UF2 build & flash workflow, mount setup, troubleshooting
+- [docs/architecture.md](docs/architecture.md) — full design rationale: protocol choice, sensor selection, power topology, security model, BLE vs ESB tradeoff, API/deployment architecture
+- [docs/protocol.md](docs/protocol.md) — USB-CDC wire protocol between receiver and gateway (v0.3, 27-byte frames)
+- [docs/flashing.md](docs/flashing.md) — UF2 build & flash workflow (XIAO-only), mount setup, troubleshooting
+- `deploy/deploy.sh` header comment — the deployment model (two-phase, idempotent, ownership rules; **never chown into `~/.local/share/containers`**)
+- `NOTES-*.md` (repo root, untracked) — settled plans for upcoming backend/deploy tasks; read before working on those topics
 - `~/.claude/plans/let-s-analyze-that-my-glowing-peacock.md` — original full design exploration (lives in Claude's plan store, not committed)

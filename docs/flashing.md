@@ -6,6 +6,10 @@ The Seeed XIAO nRF52840 **Plus** ships with the **Adafruit UF2 bootloader v0.9.2
 
 **UF2 is the fallback path**, used when the chip can't be accessed via SWD — sensor units deployed in sealed enclosures, or any situation where the probe isn't available. The receiver dongle stays on the bench permanently and almost always uses probe-rs; the sensor firmware is where UF2 earns its keep.
 
+> **Scope: this whole document is XIAO-specific.** The Raytac MDBT50Q-DB-40 boards (the current primary hardware) ship with **no bootloader** — they are flashed exclusively via probe-rs, and their application links at `0x0`. The board feature selects the linker script (see `firmware/board/`).
+>
+> ⚠️ **Feature-flag trap**: `board-db40` is the *default* Cargo feature. A XIAO build — including anything destined for UF2 — needs `--no-default-features --features board-xiao`, or the resulting image is linked at `0x0` and the bootloader will reject it (or worse, a probe-rs flash of a DB-40 image onto a XIAO erases its MBR/SoftDevice/bootloader). `flash_uf2.sh` currently builds with default features — patch/pass the XIAO flags before trusting it.
+
 ## Critical: this board ships with SoftDevice S140 installed
 
 The bootloader on the Plus variant has **Nordic SoftDevice S140 7.3.0** pre-installed at `0x1000–0x26FFF` (152 KB). This means **the application must start at `0x27000`, not `0x26000`**. If you flash to `0x26000`, the bootloader silently rejects the app as invalid and stays in DFU mode (constant fast red blink, single-tap reset enters flash mode). Both `memory.x` and the `uf2conv.py --base` flag must use `0x27000`.
@@ -19,12 +23,7 @@ cargo install cargo-binutils
 rustup component add llvm-tools-preview
 ```
 
-Get `uf2conv.py` and its companion `families.json` (both required — the script reads the family table from JSON):
-
-```bash
-curl -L https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py -o uf2conv.py
-curl -L https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json -o uf2families.json
-```
+`uf2conv.py` and its companion `uf2families.json` are **vendored in the repo** at [`tools/uf2/`](../tools/uf2/) (MIT-licensed, from microsoft/uf2) — no download needed; the flash scripts call them from there.
 
 Note: `elf2uf2-rs` does NOT work for the nRF52840 — it's RP2040-specific. Use `uf2conv.py`.
 
@@ -41,23 +40,23 @@ The `uid`/`gid` options are critical — without them, FAT defaults to root owne
 
 ## Build & flash
 
-The convenience script is at `firmware/sensor/flash.sh`. From that directory:
+The convenience script is at `firmware/sensor/flash_uf2.sh` (the receiver has a parallel one). From that directory:
 
 ```bash
-./flash.sh
+./flash_uf2.sh
 ```
 
-Which expands to:
+Which expands to (remember the XIAO feature flags — see the warning at the top):
 
 ```bash
-# Build firmware
+# Build firmware (XIAO: add --no-default-features --features board-xiao)
 cargo build --release
 
 # Convert ELF to raw binary
 cargo objcopy --release -- -O binary firmware.bin
 
 # Convert binary to UF2 — note --base 0x27000 (SoftDevice present, see above)
-python uf2conv.py firmware.bin \
+python ../../tools/uf2/uf2conv.py firmware.bin \
     --family 0xADA52840 \
     --base 0x27000 \
     --output firmware.uf2
@@ -69,7 +68,7 @@ cp firmware.uf2 /mnt/xiao/ && sync
 To flash:
 
 1. **Double-tap RESET** on the XIAO quickly — the board enters bootloader mode, USB drive mounts at `/mnt/xiao`
-2. Run `./flash.sh`
+2. Run `./flash_uf2.sh`
 3. Board flashes the UF2 and auto-reboots into the application. The mount disappears automatically.
 
 ## Critical addresses
@@ -78,7 +77,7 @@ To flash:
 - **Application base address**: `0x00027000` — MBR at `0x0000–0x0FFF` + SoftDevice S140 at `0x1000–0x26FFF` precede the application
 - **Application maximum length**: `868 KB` (1 MB total flash minus 4 KB MBR minus 152 KB SoftDevice)
 
-These match the `FLASH` region in [firmware/sensor/memory.x](../firmware/sensor/memory.x). If you change one, change both.
+These match the `FLASH` region in [firmware/board/memory-xiao.x](../firmware/board/memory-xiao.x) (selected by the `board-xiao` feature via `firmware/board/build.rs`). If you change one, change both.
 
 ## How to verify the bootloader expects 0x27000
 
@@ -90,18 +89,9 @@ cat /mnt/xiao/INFO_UF2.TXT
 
 If you see `SoftDevice: S140 7.3.0` in the output, the application offset is `0x27000`. If the SoftDevice line is absent, the offset would be `0x26000`. This is how we discovered the Plus variant's layout differs from the standard XIAO nRF52840.
 
-## Suggested .gitignore additions
+## Generated files
 
-The following are generated locally and should not be committed:
-
-```
-/firmware.bin
-/firmware.uf2
-/uf2conv.py
-/uf2families.json
-```
-
-(`/target` is already in `.gitignore`.)
+`firmware.bin` and `firmware.uf2` are generated locally by the flash scripts and are gitignored. The UF2 tooling itself (`uf2conv.py`, `uf2families.json`) is vendored at `tools/uf2/` and *is* committed.
 
 ## Troubleshooting
 

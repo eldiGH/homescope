@@ -7,8 +7,9 @@
 #     git pull && sudo ./deploy/deploy.sh
 #
 # Runs in two phases: root does only what needs root (user creation, udev
-# rule), then drops to $HOMESCOPE_USER for everything else, so all
-# deploy-managed files get the right owner at creation time. In particular,
+# rule, staging the deploy tree into $STAGING_DIR), then drops to
+# $HOMESCOPE_USER for everything else, so all deploy-managed files get the
+# right owner at creation time. In particular,
 # nothing here may ever chown into ~/.local/share/containers — podman's
 # storage holds files owned by subuids (the containers' own users), and a
 # recursive chown corrupts every image and volume in it.
@@ -23,6 +24,7 @@ HOMESCOPE_USER="homescope"
 HOMESCOPE_DIR="/var/lib/homescope"
 CONFIG_DIR="$HOMESCOPE_DIR/.config/homescope"
 QUADLET_DIR="$HOMESCOPE_DIR/.config/containers/systemd"
+STAGING_DIR="$HOMESCOPE_DIR/deploy-src"
 
 MIN_PODMAN_VERSION="4.4" # quadlet support
 
@@ -107,11 +109,24 @@ setup_udev_rule() {
 	fi
 }
 
+# The homescope user usually cannot read the git checkout (home dirs are 700
+# on current Raspberry Pi OS, and path resolution needs traversal rights on
+# every ancestor), so root — which can read anything — stages a copy that
+# homescope owns. The copy is kept after the deploy: --delete keeps it
+# converged, it doubles as a record of what the last deploy shipped, and a
+# cleanup-on-exit would be one more thing to go wrong mid-failure.
+stage_deploy_tree() {
+	log "Staging deploy tree to $STAGING_DIR"
+
+	rsync -a --delete --chown "$HOMESCOPE_USER:$HOMESCOPE_USER" \
+		"$SCRIPT_DIR/" "$STAGING_DIR/"
+}
+
 # Shell functions don't survive into a child process on their own; export -f
 # carries them through the environment, so the runuser'd bash below runs the
 # exact functions defined in this file — no flags, no second script.
 drop_to_homescope() {
-	export SCRIPT_DIR HOMESCOPE_USER HOMESCOPE_DIR CONFIG_DIR QUADLET_DIR
+	export STAGING_DIR HOMESCOPE_USER HOMESCOPE_DIR CONFIG_DIR QUADLET_DIR
 	export -f log die generate_password setup_secrets setup_configs \
 		setup_quadlets setup_autoupdate_timer start_services homescope_phase
 
@@ -234,6 +249,9 @@ homescope_phase() {
 		die "No user manager for $HOMESCOPE_USER at $XDG_RUNTIME_DIR — linger not active yet?"
 	fi
 
+	# Everything below reads from the root-staged copy, not the checkout.
+	SCRIPT_DIR="$STAGING_DIR"
+
 	setup_configs
 	setup_secrets
 	setup_quadlets
@@ -245,6 +263,7 @@ main() {
 	preflight_checks
 	setup_user
 	setup_udev_rule
+	stage_deploy_tree
 	drop_to_homescope
 }
 

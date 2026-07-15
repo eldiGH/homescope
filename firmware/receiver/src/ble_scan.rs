@@ -1,4 +1,4 @@
-use core::cell::Cell;
+use core::cell::RefCell;
 
 use bt_hci::cmd::le::{LeSetExtScanEnable, LeSetExtScanParams};
 use bt_hci::controller::ControllerCmdSync;
@@ -6,8 +6,11 @@ use defmt::{info, unwrap};
 use embassy_futures::join::join;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
 use embassy_time::{Duration, Instant};
+use homescope_common::hardware_id::HardwareId;
 use homescope_common::{observation::SensorObservation, packet::SensorPacket};
 use trouble_host::prelude::*;
+
+use crate::lru_cache::LruCache;
 
 /// Max number of connections
 const CONNECTIONS_MAX: usize = 1;
@@ -16,12 +19,11 @@ const L2CAP_CHANNELS_MAX: usize = 1;
 pub async fn run<C, const N: usize>(
     controller: C,
     channel: &'_ Channel<NoopRawMutex, (Instant, SensorObservation), N>,
+    mac_addr: [u8; 6]
 ) where
     C: Controller + ControllerCmdSync<LeSetExtScanParams> + ControllerCmdSync<LeSetExtScanEnable>,
 {
-    // Using a fixed "random" address can be useful for testing. In real scenarios, one would
-    // use e.g. the MAC 6 byte array as the address (how to get that varies by the platform).
-    let address: Address = Address::random([0xff, 0x8f, 0x1b, 0x06, 0xe4, 0xff]);
+    let address: Address = Address::random(mac_addr);
 
     info!("Our address = {:?}", address);
 
@@ -35,7 +37,7 @@ pub async fn run<C, const N: usize>(
 
     let packet_handler = PacketHandler::<N> {
         channel,
-        last_seq: Cell::new(None),
+        seq_cache: RefCell::new(LruCache::new()),
     };
 
     let mut scanner = Scanner::new(central);
@@ -57,7 +59,7 @@ pub async fn run<C, const N: usize>(
 
 struct PacketHandler<'a, const N: usize> {
     channel: &'a Channel<NoopRawMutex, (Instant, SensorObservation), N>,
-    last_seq: Cell<Option<u32>>,
+    seq_cache: RefCell<LruCache<HardwareId, u32, 32>>,
 }
 
 impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
@@ -67,10 +69,6 @@ impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
                 continue;
             };
 
-            if report.addr != BdAddr([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]) {
-                continue;
-            }
-
             for ad in AdStructure::decode(report.data) {
                 if let Ok(AdStructure::ManufacturerSpecificData {
                     company_identifier: 0xFFFF,
@@ -79,11 +77,18 @@ impl<'a, const N: usize> EventHandler for PacketHandler<'a, N> {
                     && payload.len() == size_of::<SensorPacket>()
                 {
                     let packet = SensorPacket::from_bytes(payload);
+                    let hardware_id = packet.hardware_id;
 
-                    let prev = self.last_seq.replace(Some(packet.seq));
-                    if prev == Some(packet.seq) {
-                        continue; // immediate duplicate
+                    let mut cache = self.seq_cache.borrow_mut();
+
+                    if cache
+                        .get(&hardware_id)
+                        .is_some_and(|cached_seq| packet.seq <= *cached_seq)
+                    {
+                        continue;
                     }
+
+                    cache.insert(hardware_id, packet.seq);
 
                     let observation = SensorObservation {
                         battery_mv: packet.battery_mv,

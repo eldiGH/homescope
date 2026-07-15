@@ -25,6 +25,7 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 mod ble_scan;
+mod lru_cache;
 
 enum BlinkEvent {
     Inc,
@@ -178,7 +179,7 @@ async fn main(spawner: Spawner) {
         OBSERVATION_CHANNEL_SIZE,
     > = Channel::new();
 
-    let ble_fut = ble_scan::run(sdc, &observations_channel);
+    let ble_fut = ble_scan::run(sdc, &observations_channel, homescope_board::mac_addr());
 
     let usb_writer_fut = async {
         loop {

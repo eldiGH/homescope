@@ -14,7 +14,7 @@ test=false
 [dependencies]
 homescope-common = { workspace = true }
 
-embassy-nrf = { version = "0.10.0", features = ["nrf52840"] }
+embassy-nrf = { version = "0.10.0", features = ["nrf52840", "unstable-pac"] }
 
 [package.metadata.embassy]
 build = [

@@ -53,3 +53,10 @@ pub fn hardware_id() -> HardwareId {
 
     HardwareId(high << 32 | low)
 }
+
+pub fn mac_addr() -> [u8; 6] {
+    let [b4, b5, _, _] = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
+    let [b0, b1, b2, b3] = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
+
+    [b0, b1, b2, b3, b4, b5 | 0xC0]
+}

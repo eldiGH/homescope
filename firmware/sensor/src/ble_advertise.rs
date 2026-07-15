@@ -10,8 +10,12 @@ use crate::packet_builder::PacketSignal;
 
 const BURST_DURATION: Duration = Duration::from_millis(400);
 
-pub async fn run<C>(controller: C, led_pin: &mut Output<'_>, packet_signal: &'static PacketSignal)
-where
+pub async fn run<C>(
+    controller: C,
+    led_pin: &mut Output<'_>,
+    packet_signal: &'static PacketSignal,
+    mac_addr: [u8; 6],
+) where
     C: Controller
         + for<'t> ControllerCmdSync<LeSetExtAdvData<'t>>
         + ControllerCmdSync<LeClearAdvSets>
@@ -21,8 +25,9 @@ where
         + for<'t> ControllerCmdSync<LeSetExtAdvEnable<'t>>
         + for<'t> ControllerCmdSync<LeSetExtScanResponseData<'t>>,
 {
-    let address: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
+    let address = Address::random(mac_addr);
     info!("Our address = {:?}", address);
+
 
     let mut resources: HostResources<_, DefaultPacketPool, 0, 0> = HostResources::new();
     let stack = trouble_host::new(controller, &mut resources)

@@ -53,7 +53,7 @@
       "id": 1,
       "interval": "1m",
       "options": {
-        "colorMode": "value",
+        "colorMode": "none",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
@@ -105,7 +105,7 @@
       "id": 2,
       "interval": "1m",
       "options": {
-        "colorMode": "value",
+        "colorMode": "none",
         "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
@@ -234,35 +234,30 @@
     },
     {
       "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
-      "description": "Time since the last received packet, regardless of dashboard range. Cadence is 60 s — anything past a few minutes means lost packets or a dead node.",
+      "description": "Time of the last received packet, regardless of dashboard range. Ticks live in the UI (liveNow) — queries still run once per minute.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "decimals": 0,
+          "color": { "fixedColor": "text", "mode": "fixed" },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 180 },
-              { "color": "red", "value": 600 }
-            ]
+            "steps": [{ "color": "green", "value": null }]
           },
-          "unit": "s"
+          "unit": "dateTimeFromNow"
         },
         "overrides": []
       },
       "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
       "id": 5,
       "options": {
-        "colorMode": "value",
+        "colorMode": "none",
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": ["lastNotNull"],
           "fields": "",
-          "values": true
+          "values": false
         },
         "showPercentChange": false,
         "textMode": "auto",
@@ -273,9 +268,9 @@
         {
           "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
           "editorMode": "code",
-          "format": "table",
+          "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  d.name AS device,\n  extract(epoch FROM now() - max(r.time)) AS age\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE r.device_id IN (${device:csv})\nGROUP BY d.name\nORDER BY d.name",
+          "rawSql": "SELECT\n  l.time AS \"time\",\n  d.name AS metric,\n  extract(epoch FROM l.time) * 1000 AS \"last seen\"\nFROM devices d\nJOIN LATERAL (\n  SELECT r.time\n  FROM readings r\n  WHERE r.device_id = d.id\n  ORDER BY r.time DESC\n  LIMIT 1\n) l ON true\nWHERE d.id IN (${device:csv})\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -419,8 +414,118 @@
       "type": "timeseries"
     },
     {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
+      "description": "Dew point computed from temperature + RH (Magnus formula). Surfaces colder than this condense — condensation risk indicator, mainly relevant for the outdoor node.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic-by-name" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 18, "x": 0, "y": 17 },
+      "id": 12,
+      "interval": "1m",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": { "hideZeros": false, "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "12.2.10",
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT \"time\", metric, 243.12 * g / (17.62 - g) AS dewpoint\nFROM (\n  SELECT\n    time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n    d.name AS metric,\n    ln(avg(r.rh_percent) / 100.0) + 17.62 * avg(r.temp_degc) / (243.12 + avg(r.temp_degc)) AS g\n  FROM readings r\n  JOIN devices d ON d.id = r.device_id\n  WHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\n  GROUP BY 1, 2\n) s\nORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Dew point",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
+      "description": "Today's lowest and highest temperature per device (since local midnight).",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "text", "mode": "fixed" },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 17 },
+      "id": 13,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": true
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.2.10",
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  d.name AS device,\n  min(r.temp_degc) AS low,\n  max(r.temp_degc) AS high\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE r.time >= date_trunc('day', now()) AND r.device_id IN (${device:csv})\nGROUP BY d.name\nORDER BY d.name",
+          "refId": "A"
+        }
+      ],
+      "title": "Today's min / max",
+      "type": "stat"
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
       "id": 102,
       "panels": [],
       "title": "Radio & delivery",
@@ -464,7 +569,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
       "id": 8,
       "interval": "1m",
       "options": {
@@ -532,7 +637,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
       "id": 9,
       "interval": "30m",
       "options": {
@@ -585,7 +690,7 @@
           }
         ]
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 26 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 },
       "id": 10,
       "options": {
         "cellHeight": "sm",
@@ -613,7 +718,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
       "id": 103,
       "panels": [],
       "title": "Power",
@@ -660,7 +765,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 35 },
+      "gridPos": { "h": 8, "w": 18, "x": 0, "y": 42 },
       "id": 11,
       "interval": "1m",
       "options": {
@@ -685,8 +790,59 @@
       ],
       "title": "Battery voltage trend",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
+      "description": "Days until the 2.4 V cutoff, from a linear fit over the last 14 days. Rough by nature — alkaline discharge is non-linear (long plateau, then a cliff), so treat it as a trend indicator, not a promise. Empty while voltage isn't declining.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 14 },
+              { "color": "green", "value": 45 }
+            ]
+          },
+          "unit": "d"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 42 },
+      "id": 14,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": true
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.2.10",
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  device,\n  CASE WHEN m < 0 THEN (2.4 - (b + m * extract(epoch FROM now()))) / m / 86400.0 END AS days\nFROM (\n  SELECT\n    d.name AS device,\n    regr_slope(r.battery_mv / 1000.0, extract(epoch FROM r.time)) AS m,\n    regr_intercept(r.battery_mv / 1000.0, extract(epoch FROM r.time)) AS b\n  FROM readings r\n  JOIN devices d ON d.id = r.device_id\n  WHERE r.time > now() - interval '14 days' AND r.device_id IN (${device:csv})\n  GROUP BY d.name\n) s\nORDER BY device",
+          "refId": "A"
+        }
+      ],
+      "title": "Battery days left (est.)",
+      "type": "stat"
     }
   ],
+  "liveNow": true,
   "preload": false,
   "refresh": "1m",
   "schemaVersion": 42,

@@ -148,7 +148,8 @@ setup_configs() {
 	cp "$SCRIPT_DIR/mosquitto/mosquitto.conf" "$CONFIG_DIR/mosquitto.conf"
 
 	rsync -a --delete "$SCRIPT_DIR/timescaledb/init/" "$CONFIG_DIR/timescaledb-init/"
-	rsync -a --delete "$SCRIPT_DIR/grafana/provisioning/datasources/" "$CONFIG_DIR/grafana-provisioning/"
+	rsync -a --delete "$SCRIPT_DIR/grafana/provisioning/" "$CONFIG_DIR/grafana-provisioning/"
+	rsync -a --delete "$SCRIPT_DIR/grafana/dashboards/" "$CONFIG_DIR/grafana-dashboards/"
 }
 
 setup_udev_rule() {

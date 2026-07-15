@@ -13,6 +13,10 @@ PublishPort=4000:3000
 EnvironmentFile=%h/.config/homescope/grafana.env
 Environment=GRAFANA_DB_USER=grafana
 Environment=GRAFANA_ALLOW_UI_UPDATES=false
+Environment=GF_AUTH_ANONYMOUS_ENABLED=true
+Environment="GF_AUTH_ANONYMOUS_ORG_NAME=Main Org."
+Environment=GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+Environment=GF_AUTH_ANONYMOUS_HIDE_VERSION=true
 
 [Service]
 Restart=on-failure

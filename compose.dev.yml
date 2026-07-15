@@ -45,6 +45,9 @@ services:
       - "127.0.0.1:4000:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: dev
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_NAME: "Main Org."
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GRAFANA_DB_USER: postgres
       GRAFANA_DB_PASSWORD: dev
       GRAFANA_ALLOW_UI_UPDATES: "true"

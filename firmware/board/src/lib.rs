@@ -1,7 +1,7 @@
 #![no_std]
 
 use embassy_nrf::{Peri, gpio::AnyPin, saadc::AnyInput};
-use homescope_common::hardware_id::HardwareId;
+use homescope_common::device_addr::DeviceAddr;
 
 #[cfg(all(feature = "xiao", feature = "db40"))]
 compile_error!("enable exactly one board feature");
@@ -47,16 +47,9 @@ macro_rules! board {
     };
 }
 
-pub fn hardware_id() -> HardwareId {
-    let high = u64::from(embassy_nrf::pac::FICR.deviceid(1).read());
-    let low = u64::from(embassy_nrf::pac::FICR.deviceid(0).read());
-
-    HardwareId(high << 32 | low)
-}
-
-pub fn mac_addr() -> [u8; 6] {
+pub fn device_addr() -> DeviceAddr {
     let [b4, b5, _, _] = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
     let [b0, b1, b2, b3] = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
 
-    [b0, b1, b2, b3, b4, b5 | 0xC0]
+    DeviceAddr([b0, b1, b2, b3, b4, b5 | 0xC0])
 }

@@ -24,13 +24,13 @@ async fn store_readings(
     while let Some(reading) = readings_receiver.recv().await {
         debug!("reading to insert: {reading}");
 
-        let Some(device) = devices.get(reading.hardware_id) else {
-            match unknown.record(reading.hardware_id) {
+        let Some(device) = devices.get(reading.device_addr) else {
+            match unknown.record(reading.device_addr) {
                 Some(Report::New) => {
-                    warn!(hardware_id = %reading.hardware_id, "unknown device, dropping its readings")
+                    warn!(device_addr = %reading.device_addr, "unknown device, dropping its readings")
                 }
                 Some(Report::Repeat { count, since }) => {
-                    warn!(hardware_id = %reading.hardware_id, count, ?since,
+                    warn!(device_addr = %reading.device_addr, count, ?since,
                   "unknown device still transmitting")
                 }
                 Some(Report::Overflow { packets }) => {

@@ -1,41 +1,47 @@
-use homescope_common::hardware_id::HardwareId;
+use anyhow::Context as _;
+use homescope_common::device_addr::{DeviceAddr, DeviceAddrRangeError};
 use sqlx::{PgPool, query_as};
 
 struct DeviceRow {
     id: i32,
-    hardware_id: i64,
+    device_addr: i64,
     name: String,
 }
 
 #[derive(Clone)]
 pub struct Device {
     pub id: i32,
-    pub hardware_id: HardwareId,
+    pub device_addr: DeviceAddr,
     pub name: String,
 }
 
-impl From<DeviceRow> for Device {
-    fn from(value: DeviceRow) -> Self {
-        Self {
+impl TryFrom<DeviceRow> for Device {
+    type Error = DeviceAddrRangeError;
+
+    fn try_from(value: DeviceRow) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: value.id,
-            hardware_id: HardwareId(value.hardware_id as u64),
             name: value.name,
-        }
+            device_addr: DeviceAddr::try_from(value.device_addr as u64)?,
+        })
     }
 }
 
 pub async fn get_devices(pool: &PgPool) -> anyhow::Result<Vec<Device>> {
-    Ok(query_as!(
+    query_as!(
         DeviceRow,
         "
 SELECT
-    id, hardware_id, name
+    id, device_addr, name
 FROM devices
 "
     )
     .fetch_all(pool)
     .await?
     .into_iter()
-    .map(Device::from)
-    .collect())
+    .map(|row| {
+        let id = row.id;
+        Device::try_from(row).with_context(|| format!("device row id={id}: invalid device_addr"))
+    })
+    .collect()
 }

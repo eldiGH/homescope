@@ -13,7 +13,6 @@ use embassy_nrf::{bind_interrupts, rng, twim};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use homescope_board::board;
-use homescope_common::hardware_id::HardwareId;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
@@ -61,9 +60,8 @@ async fn telemetry_task(
     mut sensors: Sensors,
     mut battery: Battery,
     packet_signal: &'static PacketSignal,
-    hardware_id: HardwareId,
 ) -> ! {
-    let mut packet_builder = PacketBuilder::new(hardware_id);
+    let mut packet_builder = PacketBuilder::new();
 
     loop {
         match sensors.read().await {
@@ -136,12 +134,7 @@ async fn main(spawner: Spawner) {
     )
     .await;
 
-    spawner.spawn(unwrap!(telemetry_task(
-        sensors,
-        battery,
-        &PACKET_SIGNAL,
-        homescope_board::hardware_id()
-    )));
+    spawner.spawn(unwrap!(telemetry_task(sensors, battery, &PACKET_SIGNAL,)));
 
     let mpsl_p =
         mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
@@ -172,5 +165,11 @@ async fn main(spawner: Spawner) {
 
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
-    ble_advertise::run(sdc, &mut led, &PACKET_SIGNAL, homescope_board::mac_addr()).await;
+    ble_advertise::run(
+        sdc,
+        &mut led,
+        &PACKET_SIGNAL,
+        homescope_board::device_addr(),
+    )
+    .await;
 }

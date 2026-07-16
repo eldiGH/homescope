@@ -5,9 +5,9 @@
 --   podman exec -i homescope-homescope-db-1 psql -U postgres -d homescope < deploy/timescaledb/seed.dev.sql
 
 WITH new_devices AS (
-	INSERT INTO devices (hardware_id, name)
+	INSERT INTO devices (device_addr, name)
 	SELECT
-		random(-9223372036854775807, 9223372036854775807),
+		random(0, 281474976710655),
 		name
 	FROM unnest(ARRAY['Living room', 'Bedroom', 'Kitchen', 'Office', 'Garage', 'Attic']) AS name
 	RETURNING id, name

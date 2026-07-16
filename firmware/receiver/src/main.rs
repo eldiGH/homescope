@@ -135,13 +135,13 @@ async fn main(spawner: Spawner) {
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-    let mut serial_buf = [0u8; 16];
+    let mut serial_buf = [0u8; 12];
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Homescope");
     config.product = Some("Homescope Receiver");
-    config.serial_number = Some(homescope_board::hardware_id().encode_hex(&mut serial_buf));
+    config.serial_number = Some(homescope_board::device_addr().encode_hex(&mut serial_buf));
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
@@ -179,7 +179,7 @@ async fn main(spawner: Spawner) {
         OBSERVATION_CHANNEL_SIZE,
     > = Channel::new();
 
-    let ble_fut = ble_scan::run(sdc, &observations_channel, homescope_board::mac_addr());
+    let ble_fut = ble_scan::run(sdc, &observations_channel, homescope_board::device_addr());
 
     let usb_writer_fut = async {
         loop {

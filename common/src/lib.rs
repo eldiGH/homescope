@@ -12,4 +12,4 @@ pub mod reading;
 #[cfg(feature = "wire")]
 pub mod frame;
 
-pub mod hardware_id;
+pub mod device_addr;

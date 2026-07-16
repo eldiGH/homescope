@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use homescope_common::hardware_id::HardwareId;
+use homescope_common::device_addr::DeviceAddr;
 use sqlx::PgPool;
 
 use crate::devices::{
@@ -24,7 +24,7 @@ impl DeviceRegistry {
         })
     }
 
-    pub fn get(&self, hardware_id: HardwareId) -> Option<Device> {
-        self.cache.get(hardware_id)
+    pub fn get(&self, device_addr: DeviceAddr) -> Option<Device> {
+        self.cache.get(device_addr)
     }
 }

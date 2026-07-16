@@ -4,6 +4,7 @@ use defmt::{info, unwrap};
 use embassy_futures::join::join;
 use embassy_nrf::gpio::Output;
 use embassy_time::{Duration, Timer};
+use homescope_common::device_addr::DeviceAddr;
 use trouble_host::prelude::*;
 
 use crate::packet_builder::PacketSignal;
@@ -14,7 +15,7 @@ pub async fn run<C>(
     controller: C,
     led_pin: &mut Output<'_>,
     packet_signal: &'static PacketSignal,
-    mac_addr: [u8; 6],
+    device_addr: DeviceAddr,
 ) where
     C: Controller
         + for<'t> ControllerCmdSync<LeSetExtAdvData<'t>>
@@ -25,9 +26,8 @@ pub async fn run<C>(
         + for<'t> ControllerCmdSync<LeSetExtAdvEnable<'t>>
         + for<'t> ControllerCmdSync<LeSetExtScanResponseData<'t>>,
 {
-    let address = Address::random(mac_addr);
+    let address = Address::random(device_addr.0);
     info!("Our address = {:?}", address);
-
 
     let mut resources: HostResources<_, DefaultPacketPool, 0, 0> = HostResources::new();
     let stack = trouble_host::new(controller, &mut resources)

@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use homescope_common::hardware_id::HardwareId;
+use homescope_common::device_addr::DeviceAddr;
 
 /// Distinct unknown ids we keep individual state for. Anything beyond
 /// this folds into one overflow counter, so a flood of random ids
@@ -31,7 +31,7 @@ struct Entry {
 
 #[derive(Default)]
 pub struct UnknownDevices {
-    tracked: HashMap<HardwareId, Entry>,
+    tracked: HashMap<DeviceAddr, Entry>,
     overflow_packets: u64,
     overflow_reported: Option<Instant>,
 }
@@ -39,10 +39,10 @@ pub struct UnknownDevices {
 impl UnknownDevices {
     /// Note a dropped packet from an unregistered device.
     /// Returns Some when this occurrence deserves a log line.
-    pub fn record(&mut self, hardware_id: HardwareId) -> Option<Report> {
+    pub fn record(&mut self, device_addr: DeviceAddr) -> Option<Report> {
         let now = Instant::now();
 
-        if let Some(entry) = self.tracked.get_mut(&hardware_id) {
+        if let Some(entry) = self.tracked.get_mut(&device_addr) {
             entry.count += 1;
 
             if now.duration_since(entry.last_reported) < REPORT_INTERVAL {
@@ -62,7 +62,7 @@ impl UnknownDevices {
                 first_seen: now,
                 last_reported: now,
             };
-            self.tracked.insert(hardware_id, entry);
+            self.tracked.insert(device_addr, entry);
             return Some(Report::New);
         }
 

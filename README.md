@@ -85,7 +85,7 @@ Idempotent — creates the `homescope` user, installs the udev rule and quadlets
 +--------+--------+--------------------------+---------------+
 ```
 
-CRC is CRC-16/IBM-SDLC over the payload bytes. `SensorObservation` is the over-the-air `SensorPacket` plus receiver-observed metadata (the device's advertising address, RSSI, age). Both ends share framing via `Frame` from `common`. See [docs/protocol.md](docs/protocol.md) for the full spec — including the planned v0.5 (variable-length TLV measurement encoding, then AEAD).
+CRC is CRC-16/IBM-SDLC over the payload bytes. `SensorObservation` is the over-the-air `SensorPacket` plus receiver-observed metadata (the device's advertising address, RSSI, age). Both ends share framing via `Frame` from `common`. See [docs/protocol.md](docs/protocol.md) for the full spec — including the planned v0.5 (variable-length TV measurement encoding, then AEAD).
 
 The gateway republishes each observation as JSON on MQTT: `homescope/sensors/<device-addr>/reading`.
 
@@ -100,7 +100,7 @@ The gateway republishes each observation as JSON on MQTT: `homescope/sensors/<de
 - ✅ Hardware: Raytac MDBT50Q-DB-40 survey passed → custom PCB with MDBT50Q-1MV2 is next
 - ⏳ S=8 coding refactor (raw HCI `LeSetExtAdvParamsV2`)
 - ⏳ Ingest durability (seq dedup, manual MQTT acks), graceful shutdown, site topology + broker ACLs
-- ⏳ TLV measurement encoding (per-measurement ID registry; receiver/gateway forward opaque payloads) → persisted seq counters → per-device ChaCha20-Poly1305 AEAD (decrypt in the API; gateways stay keyless; integrations fed by an API republish of verified readings)
+- ⏳ TV measurement encoding (per-measurement ID registry; receiver/gateway forward opaque payloads) → persisted seq counters → per-device ChaCha20-Poly1305 AEAD (decrypt in the API; gateways stay keyless; integrations fed by an API republish of verified readings)
 - ⏳ Sleep/power optimization (System OFF + RTC wakeup), watchdog, BMP581/LTR390 drivers
 
 See the **Implementation roadmap** in [docs/architecture.md](docs/architecture.md#implementation-roadmap) for the full plan.

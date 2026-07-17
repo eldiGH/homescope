@@ -97,7 +97,7 @@ Selected over Thread and ZigBee because:
 - **SDC feature gates** (all build-time opt-ins): `support_ext_adv()` + `support_le_coded_phy()` on the sensor; `support_ext_scan()` + `support_le_coded_phy()` on the receiver. Extended advertising / coded PHY / extended scanning symbols exist **only in the multirole SDC library**, selected by enabling both `peripheral` and `central` cargo features on `nrf-sdc`.
 - **Burst**: 20 ms advertising interval, advertiser held ~400 ms → ~20 events per burst. Each event's payload (`AUX_ADV_IND`) hops to a different data channel, so a burst samples ~20 frequencies — repetition is *frequency diversity* against indoor multipath, not just insurance. (Consequence: per-packet RSSI legitimately swings ±10-15 dB indoors; judge medians, never single readings.)
 - **Burst cadence**: ~0.5 s during benchmarking; production target 1-5 min with System OFF sleep between bursts.
-- **Payload**: `ManufacturerSpecificData` (company ID `0xFFFF` during testing) carrying `SensorPacket` — currently a fixed 10-byte struct; migrating to the TLV measurement encoding below. Extended advertising allows up to 254 B — required headroom for the planned AEAD (payload + 16 B tag never fit legacy's 31 B).
+- **Payload**: `ManufacturerSpecificData` (company ID `0xFFFF` during testing) carrying `SensorPacket` — currently a fixed 10-byte struct; migrating to the TV measurement encoding below. Extended advertising allows up to 254 B — required headroom for the planned AEAD (payload + 16 B tag never fit legacy's 31 B).
 - **Device identity**: the advertising address (AdvA), a random static address derived from FICR `DEVICEADDR` — the packet carries no identity field of its own. *(DeviceAddr refactor, 2026-07 — replaces the earlier FICR-`DEVICEID`-in-payload design.)*
 
 ### Reliability
@@ -154,11 +154,14 @@ Tradeoffs that informed the decision to stay on BLE for now:
 
 ---
 
-## Data model — TLV measurement encoding (planned; settled 2026-07-16)
+## Data model — TV measurement encoding (planned; settled 2026-07-16)
 
-The fixed `SensorPacket` struct is being replaced by a **per-measurement TLV
-encoding** (the BTHome model — see `NOTES-packet-tlv-aead.md` for the full
-worked-out plan). Guiding principle: **extensible, not generic** — adding
+The fixed `SensorPacket` struct is being replaced by a **per-measurement TV
+encoding** — *type–value*: each field is a measurement ID followed directly
+by its value, with the length implied by the ID. (The length-implied member
+of the TLV family; 3GPP TS 24.007 calls this format "TV". There is
+deliberately no per-field length byte — see below.) This is the BTHome
+model — see `NOTES-packet-tv-aead.md` for the full worked-out plan. Guiding principle: **extensible, not generic** — adding
 sensor type N+1 is a small local change at each layer; ingesting *unimagined*
 sensor types with zero code changes is an explicit non-goal (that's a generic
 telemetry platform, a crowded space; Homescope's unique value is the
@@ -187,7 +190,7 @@ long-range embedded-Rust node + dongle vertical, not the backend).
   Multiple wire encodings of one metric converge into one column. Narrow/EAV
   storage was considered and rejected: worse compression, every Grafana panel
   becomes a pivot, no per-metric types — flexibility we'd pay for daily to
-  serve users we don't have. The TLV wire format keeps that migration path
+  serve users we don't have. The TV wire format keeps that migration path
   open if the project ever pivots to platform ambitions.
 
 ---
@@ -206,11 +209,11 @@ Note that the primary value is **authenticity**, not confidentiality: without th
 
 Each sensor has a **unique 32-byte ChaCha20-Poly1305 key** baked into firmware at flash time. Per-device (not network-wide) so extracting one device's firmware does not compromise the rest.
 
-### Payload layout *(revised 2026-07-16 with the TLV redesign — see `NOTES-packet-tlv-aead.md`)*
+### Payload layout *(revised 2026-07-16 with the TV redesign — see `NOTES-packet-tv-aead.md`)*
 
 ```
 +--------------+---------------------------+----------------+
-| seq counter  | ciphertext (TLV section)  | Poly1305 tag   |
+| seq counter  | ciphertext (TV section)  | Poly1305 tag   |
 | 4 bytes      | N bytes                   | 16 bytes       |
 +--------------+---------------------------+----------------+
   ^plaintext^    ^encrypted^                 ^authenticates all of it^
@@ -218,10 +221,10 @@ Each sensor has a **unique 32-byte ChaCha20-Poly1305 key** baked into firmware a
 
 - **Device identity is not in the payload** — it's the advertising address (AdvA, from FICR `DEVICEADDR`), which the receiver observes and forwards as `device_addr`. The **API** uses it to look up the per-device key (the `devices` table is the key registry; gateways stay keyless — see [Gateway & API integration](#gateway--api-integration)).
 - `seq` (4 B, plaintext) — monotonic, increments every advertisement, **never repeats over device lifetime** (persisted — see below). Provides the AEAD nonce (deterministic construction from seq; no random component needed once seq is persisted) and **replay protection**: the API tracks last-seen per device and rejects `≤`. The same check deduplicates overlapping receivers and MQTT redeliveries.
-- **Ciphertext** = the TLV measurement section (whatever this node sampled this cycle).
+- **Ciphertext** = the TV measurement section (whatever this node sampled this cycle).
 - **Associated data** = `device_addr` + `seq` — the cleartext context is authenticated too, so a valid ciphertext can't be replayed against a different device identity or sequence number.
 
-The plaintext header + opaque blob structure carries through the whole pipeline: receiver and gateway forward it untouched, MQTT transports it as a JSON envelope (routing/debugging fields readable, sensor values base64 ciphertext), and only the API decrypts. The envelope shape actually arrives *before* AEAD — the moment the TLV encoding makes the payload opaque to the gateway — so the crypto step changes nothing downstream of the firmware except the API.
+The plaintext header + opaque blob structure carries through the whole pipeline: receiver and gateway forward it untouched, MQTT transports it as a JSON envelope (routing/debugging fields readable, sensor values base64 ciphertext), and only the API decrypts. The envelope shape actually arrives *before* AEAD — the moment the TV encoding makes the payload opaque to the gateway — so the crypto step changes nothing downstream of the firmware except the API.
 
 ### Seq persistence (prerequisite — sensor side)
 
@@ -271,7 +274,7 @@ The gateway is deliberately a **thin, keyless bridge**:
 
 1. **Read**: parse framed packets from the receiver dongle (`RECEIVER_PATH`, default `/dev/homescope-receiver` via the udev rule in [deploy/udev](../deploy/udev/99-homescope-receiver.rules)) using `serial2-tokio` + the `tokio_util::codec::Decoder` in `gateway/src/decoder.rs`
 2. **Timestamp**: convert `SensorObservation` → `SensorReading` with `received_at = Utc::now() − age_ms`
-3. **Publish**: JSON (serde camelCase: `deviceAddr`, `seq`, `tempDegc`, `rhPercent`, `batteryMv`, `rssi`, `receivedAt`) to `homescope/sensors/<device-addr>/reading` at QoS 1, `<device-addr>` rendered as 12 uppercase hex chars. *(Once the TLV encoding lands, the per-metric fields are replaced by an opaque `payload` — base64 of the TLV bytes, later the ciphertext — and only the API interprets it.)*
+3. **Publish**: JSON (serde camelCase: `deviceAddr`, `seq`, `tempDegc`, `rhPercent`, `batteryMv`, `rssi`, `receivedAt`) to `homescope/sensors/<device-addr>/reading` at QoS 1, `<device-addr>` rendered as 12 uppercase hex chars. *(Once the TV encoding lands, the per-metric fields are replaced by an opaque `payload` — base64 of the TV bytes, later the ciphertext — and only the API interprets it.)*
 
 Configuration comes from env vars (`MQTT_HOST`, `MQTT_PORT`, `RECEIVER_PATH`) via the shared `host-util` crate (dotenv + tracing init). Serial errors are fatal by design — the process exits and the supervisor (quadlet, `Restart=on-failure`) restarts it.
 
@@ -341,7 +344,7 @@ homescope/
 │   └── src/
 │       ├── lib.rs
 │       ├── device_addr.rs # DeviceAddr([u8; 6]) — BLE advertising address (AdvA, FICR-derived), hex Display/serde
-│       ├── packet.rs      # SensorPacket (repr(C, packed)) — over-the-air payload (TLV redesign planned)
+│       ├── packet.rs      # SensorPacket (repr(C, packed)) — over-the-air payload (TV redesign planned)
 │       ├── observation.rs # SensorObservation = packet + receiver RSSI/age
 │       ├── frame.rs       # Frame: magic + payload + CRC-16/IBM-SDLC
 │       └── reading.rs     # SensorReading (serde, human units) — the MQTT JSON payload
@@ -418,7 +421,7 @@ Rationale:
 15. ⏳ **Receiver/gateway plumbing tightening** — real VID/PID (pid.codes) instead of embassy's `0xc0de:0xcafe` placeholder, udev match on FICR serial, `TAG+="systemd"` device unit + `BindsTo=` so the gateway container's lifecycle follows the dongle (replug-safe), `ID_MM_DEVICE_IGNORE`.
 16. ⏳ **Sensor drivers** — ✅ SHT45 over async TWIM (`sht4x` crate); ⏳ BMP581 (`bmp5` async crate) on the designated indoor barometer node; optional LTR390 on the outdoor node.
 17. ⏳ **Watchdog + XIAO alkaline soak test** — watchdog first (probe-less panic = silent HardFault spin that drains the pack), then the unattended reliability/longevity baseline on 2× AA alkaline.
-18. ⏳ **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tlv-aead.md`; owner's order)*: ① finish the **DeviceAddr refactor** (identity = AdvA, protocol v0.4 — in flight); ② **TLV measurement encoding** (measurement-ID registry in `common`, variable-length frames = protocol v0.5, opaque-payload MQTT envelope, nullable metric columns); ③ **seq persistence** on the sensor (retained RAM + flash checkpoint with jump-ahead); ④ **ChaCha20-Poly1305 AEAD** — encrypt the TLV section on the sensor, `device_addr`+`seq` as AAD, forward opaquely, **decrypt in the API**. Fits extended advertising's 254 B budget (never fit legacy's 31 B).
+18. ⏳ **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① finish the **DeviceAddr refactor** (identity = AdvA, protocol v0.4 — in flight); ② **TV measurement encoding** (measurement-ID registry in `common`, variable-length frames = protocol v0.5, opaque-payload MQTT envelope, nullable metric columns); ③ **seq persistence** on the sensor (retained RAM + flash checkpoint with jump-ahead); ④ **ChaCha20-Poly1305 AEAD** — encrypt the TV section on the sensor, `device_addr`+`seq` as AAD, forward opaquely, **decrypt in the API**. Fits extended advertising's 254 B budget (never fit legacy's 31 B).
 19. ⏳ **Sleep & power optimization** — System OFF + RTC wakeup between bursts. Gate sensor rail power during sleep. Measure with PPK2.
 20. ⏳ **Provisioning** — build-time `DEVICE_KEY` injection via env var + build.rs (device identity needs none — the advertising address is FICR-sourced).
 21. ⏳ **Decoded-readings republish** — API republishes verified+deduped readings as plain JSON (or HA MQTT discovery) for external consumers; the integration surface. Optional, after AEAD.
@@ -432,4 +435,4 @@ Rationale:
 
 If we ever want Home Assistant integration, the simpler path is **MQTT discovery** — Home Assistant auto-discovers MQTT-published sensors via the `homeassistant/` topic convention. No firmware changes needed — and the planned decoded-readings republish (see [MQTT broker](#mqtt-broker-mosquitto-container-on-the-pi)) is the natural place to emit it: HA would consume verified, deduplicated readings straight from the API.
 
-A related open direction: **BTHome compatibility** (<https://bthome.io>) — an open BLE advertising format with typed measurement IDs and first-class HA support. A firmware build flag emitting BTHome would make "long-range Coded-PHY BTHome node in Rust" a genuinely novel artifact, and its object-ID table is worth aligning with when assigning our TLV measurement IDs. Caveat to verify first: BTHome listeners in the wild generally scan legacy 1M advertising, so Coded-PHY-only nodes would still need our dongle — which is arguably the point.
+A related open direction: **BTHome compatibility** (<https://bthome.io>) — an open BLE advertising format with typed measurement IDs and first-class HA support. A firmware build flag emitting BTHome would make "long-range Coded-PHY BTHome node in Rust" a genuinely novel artifact, and its object-ID table is worth aligning with when assigning our TV measurement IDs. Caveat to verify first: BTHome listeners in the wild generally scan legacy 1M advertising, so Coded-PHY-only nodes would still need our dongle — which is arguably the point.

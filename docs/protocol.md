@@ -1,7 +1,7 @@
 # Scanner-to-gateway wire protocol — v0.4 (prototype)
 
 > **Status: prototype, v0.4** (in flight 2026-07 — lands with the DeviceAddr
-> refactor). This format will evolve as features are added (TLV measurement
+> refactor). This format will evolve as features are added (TV measurement
 > encoding, encryption). It's documented here so the gateway has a stable
 > target, and so future versions can be diffed against it.
 >
@@ -14,7 +14,7 @@
 >
 > **Changes since v0.2:** `DeviceId` renamed to `HardwareId`; `humidity: u8`
 > replaced by `rh_cpercent: u16`; `pressure_pa` removed (pressure arrives
-> later via the TLV encoding — see [Planned: v0.5](#planned-v05--tlv-payload-then-aead)).
+> later via the TV encoding — see [Planned: v0.5](#planned-v05--tv-payload-then-aead)).
 > Frame shrank from 30 to 27 bytes.
 >
 > **Changes since v0:** payload type changed from `SensorPacket` to
@@ -150,11 +150,13 @@ Any I/O error, timeout, or CRC mismatch returns to `Hunting`. Don't try to "salv
 
 CRC mismatches and bad-magic false-syncs are absorbed silently by the loop — they're expected with magic-byte framing. Real I/O errors propagate as `Err` and the gateway exits (its supervisor restarts it).
 
-## Planned: v0.5 — TLV payload, then AEAD
+## Planned: v0.5 — TV payload, then AEAD
 
-Settled 2026-07-16 (see `NOTES-packet-tlv-aead.md` at the repo root for the
+Settled 2026-07-16 (see `NOTES-packet-tv-aead.md` at the repo root for the
 worked-out plan). The fixed `SensorPacket` layout is replaced by a
-**per-measurement TLV encoding**, which makes the frame **variable-length**:
+**per-measurement TV encoding** (*type–value* — the length-implied member of
+the TLV family: the measurement ID determines the value's length, there is
+no per-field length byte), which makes the frame **variable-length**:
 
 - Air packet becomes `[seq: u32][id][data][id][data]…` — `seq` stays a fixed
   header (dedup / replay / future AEAD nonce); each measurement is a 1-byte
@@ -169,7 +171,7 @@ worked-out plan). The fixed `SensorPacket` layout is replaced by a
   firmware encodes and only the API decodes. Adding a measurement type never
   touches the receiver, gateway, frame format, or MQTT topics.
 - When AEAD lands (ChaCha20-Poly1305, per-device keys, decrypt in the API),
-  the TLV section becomes the ciphertext and the cleartext header
+  the TV section becomes the ciphertext and the cleartext header
   (`device_addr`, `seq`) is bound as associated data. The USB-CDC frame and
   MQTT envelope shapes don't change — the opaque blob just becomes
   ciphertext + 16-byte tag.

@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["board-db40"]
+default = []
 board-db40 = ["homescope-board/db40"]
 board-xiao = ["homescope-board/xiao"]
+wait-for-rtt = []
 
 [dependencies]
 homescope-common = { workspace = true, features = ["wire"] }

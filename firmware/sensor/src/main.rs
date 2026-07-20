@@ -86,6 +86,9 @@ async fn telemetry_task(
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    #[cfg(feature = "wait-for-rtt")]
+    while !defmt_rtt::in_blocking_mode() {}
+
     let mut config = embassy_nrf::config::Config::default();
     config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
 

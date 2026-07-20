@@ -87,6 +87,9 @@ async fn wait_for_dtr_on(cdc_control: &ControlChanged<'_>) {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    #[cfg(feature = "wait-for-rtt")]
+    while !defmt_rtt::in_blocking_mode() {}
+ 
     let p = embassy_nrf::init(Default::default());
 
     let board = board!(p);

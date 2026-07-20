@@ -232,13 +232,21 @@ Nonce reuse under the same key is catastrophic for ChaCha20-Poly1305, and reboot
 
 ### Key provisioning
 
-The device **identity** needs no provisioning — the advertising address comes from the nRF52840's FICR at runtime. The per-device **key** (planned) is embedded at compile time via a build script reading an env var:
+The device **identity** needs no provisioning — the advertising address comes from the nRF52840's FICR at runtime. The per-device **key** (planned) is written once into the chip's **UICR** by a workstation CLI. *(Settled 2026-07-20 — supersedes an earlier build-time `DEVICE_KEY` env + `link_section` sketch, rejected because it makes the firmware image per-device. Full plan: `NOTES-provisioning.md`.)*
 
-```bash
-DEVICE_KEY=<hex> cargo build --release
+```
+homescope-provision --name "kitchen" --site home --room kitchen
+  1. probe-rs reads FICR DEVICEADDR from the blank chip (no firmware needed)
+  2. POST /devices to the API → it generates the 32-byte key, returns it once
+  3. write the key to UICR.CUSTOMER[0..7] (+ REGOUT0 = 3.0 V on the custom PCB)
+  4. read UICR back and verify, then flash the generic firmware image
 ```
 
-The build script writes it into a `link_section` placed at a known flash page so that future OTA updates can preserve identity. (Alternative: separate JSON config flashed to dedicated page; deferred until needed.) The same key is registered in the API's `devices` table — a device without a row (and key) is dropped by ingest, which is why auto-registration is deliberately absent.
+Key properties: **one firmware binary for the whole fleet** (no per-device ELF, no key in build artifacts or CI); UICR survives ordinary reflashes, since `probe-rs`/`cargo flash` erase only the pages they write; and the custom PCB needs a UICR write for `REGOUT0` anyway. Costs: rotation means `NVMC.ERASEUICR` + rewrite (which also resets `REGOUT0` — rewrite both), a full chip erase destroys the key (recover by re-provisioning from the DB), and confidentiality against a physical attacker rests on APPROTECT, which is deliberately left off during development. Nodes destined for sealed enclosures use a dedicated flash page instead, since firmware can write that itself over USB-CDC and UF2 cannot write UICR.
+
+The API is the key registry and the issuer: it generates the key, returns it exactly once, 409s on an already-registered address, and exposes rotation as a separate admin-authenticated endpoint. A device without a row (and key) is dropped by ingest, which is why auto-registration is deliberately absent. The probe stays on the bench — driving SWD from the API host was considered and rejected (an HTTP endpoint that writes firmware is an endpoint that writes firmware).
+
+**Keys are encrypted at rest.** The device key can't be hashed — the API needs the plaintext to decrypt — so the `devices` key column stores it under envelope encryption: a master KEK from the API's environment/secrets, `ChaCha20-Poly1305(KEK, device_key)` with `device_addr` as AAD, decrypted into the `DeviceRegistry` cache at startup (and a hard startup failure if the KEK is missing or fails to authenticate). Without this, every `deploy/backup-db.sh` tarball is a full fleet compromise: symmetric AEAD means whoever can verify can forge.
 
 ### What we explicitly skip
 
@@ -423,7 +431,7 @@ Rationale:
 17. ⏳ **Watchdog + XIAO alkaline soak test** — watchdog first (probe-less panic = silent HardFault spin that drains the pack), then the unattended reliability/longevity baseline on 2× AA alkaline.
 18. ⏳ **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① finish the **DeviceAddr refactor** (identity = AdvA, protocol v0.4 — in flight); ② **TV measurement encoding** (measurement-ID registry in `common`, variable-length frames = protocol v0.5, opaque-payload MQTT envelope, nullable metric columns); ③ **seq persistence** on the sensor (retained RAM + flash checkpoint with jump-ahead); ④ **ChaCha20-Poly1305 AEAD** — encrypt the TV section on the sensor, `device_addr`+`seq` as AAD, forward opaquely, **decrypt in the API**. Fits extended advertising's 254 B budget (never fit legacy's 31 B).
 19. ⏳ **Sleep & power optimization** — System OFF + RTC wakeup between bursts. Gate sensor rail power during sleep. Measure with PPK2.
-20. ⏳ **Provisioning** — build-time `DEVICE_KEY` injection via env var + build.rs (device identity needs none — the advertising address is FICR-sourced).
+20. ⏳ **Provisioning** *(plan settled 2026-07-20 — see `NOTES-provisioning.md`)* — `homescope-provision` workstation CLI (probe-rs: FICR read → API registration → UICR key write → verify → flash), admin-authenticated `POST /devices` key issuance in the API, and envelope-encrypted device keys at rest (KEK in API secrets). Device identity needs no provisioning — the advertising address is FICR-sourced.
 21. ⏳ **Decoded-readings republish** — API republishes verified+deduped readings as plain JSON (or HA MQTT discovery) for external consumers; the integration surface. Optional, after AEAD.
 22. ⏳ **(Future, optional) Air-quality node** — BME68x + BSEC on a USB/mains-powered node; persist BSEC calibration state across reboots. Separate from the battery fleet.
 

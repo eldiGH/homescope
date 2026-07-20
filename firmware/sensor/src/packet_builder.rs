@@ -1,28 +1,25 @@
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use homescope_common::packet::SensorPacket;
+use nrf_sdc::mpsl::FlashError;
 
-use crate::sensors::Readings;
+use crate::{sensors::Readings, seq_counter::SeqCounter};
 
 pub struct PacketBuilder {
-    seq: u32,
+    seq_counter: SeqCounter,
 }
 
 impl PacketBuilder {
-    pub fn new() -> Self {
-        Self { seq: 0 }
+    pub fn new(seq_counter: SeqCounter) -> Self {
+        Self { seq_counter }
     }
 
-    pub fn build(&mut self, readings: Readings, battery_mv: u16) -> SensorPacket {
-        let packet = SensorPacket {
-            seq: self.seq,
+    pub async fn build(&mut self, readings: Readings, battery_mv: u16) -> Result<SensorPacket, FlashError> {
+        Ok(SensorPacket {
+            seq: self.seq_counter.next().await?,
             temp_cdegc: readings.temp_cdegc,
             rh_cpercent: readings.rh_cpercent,
             battery_mv,
-        };
-
-        self.seq += 1;
-
-        packet
+        })
     }
 }
 

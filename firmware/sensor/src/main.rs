@@ -4,6 +4,7 @@
 use crate::battery::Battery;
 use crate::packet_builder::{PacketBuilder, PacketSignal};
 use crate::sensors::Sensors;
+use crate::seq_counter::SeqCounter;
 use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_nrf::interrupt::InterruptExt;
@@ -23,6 +24,7 @@ mod battery;
 mod ble_advertise;
 mod packet_builder;
 mod sensors;
+mod seq_counter;
 
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -60,9 +62,8 @@ async fn telemetry_task(
     mut sensors: Sensors,
     mut battery: Battery,
     packet_signal: &'static PacketSignal,
+    mut packet_builder: PacketBuilder,
 ) -> ! {
-    let mut packet_builder = PacketBuilder::new();
-
     loop {
         match sensors.read().await {
             Ok(readings) => {
@@ -70,9 +71,12 @@ async fn telemetry_task(
                 // sensors.read fail
                 let battery_mv = battery.read_mv().await;
 
-                let packet = packet_builder.build(readings, battery_mv);
-
-                packet_signal.signal(packet);
+                match packet_builder.build(readings, battery_mv).await {
+                    Ok(packet) => packet_signal.signal(packet),
+                    Err(error) => {
+                        defmt::error!("seq reservation failed, skipping packet: {}", error)
+                    }
+                }
             }
 
             Err(error) => {
@@ -137,8 +141,6 @@ async fn main(spawner: Spawner) {
     )
     .await;
 
-    spawner.spawn(unwrap!(telemetry_task(sensors, battery, &PACKET_SIGNAL,)));
-
     let mpsl_p =
         mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
 
@@ -150,9 +152,12 @@ async fn main(spawner: Spawner) {
         skip_wait_lfclk_started: mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
     };
 
+    static SESSION_MEM: StaticCell<mpsl::SessionMem<1>> = StaticCell::new();
+    let session_mem = SESSION_MEM.init(mpsl::SessionMem::new());
+
     static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
-    let mpsl = MPSL.init(unwrap!(mpsl::MultiprotocolServiceLayer::new(
-        mpsl_p, Irqs, lfclk_cfg
+    let mpsl = MPSL.init(unwrap!(mpsl::MultiprotocolServiceLayer::with_timeslots(
+        mpsl_p, Irqs, lfclk_cfg, session_mem
     )));
 
     spawner.spawn(unwrap!(mpsl_task(&*mpsl)));
@@ -165,7 +170,17 @@ async fn main(spawner: Spawner) {
     let mut rng = rng::Rng::new(p.RNG, Irqs);
 
     let mut sdc_mem = sdc::Mem::<1120>::new();
+    let sdc_flash = sdc::mpsl::Flash::take(mpsl, p.NVMC);
 
+    let seq_counter = unwrap!(SeqCounter::load(sdc_flash).await);
+    let packet_builder = PacketBuilder::new(seq_counter);
+
+    spawner.spawn(unwrap!(telemetry_task(
+        sensors,
+        battery,
+        &PACKET_SIGNAL,
+        packet_builder
+    )));
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
     ble_advertise::run(

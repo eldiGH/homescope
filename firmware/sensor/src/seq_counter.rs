@@ -51,32 +51,27 @@ impl SeqCounter {
             max_slot.next()
         };
 
-        let mut counter = Self {
+        defmt::info!(
+            "[flash] scanned for seq: running from: {}",
+            max_reserved_until,
+        );
+
+        Ok(Self {
             reserved_until: max_reserved_until,
             next_seq: max_reserved_until,
             flash,
             next_slot,
-        };
-        counter.advance_reservation().await?;
-
-        defmt::info!(
-            "[flash] scanned for seq: running from: {}, new ceiling: {}",
-            max_reserved_until,
-            counter.reserved_until
-        );
-
-        Ok(counter)
+        })
     }
 
     pub async fn next(&mut self) -> Result<u32, FlashError> {
-        let next_seq = self.next_seq;
-        self.next_seq += 1;
-
         if self.next_seq >= self.reserved_until {
             self.advance_reservation().await?
         }
 
-        Ok(next_seq)
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        Ok(seq)
     }
 
     async fn advance_reservation(&mut self) -> Result<(), FlashError> {

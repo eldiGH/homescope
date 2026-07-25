@@ -113,4 +113,33 @@ mod test {
             assert_eq!(measurement, measurements[i], "decoded measurement differs");
         }
     }
+
+    #[test]
+    fn parse_truncated_seq() {
+        assert!(matches!(
+            SensorPacket::parse(&[0x01, 0x02, 0x03]),
+            Err(DecodeError::Truncated(_))
+        ));
+    }
+
+    #[test]
+    fn seq_only_packet_has_no_measurements() {
+        let bytes = 5u32.to_le_bytes();
+        let packet = SensorPacket::parse(&bytes).expect("packet parsing failed");
+
+        assert_eq!(packet.seq, 5);
+        assert_eq!(packet.measurements().count(), 0);
+    }
+
+    #[test]
+    fn measurements_iterator_fuses_after_error() {
+        let mut bytes = 7u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0x7F, 0x00, 0x00]); // unknown measurement id
+
+        let packet = SensorPacket::parse(&bytes).expect("packet parsing failed");
+
+        let mut measurements = packet.measurements();
+        assert!(matches!(measurements.next(), Some(Err(_))));
+        assert!(measurements.next().is_none());
+    }
 }

@@ -101,4 +101,37 @@ mod test {
 
         assert_eq!(observation, parsed_observation);
     }
+
+    #[test]
+    fn short_header_is_truncated() {
+        let bytes = [0u8; SensorObservation::HEADER_LEN];
+
+        for cut in 0..SensorObservation::HEADER_LEN {
+            assert_eq!(
+                SensorObservation::parse(&bytes[..cut]),
+                Err(Truncated),
+                "{cut} bytes must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_packet_round_trip() {
+        let observation = SensorObservation {
+            device_addr: DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]),
+            age_ms: 0,
+            rssi: Dbm(-90),
+            packet: &[],
+        };
+
+        let mut buf: [u8; SensorObservation::MAX_ENCODED_LEN] = [0; _];
+        let written = observation.encode(&mut buf).expect("fits in buffer");
+
+        assert_eq!(written, SensorObservation::HEADER_LEN);
+
+        let parsed_observation = SensorObservation::parse(&buf[..written]).expect("parses");
+
+        assert_eq!(observation, parsed_observation);
+        assert!(parsed_observation.packet.is_empty());
+    }
 }

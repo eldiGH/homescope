@@ -194,4 +194,113 @@ mod test {
         assert_eq!(consumed, written);
         assert_eq!(payload.0, parsed_payload);
     }
+
+    const TEST_PAYLOAD: [u8; 5] = [0x12, 0x34, 0x56, 0x78, 0x9A];
+
+    fn encoded_frame() -> ([u8; MAX_LEN], usize) {
+        let mut buffer: [u8; MAX_LEN] = [0; _];
+        let written = encode(&mut buffer, &TestEncodeable(TEST_PAYLOAD)).unwrap();
+        (buffer, written)
+    }
+
+    #[test]
+    fn every_prefix_is_incomplete() {
+        let (buffer, written) = encoded_frame();
+
+        for cut in 0..written {
+            assert!(
+                matches!(parse(&buffer[..cut]), FrameParse::Incomplete),
+                "prefix of {cut} bytes must be Incomplete, not Corrupt"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_magic() {
+        let (mut buffer, _) = encoded_frame();
+        buffer[0] = 0x00;
+        assert!(matches!(
+            parse(&buffer),
+            FrameParse::Corrupt(FrameError::BadMagic)
+        ));
+
+        let (mut buffer, _) = encoded_frame();
+        buffer[1] = 0x00;
+        assert!(matches!(
+            parse(&buffer),
+            FrameParse::Corrupt(FrameError::BadMagic)
+        ));
+    }
+
+    #[test]
+    fn oversized_len_rejected_before_waiting_for_payload() {
+        let (mut buffer, _) = encoded_frame();
+        buffer[2..4].copy_from_slice(&((MAX_PAYLOAD_LEN + 1) as PayloadLen).to_le_bytes());
+
+        // only magic + len present — must already be Corrupt, not Incomplete,
+        // or a corrupted length stalls the stream parser
+        assert!(matches!(
+            parse(&buffer[..MAGIC_BYTES_LEN + PAYLOAD_LEN_SIZE]),
+            FrameParse::Corrupt(FrameError::PayloadTooLarge)
+        ));
+    }
+
+    #[test]
+    fn corrupted_byte_fails_crc() {
+        let (mut buffer, written) = encoded_frame();
+        buffer[MAGIC_BYTES_LEN + PAYLOAD_LEN_SIZE] ^= 0xFF;
+        assert!(matches!(
+            parse(&buffer[..written]),
+            FrameParse::Corrupt(FrameError::BadCrc)
+        ));
+
+        let (mut buffer, written) = encoded_frame();
+        buffer[written - 1] ^= 0xFF;
+        assert!(matches!(
+            parse(&buffer[..written]),
+            FrameParse::Corrupt(FrameError::BadCrc)
+        ));
+    }
+
+    #[test]
+    fn trailing_bytes_stay_untouched() {
+        let (buffer, written) = encoded_frame();
+        let mut stream = buffer[..written].to_vec();
+        stream.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+
+        let FrameParse::Ok { payload, consumed } = parse(&stream) else {
+            panic!("frame with trailing bytes must still parse");
+        };
+
+        assert_eq!(consumed, written);
+        assert_eq!(payload, TEST_PAYLOAD);
+    }
+
+    #[test]
+    fn skip_one_byte_resync_finds_frame_after_garbage() {
+        let (buffer, written) = encoded_frame();
+        // garbage starting with a lone magic byte — a false frame start
+        let mut stream = vec![b'H', 0x42, 0x00];
+        stream.extend_from_slice(&buffer[..written]);
+
+        let mut pos = 0;
+        let (payload, consumed) = loop {
+            match parse(&stream[pos..]) {
+                FrameParse::Ok { payload, consumed } => break (payload, consumed),
+                FrameParse::Corrupt(_) => pos += 1,
+                FrameParse::Incomplete => panic!("stream contains a whole frame"),
+            }
+        };
+
+        assert_eq!(pos, 3);
+        assert_eq!(pos + consumed, stream.len());
+        assert_eq!(payload, TEST_PAYLOAD);
+    }
+
+    #[test]
+    fn encode_checks_buffer() {
+        let payload = TestEncodeable(TEST_PAYLOAD);
+        let mut buffer = [0u8; OVERHEAD + TEST_PAYLOAD.len() - 1];
+        assert_eq!(encode(&mut buffer, &payload), Err(BufferTooSmall));
+    }
 }

@@ -1,9 +1,5 @@
-#[cfg(feature = "wire")]
-use bytemuck::{Pod, Zeroable};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "wire", repr(transparent))]
-#[cfg_attr(feature = "wire", derive(Pod, Zeroable))]
 pub struct DeviceAddr(pub [u8; 6]);
 
 impl DeviceAddr {

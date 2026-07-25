@@ -10,7 +10,7 @@ board-xiao = ["homescope-board/xiao"]
 wait-for-rtt = []
 
 [dependencies]
-homescope-common = { workspace = true, features = ["wire"] }
+homescope-common = { workspace = true, features = ["wire", "defmt"] }
 homescope-board = { workspace = true }
 
 bt-hci = { version = "0.8", features = ["defmt"] }
@@ -28,6 +28,9 @@ static_cell = "2.1.1"
 trouble-host = { version = "0.6.0", features = ["defmt"] }
 sht4x = { version = "0.2.0", features = ["embedded-hal-async", "defmt"] }
 embassy-sync = { version = "0.8.0", features = ["defmt"] }
+heapless = { version = "0.9.3", features = ["defmt"] }
+embassy-embedded-hal = { version = "0.6.0", features = ["defmt"] }
+embedded-hal-async = "1.0.0"
 
 [[bin]]
 name = "homescope-sensor"

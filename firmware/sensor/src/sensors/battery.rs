@@ -1,4 +1,5 @@
 use embassy_nrf::saadc::Saadc;
+use homescope_common::wire::Millivolts;
 
 pub struct Battery {
     saadc: Saadc<'static, 1>,
@@ -15,8 +16,8 @@ impl Battery {
         }
     }
 
-    pub async fn read_mv(&mut self) -> u16 {
-        let mut buf: [i16; 1] = [0; _];
+    pub async fn measure(&mut self) -> Millivolts {
+        let mut buf: [i16; 1] = [0; 1];
 
         self.saadc.sample(&mut buf).await;
 
@@ -25,7 +26,7 @@ impl Battery {
         // max: 4095*3600*5 ≈ 74M, fits u32; result ≤ 18000, fits u16
         let battery_mv = (raw * (3600 * self.battery_divider_ratio) / 4096) as u16;
 
-        defmt::info!("battery_mv: {}", battery_mv);
-        battery_mv
+        defmt::debug!("battery_mv: {}", battery_mv);
+        Millivolts(battery_mv)
     }
 }

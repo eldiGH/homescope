@@ -51,7 +51,7 @@ pub async fn run<C>(
                 let len = unwrap!(AdStructure::encode_slice(
                     &[AdStructure::ManufacturerSpecificData {
                         company_identifier: 0xFFFF,
-                        payload: packet.as_bytes(),
+                        payload: &packet,
                     }],
                     &mut adv_data[..],
                 ));

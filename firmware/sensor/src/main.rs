@@ -1,15 +1,15 @@
 #![no_std]
 #![no_main]
 
-use crate::battery::Battery;
 use crate::packet_builder::{PacketBuilder, PacketSignal};
-use crate::sensors::Sensors;
+use crate::sensors::{Battery, Sensors, Sht4x};
 use crate::seq_counter::SeqCounter;
 use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_nrf::interrupt::InterruptExt;
 use embassy_nrf::mode::Async;
 use embassy_nrf::peripherals::{self, RNG};
+use embassy_nrf::twim::Twim;
 use embassy_nrf::{bind_interrupts, rng, twim};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
@@ -20,7 +20,6 @@ use static_cell::StaticCell;
 
 use {defmt_rtt as _, panic_probe as _};
 
-mod battery;
 mod ble_advertise;
 mod packet_builder;
 mod sensors;
@@ -59,28 +58,17 @@ static PACKET_SIGNAL: PacketSignal = Signal::new();
 
 #[embassy_executor::task]
 async fn telemetry_task(
-    mut sensors: Sensors,
-    mut battery: Battery,
+    mut sensors: Sensors<Twim<'static>>,
     packet_signal: &'static PacketSignal,
     mut packet_builder: PacketBuilder,
 ) -> ! {
     loop {
-        match sensors.read().await {
-            Ok(readings) => {
-                // TODO(bitmap) - we could send battery_mv when bitmap will be added, even if
-                // sensors.read fail
-                let battery_mv = battery.read_mv().await;
+        let measurements = sensors.measure().await;
 
-                match packet_builder.build(readings, battery_mv).await {
-                    Ok(packet) => packet_signal.signal(packet),
-                    Err(error) => {
-                        defmt::error!("seq reservation failed, skipping packet: {}", error)
-                    }
-                }
-            }
-
+        match packet_builder.build(&measurements).await {
+            Ok(packet) => packet_signal.signal(packet),
             Err(error) => {
-                defmt::error!("errors while reading: {}", error);
+                defmt::error!("seq reservation failed, skipping packet: {}", error)
             }
         };
 
@@ -127,8 +115,6 @@ async fn main(spawner: Spawner) {
         &mut [],
     );
 
-    let sensors = Sensors::new(twim, sensors_power_pin);
-
     let channel = embassy_nrf::saadc::ChannelConfig::single_ended(board.battery_adc);
     let battery = Battery::init(
         embassy_nrf::saadc::Saadc::new(
@@ -140,6 +126,10 @@ async fn main(spawner: Spawner) {
         board.battery_divider_ratio,
     )
     .await;
+
+    let sht = Sht4x::new(twim);
+
+    let sensors = Sensors::new(sht, battery, sensors_power_pin);
 
     let mpsl_p =
         mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
@@ -157,7 +147,10 @@ async fn main(spawner: Spawner) {
 
     static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
     let mpsl = MPSL.init(unwrap!(mpsl::MultiprotocolServiceLayer::with_timeslots(
-        mpsl_p, Irqs, lfclk_cfg, session_mem
+        mpsl_p,
+        Irqs,
+        lfclk_cfg,
+        session_mem
     )));
 
     spawner.spawn(unwrap!(mpsl_task(&*mpsl)));
@@ -177,7 +170,6 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(unwrap!(telemetry_task(
         sensors,
-        battery,
         &PACKET_SIGNAL,
         packet_builder
     )));

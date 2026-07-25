@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use crate::scanned_packet::ScannedPacketChannel;
 use defmt::{error, info, unwrap};
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
@@ -11,21 +12,24 @@ use embassy_nrf::peripherals::{self, RNG};
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, rng};
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, State};
+use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 use homescope_board::board;
-use homescope_common::frame::Frame;
+use homescope_common::frame;
 use homescope_common::observation::SensorObservation;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
+
 use {defmt_rtt as _, panic_probe as _};
 
 mod ble_scan;
 mod lru_cache;
+mod scanned_packet;
 
 enum BlinkEvent {
     Inc,
@@ -34,7 +38,6 @@ enum BlinkEvent {
 
 static BLINK_EVENTS: Channel<CriticalSectionRawMutex, BlinkEvent, 8> = Channel::new();
 
-const OBSERVATION_CHANNEL_SIZE: usize = 1024;
 const DTR_SETTLE_MS: u64 = 50;
 
 bind_interrupts!(struct Irqs {
@@ -89,7 +92,7 @@ async fn wait_for_dtr_on(cdc_control: &ControlChanged<'_>) {
 async fn main(spawner: Spawner) {
     #[cfg(feature = "wait-for-rtt")]
     while !defmt_rtt::in_blocking_mode() {}
- 
+
     let p = embassy_nrf::init(Default::default());
 
     let board = board!(p);
@@ -176,11 +179,7 @@ async fn main(spawner: Spawner) {
     // Run the USB device.
     let usb_fut = usb.run();
 
-    let observations_channel: Channel<
-        NoopRawMutex,
-        (Instant, SensorObservation),
-        OBSERVATION_CHANNEL_SIZE,
-    > = Channel::new();
+    let observations_channel: ScannedPacketChannel = Channel::new();
 
     let ble_fut = ble_scan::run(sdc, &observations_channel, homescope_board::device_addr());
 
@@ -195,12 +194,10 @@ async fn main(spawner: Spawner) {
 
             loop {
                 info!("waiting for sensor packet...");
-                let (received_at, mut observation) = observations_channel.receive().await;
+                let scanned_packet = observations_channel.receive().await;
                 info!("packet received");
 
                 led_on();
-
-                info!("unique packet received");
 
                 if !cdc_sender.dtr() {
                     error!("dtr is off, retrying!");
@@ -208,16 +205,40 @@ async fn main(spawner: Spawner) {
                     break;
                 }
 
-                observation.age_ms =
-                    u32::try_from((Instant::now() - received_at).as_millis()).unwrap_or(u32::MAX);
+                let age_ms = u32::try_from((scanned_packet.captured_at.elapsed()).as_millis())
+                    .unwrap_or(u32::MAX);
 
-                let frame: Frame = observation.into();
+                let observation = SensorObservation {
+                    device_addr: scanned_packet.device_addr,
+                    rssi: scanned_packet.rssi,
+                    age_ms,
+                    packet: &scanned_packet.packet,
+                };
 
-                let result = select(
-                    cdc_sender.write_packet(frame.as_bytes()),
-                    wait_for_dtr_off(&cdc_control),
-                )
-                .await;
+                let mut frame_buffer: [u8; frame::MAX_LEN] = [0; _];
+                let frame_len = match frame::encode(&mut frame_buffer, &observation) {
+                    Ok(len) => len,
+                    Err(err) => {
+                        defmt::error!("failed to encode frame: {}", err);
+                        continue;
+                    }
+                };
+
+                let write_frame = async {
+                    for chunk in
+                        frame_buffer[..frame_len].chunks(cdc_sender.max_packet_size() as usize)
+                    {
+                        cdc_sender.write_packet(chunk).await?;
+                    }
+
+                    if frame_len % cdc_sender.max_packet_size() as usize == 0 {
+                        cdc_sender.write_packet(&[]).await?;
+                    }
+
+                    Ok::<(), EndpointError>(())
+                };
+
+                let result = select(write_frame, wait_for_dtr_off(&cdc_control)).await;
 
                 led_off();
 

@@ -24,13 +24,15 @@ homescope/
 ├── Cargo.toml              # host-target workspace: gateway, api, common, host-util
 ├── justfile                # dev workflow: just api / gateway / db-seed / grafana-pull / dev
 ├── compose.dev.yml         # dev stack: mosquitto + TimescaleDB + Grafana (localhost:4000)
-├── common/                 # shared types — homescope-common (no_std-by-default; features: wire, serde)
+├── common/                 # shared types — homescope-common (no_std-by-default; features: wire, serde, defmt)
 │   └── src/
 │       ├── lib.rs
 │       ├── device_addr.rs  # DeviceAddr([u8; 6]) — BLE advertising address (AdvA, FICR-derived), 12-hex Display/serde
-│       ├── packet.rs       # SensorPacket (repr(C, packed)) — over-the-air payload (10 B; TV redesign planned)
-│       ├── observation.rs  # SensorObservation = device_addr + packet + receiver RSSI/age (21 B)
-│       ├── frame.rs        # Frame: magic + payload + CRC-16/IBM-SDLC (25 B)
+│       ├── wire.rs         # Wire trait (fixed-size LE codec) + unit newtypes (Millivolts, CentiCelsius, CentiPercent, Dbm) + Truncated/BufferTooSmall
+│       ├── measurement.rs  # TV measurement-ID registry — Measurement enum (id ⇒ semantics+repr+scale), macro-generated encode/decode
+│       ├── packet.rs       # SensorPacket (borrowed view) — air payload [seq: u32][TV section]; encode/parse + Measurements iterator; MAX_WIRE_LEN=252
+│       ├── observation.rs  # SensorObservation (borrowed view) = device_addr + age_ms + rssi + packet_len + opaque packet; cursor encode
+│       ├── frame.rs        # frame::encode — magic + observation + CRC-16/IBM-SDLC, variable length (16+N B); parse pending (gateway migration)
 │       └── reading.rs      # SensorReading (serde camelCase, human units) — MQTT JSON payload
 ├── gateway/                # Pi-side bridge: USB-CDC decode → MQTT publish — homescope-gateway
 │   ├── Containerfile
@@ -51,10 +53,10 @@ homescope/
 │   │   └── src/lib.rs
 │   ├── sensor/             # homescope-sensor — BLE-advertising firmware
 │   │   ├── flash_uf2.sh    # UF2 backup flow (calls tools/uf2/uf2conv.py)
-│   │   └── src/            # main.rs, ble_advertise.rs, sensors.rs, battery.rs, packet_builder.rs
+│   │   └── src/            # main.rs, ble_advertise.rs, sensors.rs + sensors/ (sht4x, battery), packet_builder.rs, seq_counter.rs (flash-checkpointed seq)
 │   └── receiver/           # homescope-receiver — USB-CDC BLE scanner dongle
 │       ├── flash_uf2.sh
-│       └── src/            # main.rs, ble_scan.rs
+│       └── src/            # main.rs, ble_scan.rs, scanned_packet.rs (owned channel message), lru_cache.rs
 ├── deploy/                 # production deployment (Pi)
 │   ├── deploy.sh           # idempotent converge script (root phase + homescope-user phase)
 │   ├── backup-db.sh
@@ -79,19 +81,19 @@ homescope/
 
 ## Current state
 
-- ✅ **Sensor firmware** (`firmware/sensor/`): true extended advertising on Coded PHY via `advertise_ext` (`ExtNonconnectableNonscannableUndirected`; trouble's plain `advertise()` is legacy-only — it burned us, see field findings), `primary_phy`/`secondary_phy` explicitly `LeCoded` (trouble defaults to 1M — that also burned us). 20 ms interval, advertiser held ~400 ms → ~20 events/burst. TX +8 dBm via `Builder::default_tx_power(8)` (the per-set HCI field is ignored by the SDC). Reads **SHT45** over async TWIM (`sht4x` driver, optional power-gated rail), samples battery voltage via SAADC, packet cadence 60 s.
+- ✅ **Sensor firmware** (`firmware/sensor/`): true extended advertising on Coded PHY via `advertise_ext` (`ExtNonconnectableNonscannableUndirected`; trouble's plain `advertise()` is legacy-only — it burned us, see field findings), `primary_phy`/`secondary_phy` explicitly `LeCoded` (trouble defaults to 1M — that also burned us). 20 ms interval, advertiser held ~400 ms → ~20 events/burst. TX +8 dBm via `Builder::default_tx_power(8)` (the per-set HCI field is ignored by the SDC). Reads **SHT45** over async TWIM (`sht4x` driver, optional power-gated rail), samples battery voltage via SAADC, packet cadence 60 s. Emits **TV packets** (`PacketBuilder` + `Measurement` registry) with a **flash-persisted seq counter** (`seq_counter.rs`: two-page circular append log, reservation block 1024, jump-ahead on boot).
 - ✅ **Board abstraction** (`firmware/board/`): `Board` struct holds *only board-varying* resources (LED / I²C / sensor-power-gate pins as `Peri<'static, AnyPin>`, SAADC battery input as `AnyInput`, divider ratio); the cfg'd `board!(p)` macro constructs it via partial moves so `Peripherals` stays usable in `main` for chip-fixed peripherals (RNG, PPI, TWIM, SAADC, MPSL set). Deliberately **not** an owning BSP struct — see docs/architecture.md. Caveat: cfg'd macro arms only compile under their own feature — check both configs (`cargo clippy --workspace` per board) before calling a change done.
 - ⏳ **XIAO alkaline soak test** (planned 2026-07-10): bare XIAO Plus (no expansion board) + 2× AA alkaline → 3V3 pin; SHT45 direct-wired (SDA P1.14, SCL P1.13, power-gate P1.15); UF2-flashed, no probe attached (SWD debug mode inflates sleep current). Measures delivery reliability + battery longevity of *current pre-sleep-optimization* firmware via per-minute battery_mv telemetry on the gateway. Prerequisite advised: watchdog — without a probe, a panic is a silent HardFault spin that drains the pack.
-- ✅ **Receiver firmware** (`firmware/receiver/`): extended scanning on Coded PHY (`scan_ext` + `on_ext_adv_reports`), framed `SensorObservation`s (packet + RSSI + age_ms) over USB-CDC. Robust to host disconnect/reconnect — DTR-aware writes with disconnect-race in `select`, drop-oldest backlog channel, sequence-based dedup, post-DTR grace period.
-- 🔶 **Common crate** (DeviceAddr refactor in flight, 2026-07-16): `SensorPacket` (air, 10 B — identity no longer in the payload), `SensorObservation` (receiver→gateway, 21 B: `device_addr` + packet + RSSI/age), `SensorReading` (app/JSON), `DeviceAddr` ([u8; 6] LSB-first from AdvA/FICR `DEVICEADDR`, 12-hex-uppercase rendering; replaces `HardwareId`), `Frame` (magic + payload + CRC-16/IBM-SDLC) — see docs/protocol.md v0.4 (**25-byte frames**). Features: `wire` (bytemuck/crc), `serde`. **Next: TV measurement encoding** (protocol v0.5, variable-length frames) — see `NOTES-packet-tv-aead.md` + docs/architecture.md "Data model".
-- ✅ **Gateway**: a pure bridge now — serial decode (`tokio_util` `Decoder` in `decoder.rs`), `received_at = now − age_ms`, JSON publish (QoS 1) to `homescope/sensors/<device-addr>/reading`. Env-configured (`MQTT_HOST`, `MQTT_PORT`, `RECEIVER_PATH` default `/dev/homescope-receiver`) via `host-util`. The old range-survey page (port 3000) was retired to the `reliability-benchmark` branch — check it out to rerun a survey.
+- ✅ **Receiver firmware** (`firmware/receiver/`): extended scanning on Coded PHY (`scan_ext` + `on_ext_adv_reports`), v0.5 variable-length frames over USB-CDC. **Semantics-blind**: reads only `seq` (fixed cleartext offset) for per-device LRU dedup; packet bytes forwarded opaquely. Scan handler → drop-oldest `ScannedPacket` channel (owned message: captured_at + addr + rssi + packet bytes; depth 512 ≈ 139 KB — deliberate, fits with ~103 KB RAM to spare) → writer stamps `age_ms` at send time, builds the `SensorObservation` view, chunked CDC writes (64 B FS bulk limit + ZLP on exact multiples). Robust to host disconnect/reconnect — DTR-aware writes with disconnect-race in `select`, post-DTR grace period.
+- ✅ **Common crate** (TV redesign landed 2026-07-25): `wire.rs` (`Wire` trait + unit newtypes + layered errors), `measurement.rs` (**TV measurement-ID registry**: 0x01 battery mV u16, 0x02 temperature centi-°C i16, 0x03 humidity centi-%RH u16), `SensorPacket` (borrowed view over `[seq: u32][TV section]`, `MAX_WIRE_LEN` 252, `Measurements` iterator), `SensorObservation` (borrowed view: device_addr + age_ms + rssi + packet_len + opaque packet), `frame::encode` (magic + observation + CRC, **variable-length 16+N frames**), `SensorReading` (app/JSON), `DeviceAddr` — see docs/protocol.md **v0.5**. Features: `wire` (crc), `serde`, `defmt`. **Pending: `frame::parse`** (three-outcome: incomplete/ok/corrupt) for the gateway migration + an observation/frame round-trip test. ⚠️ packet.rs tests broken by the `PACKET_MAX_LEN`→`MAX_ENCODED_LEN` rename + units moving to `wire` (2-line fix, owner's).
+- 🔶 **Gateway**: a pure bridge — serial decode (`tokio_util` `Decoder` in `decoder.rs`), `received_at = now − age_ms`, JSON publish (QoS 1) to `homescope/sensors/<device-addr>/reading`. ⚠️ **Still decodes protocol v0.4** — cannot parse what the receiver now emits; migration (via `frame::parse` in `common` + opaque-payload envelope) is the next backend task. Env-configured (`MQTT_HOST`, `MQTT_PORT`, `RECEIVER_PATH` default `/dev/homescope-receiver`) via `host-util`. The old range-survey page (port 3000) was retired to the `reliability-benchmark` branch — check it out to rerun a survey.
 - ✅ **API** (`homescope-api`): MQTT→TimescaleDB ingest — rumqttc durable session (`clean_session=false`, QoS 1, client id `api`) subscribing `homescope/sensors/+/reading` → bounded mpsc(256, try_send drop+warn) → sqlx writer. `devices` table (id, unique device address — column migrating `hardware_id`→`device_addr` with the refactor, name) loaded into a `DeviceRegistry` cache at startup; readings FK to `devices.id`; **unknown devices warn-once + drop, no auto-registration** (table becomes the key registry when AEAD lands). Migrations at startup with `RUN_MIGRATIONS=true`. HTTP endpoints not started (axum in deps). ⚠️ Known gap: DB insert errors log-and-continue while rumqttc auto-acks → readings lost during DB outages (see NOTES-ingest-db-error-handling.md; end-state = manual acks + seq dedup).
 - ✅ **Deployment**: rootless Podman quadlets (mosquitto w/ persistence, TimescaleDB 2.x/PG18, api, gateway, grafana) under a `homescope` user; ARM images from GitHub Actions → ghcr.io/eldigh/* with `AutoUpdate=registry` + auto-update timer; idempotent `deploy/deploy.sh` (secrets generated once); udev symlink rule; `backup-db.sh`. Grafana: provisioned datasource + committed dashboard, anonymous viewer, port 4000.
 - ✅ **Dev workflow**: `justfile` + `compose.dev.yml` — `just api`/`just gateway` auto-start deps, `just db-seed` (~90 days fake data), `just grafana-pull` (dashboard → repo), `just dev` (zellij).
 - ⏳ **S=8 forcing** (raw-HCI `LeSetExtAdvParamsV2` on the sensor) — next firmware task, worth +4-5 dB.
 - ✅ **Hardware migration, stage 1 (2026-07-03)**: 2× Raytac MDBT50Q-DB-40 in hand, whole-house survey **passed** (worst spot ≥85 % delivery after minor repositioning) → **MDBT50Q-1MV2 validated as the production module**. Remaining: custom PCB (MDBT50Q module, VDDH + gated sensor-rail LDO power topology — see Key facts).
 - ⏳ **Planned backend/deploy work** (each has a worked-out NOTES-*.md at repo root): API graceful shutdown; ingest DB-error handling → manual MQTT acks + per-device seq check (replay/dedup/idempotency, one mechanism); `devices.site`/`room` columns + gateway `SITE` topic prefix (`homescope/<site>/sensors/...`, one PR); mosquitto password_file + per-gateway ACLs (before the two-house VPN rollout); udev-driven gateway activation (`TAG+="systemd"` + `BindsTo=`); real VID/PID (pid.codes) replacing embassy's `0xc0de:0xcafe`.
-- ⏳ **Packet redesign + crypto block** (settled 2026-07-16, see `NOTES-packet-tv-aead.md`; owner's order): ① finish DeviceAddr refactor → ② TV measurement encoding (ID registry in `common`; receiver/gateway go semantics-blind; MQTT envelope = JSON metadata + base64 blob; nullable metric columns, DB stays wide — "extensible, not generic") → ③ seq persistence on the sensor (retained RAM + flash checkpoint, AEAD-nonce prerequisite) → ④ ChaCha20-Poly1305 AEAD (decrypt-in-API reaffirmed; keyless gateways; integrations later get plaintext via API republish of verified readings, not via gateway decryption).
+- 🔶 **Packet redesign + crypto block** (settled 2026-07-16, see `NOTES-packet-tv-aead.md`; owner's order): ① ✅ DeviceAddr refactor → ② 🔶 TV measurement encoding — ✅ `common` registry + sensor encode + receiver forwarding (2026-07-25); ⏳ **gateway migration** (`frame::parse` in `common`, MQTT envelope = JSON metadata + base64 blob) + API TV decode + nullable metric columns (DB stays wide — "extensible, not generic") → ③ ✅ seq persistence on the sensor (flash checkpoint w/ jump-ahead, `seq_counter.rs`; AEAD-nonce prerequisite done) → ④ ⏳ ChaCha20-Poly1305 AEAD (decrypt-in-API reaffirmed; keyless gateways; integrations later get plaintext via API republish of verified readings, not via gateway decryption).
 - ⏳ **Provisioning** (settled 2026-07-20, see `NOTES-provisioning.md`): per-device AEAD key lives in **UICR** (`CUSTOMER[0..7]`), written once by a new `homescope-provision` workstation CLI (probe-rs reads FICR `DEVICEADDR` off a *blank* chip → `POST /devices` → API generates + returns the key once → UICR write + verify → flash). One firmware binary for the whole fleet — supersedes the build-time `DEVICE_KEY` env/`link_section` plan. Admin-token-authenticated issuance endpoint; device keys **envelope-encrypted at rest** (KEK in API secrets) — do this before deployment, backups otherwise leak the fleet.
 - ⏳ **Remaining firmware work**: watchdog (soak-test prerequisite), BMP581 + LTR390 drivers, sleep optimization, HTTP API.
 
@@ -105,13 +107,14 @@ The `firmware/.cargo/config.toml` sets `runner = "probe-rs run --chip nRF52840_x
 
 ### Board selection
 
-`board-db40` is the **default feature** on both firmware crates. XIAO builds need `--no-default-features` (Cargo features are additive — `--features board-xiao` alone enables *both* boards and trips the `compile_error!` guard):
+**Neither firmware crate has a default board feature** (removed 2026-07; commit 63df8e9) — every build/check/clippy invocation must pass exactly one of `--features board-db40` / `--features board-xiao`, or `board/build.rs` fails with "no board feature selected". Don't enable both (trips the `compile_error!` guard):
 
 ```bash
-cargo run --release --no-default-features --features board-xiao
+cargo run --release --features board-db40   # DB-40 eval board
+cargo run --release --features board-xiao   # XIAO (UF2 layout)
 ```
 
-The board feature selects the `board!` macro arm *and* the linker script (`memory-db40.x` = app at `0x0`, `memory-xiao.x` = app at `0x27000` above the UF2 bootloader). ⚠️ Flashing a DB-40-linked image to a XIAO over probe-rs erases the XIAO's MBR/SoftDevice/UF2 bootloader. ⚠️ `flash_uf2.sh` currently builds with default features — pass/patch in the XIAO flags before using it, or the UF2 will contain a `0x0`-linked (DB-40) image.
+The board feature selects the `board!` macro arm *and* the generated linker script (app at `0x0` for DB-40, `0x27000` above the UF2 bootloader for XIAO). ⚠️ Flashing a DB-40-linked image to a XIAO over probe-rs erases the XIAO's MBR/SoftDevice/UF2 bootloader. ⚠️ `flash_uf2.sh` runs bare `cargo build --release` — it now fails at build.rs unless you add the XIAO feature flag to it.
 
 ### Backup path: UF2 via mass-storage bootloader
 
@@ -159,24 +162,23 @@ To flash: double-tap RESET on the XIAO so the bootloader USB drive appears, then
 - **TX power**: +8 dBm via nrf-sdc `Builder::default_tx_power(8)` — the per-set HCI request field is ignored by the SDC
 - **Interval/burst**: 20 ms × ~20 events (~400 ms); AUX payloads channel-hop per event, so a burst doubles as frequency diversity (per-packet RSSI swings ±10-15 dB indoors — judge medians)
 - **Burst cadence**: ~0.5 s during benchmarking; production target is 1–5 min with System OFF sleep between bursts
-- **Payload**: `ManufacturerSpecificData` with company ID `0xFFFF` (testing) carrying a `#[repr(C, packed)]` `SensorPacket` struct — direct binary, no serialization framework; extended adv gives 254 B headroom (the planned AEAD tag never fit legacy's 31 B). Planned: **TV measurement encoding** — `[seq][id][data]…` with a measurement-ID registry in `common` (ID = semantics + repr + scale; ID implies length); device identity = AdvA, not a payload field.
+- **Payload**: `ManufacturerSpecificData` with company ID `0xFFFF` (testing; treat as shared airspace — never trust its contents) carrying the **TV measurement encoding** — `[seq: u32][id][value]…` with the measurement-ID registry in `common` (ID = semantics + repr + scale; ID implies length; unknown/truncated/duplicate ⇒ drop whole packet); `MAX_WIRE_LEN` 252; device identity = AdvA, not a payload field. Extended adv gives 254 B headroom (the planned AEAD tag never fit legacy's 31 B).
 - **Security (planned)**: ChaCha20-Poly1305 AEAD with per-device keys (registry = `devices` table, encrypted at rest under a KEK; decrypt in the API — gateways keyless; sensor-side key in UICR, see `NOTES-provisioning.md`); TV section encrypted, `device_addr`+`seq` as AAD; nonce derived from the **persisted** seq counter (retained RAM + flash checkpoint on the sensor); the API's per-device seq monotonicity check = replay protection + multi-receiver dedup + MQTT-redelivery idempotency. Not implemented yet — see `NOTES-packet-tv-aead.md`.
 
 ## USB-CDC wire protocol (receiver → gateway)
 
-See [docs/protocol.md](docs/protocol.md) for the full spec (v0.4, in flight with the DeviceAddr refactor). Quick summary:
+See [docs/protocol.md](docs/protocol.md) for the full spec (v0.5, 2026-07-25). Quick summary:
 
-- 25-byte frame: 2-byte magic `HS` + 21-byte `SensorObservation` (`DeviceAddr` from AdvA + air-packet fields + receiver-side `rssi`/`age_ms`; no pressure field — that arrives with the TV encoding) + 2-byte CRC-16/IBM-SDLC over the payload (little-endian on the wire).
-- Planned v0.5: TV measurement encoding ⇒ variable-length frames (payload-length byte after the magic); receiver/gateway treat the packet bytes as opaque.
-- Gateway uses `tokio_util::codec::Decoder` over `BytesMut` (`gateway/src/decoder.rs`) with magic-search via `memchr` and frame validation via `Frame::try_from_bytes`.
-- The actual decoder implementation is shorter than the spec — `common` encapsulates magic/CRC/serialization.
+- Variable-length frame (16+N bytes): 2-byte magic `HS` + `SensorObservation` (12-byte header: `device_addr` from AdvA, `age_ms` u32 LE, `rssi` i8, `packet_len` u8; then the N-byte air packet, opaque) + 2-byte CRC-16/IBM-SDLC over the observation bytes (little-endian on the wire). N ≤ 252; 29 bytes with today's three measurements.
+- Air packet: `[seq: u32 LE][id][value]…` — the TV encoding; the receiver reads only `seq` (dedup), everything downstream of the sensor is semantics-blind until the API.
+- ⚠️ **Gateway not yet migrated**: `gateway/src/decoder.rs` still expects v0.4 25-byte frames (`memchr` + `Frame::try_from_bytes`). Migration plan: `frame::parse` in `common` with incomplete/ok/corrupt outcomes; the `tokio_util::codec::Decoder` becomes a loop over it.
 - Downstream of the gateway, readings travel as JSON (`SensorReading`, serde camelCase) on `homescope/sensors/<device-addr>/reading`; planned topic shape adds a per-gateway site prefix (`homescope/<site>/sensors/...`). Once payloads go opaque (TV/AEAD), the gateway JSON becomes an envelope (cleartext `deviceAddr`/`seq`/`rssi`/`receivedAt` + base64 blob) and the API republishes decoded readings on a `…/state` topic for integrations.
 
 ## Where to find things
 
 - [README.md](README.md) — top-level overview, pointers into the crates
 - [docs/architecture.md](docs/architecture.md) — full design rationale: protocol choice, sensor selection, power topology, security model, BLE vs ESB tradeoff, API/deployment architecture
-- [docs/protocol.md](docs/protocol.md) — USB-CDC wire protocol between receiver and gateway (v0.3, 27-byte frames)
+- [docs/protocol.md](docs/protocol.md) — USB-CDC wire protocol between receiver and gateway (v0.5, variable-length TV frames)
 - [docs/flashing.md](docs/flashing.md) — UF2 build & flash workflow (XIAO-only), mount setup, troubleshooting
 - `deploy/deploy.sh` header comment — the deployment model (two-phase, idempotent, ownership rules; **never chown into `~/.local/share/containers`**)
 - `NOTES-*.md` (repo root, untracked) — settled plans for upcoming backend/deploy tasks; read before working on those topics

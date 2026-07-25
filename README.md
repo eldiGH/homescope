@@ -10,7 +10,7 @@ This repo is a monorepo with **two Cargo workspaces** split by target architectu
 
 | Path | Crate | Target | What it does |
 |------|-------|--------|--------------|
-| [`common/`](common/) | `homescope-common` | `no_std`-by-default | Shared `SensorPacket`/`SensorObservation` (wire formats), `SensorReading` (app/JSON), `DeviceAddr`, framing, CRC. |
+| [`common/`](common/) | `homescope-common` | `no_std`-by-default | Shared wire formats: `SensorPacket` (seq + TV section), `Measurement` ID registry, `SensorObservation`, framing + CRC; `SensorReading` (app/JSON), `DeviceAddr`. |
 | [`gateway/`](gateway/) | `homescope-gateway` | host (Pi) | Reads framed packets from the receiver over USB-CDC, decodes, publishes JSON readings to MQTT. |
 | [`api/`](api/) | `homescope-api` | host (Pi) | Subscribes to MQTT, resolves devices against a registry, stores readings in TimescaleDB. HTTP endpoints planned. |
 | [`host-util/`](host-util/) | `homescope-host-util` | host | Shared host-side init (dotenv + tracing) and env-var helpers. |
@@ -77,15 +77,15 @@ Idempotent — creates the `homescope` user, installs the udev rule and quadlets
 
 ## Wire protocol (receiver → gateway)
 
-25-byte frames over USB-CDC (protocol v0.4):
+Variable-length frames over USB-CDC (protocol v0.5, 16 + N bytes):
 
 ```text
-+--------+--------+--------------------------+---------------+
-| 0x48   | 0x53   | SensorObservation (21 B) | CRC-16 (2B LE)|
-+--------+--------+--------------------------+---------------+
++--------+--------+--------------------------------------+---------------+
+| 0x48   | 0x53   | SensorObservation (12 B hdr + N B)   | CRC-16 (2B LE)|
++--------+--------+--------------------------------------+---------------+
 ```
 
-CRC is CRC-16/IBM-SDLC over the payload bytes. `SensorObservation` is the over-the-air `SensorPacket` plus receiver-observed metadata (the device's advertising address, RSSI, age). Both ends share framing via `Frame` from `common`. See [docs/protocol.md](docs/protocol.md) for the full spec — including the planned v0.5 (variable-length TV measurement encoding, then AEAD).
+CRC is CRC-16/IBM-SDLC over the observation bytes. `SensorObservation` is receiver-observed metadata (the device's advertising address, age, RSSI, packet length) plus the over-the-air `SensorPacket` forwarded **opaquely** — `[seq: u32][measurement-id][value]…`, the TV encoding whose ID registry lives in `common`. Both ends share the codec via `common`. ⚠️ The gateway decoder still speaks v0.4 — its migration is in flight. See [docs/protocol.md](docs/protocol.md) for the full spec, including the planned AEAD step.
 
 The gateway republishes each observation as JSON on MQTT: `homescope/sensors/<device-addr>/reading`.
 
@@ -100,7 +100,7 @@ The gateway republishes each observation as JSON on MQTT: `homescope/sensors/<de
 - ✅ Hardware: Raytac MDBT50Q-DB-40 survey passed → custom PCB with MDBT50Q-1MV2 is next
 - ⏳ S=8 coding refactor (raw HCI `LeSetExtAdvParamsV2`)
 - ⏳ Ingest durability (seq dedup, manual MQTT acks), graceful shutdown, site topology + broker ACLs
-- ⏳ TV measurement encoding (per-measurement ID registry; receiver/gateway forward opaque payloads) → persisted seq counters → per-device ChaCha20-Poly1305 AEAD (decrypt in the API; gateways stay keyless; integrations fed by an API republish of verified readings)
+- 🔶 TV measurement encoding — ✅ firmware side (ID registry in `common`, sensor encode, receiver opaque forwarding, persisted seq counters); ⏳ gateway/API migration (opaque envelope, TV decode, DB columns) → then per-device ChaCha20-Poly1305 AEAD (decrypt in the API; gateways stay keyless; integrations fed by an API republish of verified readings)
 - ⏳ Sleep/power optimization (System OFF + RTC wakeup), watchdog, BMP581/LTR390 drivers
 
 See the **Implementation roadmap** in [docs/architecture.md](docs/architecture.md#implementation-roadmap) for the full plan.

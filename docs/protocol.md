@@ -1,21 +1,31 @@
-# Scanner-to-gateway wire protocol — v0.4 (prototype)
+# Scanner-to-gateway wire protocol — v0.5 (prototype)
 
-> **Status: prototype, v0.4** (in flight 2026-07 — lands with the DeviceAddr
-> refactor). This format will evolve as features are added (TV measurement
-> encoding, encryption). It's documented here so the gateway has a stable
-> target, and so future versions can be diffed against it.
+> **Status: prototype, v0.5** (2026-07-25 — the TV-measurement-encoding
+> release). Implemented in `common`, the sensor firmware, and the receiver
+> firmware. ⚠️ **The gateway parser has not been migrated yet** — it still
+> expects v0.4 fixed 25-byte frames; updating it (via a `frame::parse` in
+> `common`) is the next task, together with the switch to the opaque-payload
+> MQTT envelope. This format will keep evolving (AEAD next); it's documented
+> here so both ends have a stable target and versions can be diffed.
 >
-> **Changes since v0.3:** device identity moved out of the payload — the
-> sensor no longer transmits its FICR `DEVICEID` in the air packet; identity
-> is now the BLE **advertising address** (AdvA, derived from FICR
-> `DEVICEADDR`), which the receiver observes on every report and forwards as
-> `device_addr: DeviceAddr([u8; 6])` (LSB-first, matching BLE on-air order).
-> `HardwareId(u64)` is gone. Frame shrank from 27 to **25 bytes**.
+> **Changes since v0.4:** the fixed `SensorPacket` struct is replaced by the
+> **TV measurement encoding** (type–value; see below), which makes the air
+> packet — and therefore the frame — **variable-length**. `SensorObservation`
+> gained a 1-byte `packet_len` and now carries the air packet as an opaque
+> byte string; the receiver and gateway no longer know what's inside it. Wire
+> structs are no longer memory-mapped (`repr(C, packed)`/bytemuck); both ends
+> use explicit little-endian encode/parse functions. Field order changed
+> (`age_ms` now precedes `rssi`). Frame size: 16 + N bytes (N = air-packet
+> length; 29 bytes with today's three measurements).
+>
+> **Changes since v0.3:** device identity moved out of the payload — identity
+> is the BLE **advertising address** (AdvA, derived from FICR `DEVICEADDR`),
+> forwarded as `device_addr: DeviceAddr([u8; 6])` (LSB-first, BLE on-air
+> order). `HardwareId(u64)` is gone. Frame shrank from 27 to 25 bytes.
 >
 > **Changes since v0.2:** `DeviceId` renamed to `HardwareId`; `humidity: u8`
-> replaced by `rh_cpercent: u16`; `pressure_pa` removed (pressure arrives
-> later via the TV encoding — see [Planned: v0.5](#planned-v05--tv-payload-then-aead)).
-> Frame shrank from 30 to 27 bytes.
+> replaced by `rh_cpercent: u16`; `pressure_pa` removed. Frame shrank from 30
+> to 27 bytes.
 >
 > **Changes since v0:** payload type changed from `SensorPacket` to
 > `SensorObservation` (adds receiver-observed metadata — RSSI and age).
@@ -25,19 +35,24 @@ packets over USB CDC. The gateway reads `/dev/ttyACM0` (or a udev symlink such
 as `/dev/homescope-receiver` — the deployed setup, see
 [deploy/udev](../deploy/udev/99-homescope-receiver.rules)) and parses frames.
 
-## Frame layout (25 bytes)
+## Frame layout (variable length: 16 + N bytes)
 
 ```
-+--------+--------+-----------------------------+----------+----------+
-| MAGIC0 | MAGIC1 | payload (21 bytes)          |  CRC lo  |  CRC hi  |
-| 0x48   | 0x53   | SensorObservation bytes     |       u16 LE        |
-+--------+--------+-----------------------------+----------+----------+
-   [0]      [1]    [2..23]                          [23]      [24]
++--------+--------+------------------------------------+----------+----------+
+| MAGIC0 | MAGIC1 | SensorObservation (12 + N bytes)   |  CRC lo  |  CRC hi  |
+| 0x48   | 0x53   | header (12) + air packet (N)       |       u16 LE        |
++--------+--------+------------------------------------+----------+----------+
+   [0]      [1]    [2 .. 14+N)                           [14+N]     [15+N]
 ```
 
 - **Magic (bytes 0-1):** ASCII `HS` = `0x48 0x53`. Frame-boundary marker — lets the gateway resync after errors or after opening the stream mid-frame.
-- **Payload (bytes 2-22):** raw bytes of `homescope_common::observation::SensorObservation`. Layout below.
-- **CRC (bytes 23-24):** CRC-16/IBM-SDLC over the **payload only** (not over magic). Little-endian on the wire.
+- **Payload (bytes 2..14+N):** `SensorObservation`, encoded field-by-field (layout below). Its `packet_len` byte is what delimits the frame.
+- **CRC (last 2 bytes):** CRC-16/IBM-SDLC over the **observation bytes only** (magic excluded; the `packet_len` byte **is** covered). Little-endian on the wire.
+
+N is bounded by `SensorPacket::MAX_WIRE_LEN` = **252** (the BLE AD-structure
+budget: 255-byte AD length − 1 type byte − 2 company-ID bytes), so the largest
+possible frame is 268 bytes. With the current three-measurement packet, N = 13
+and the frame is 29 bytes.
 
 ## CRC algorithm
 
@@ -55,38 +70,74 @@ Both firmware and gateway use the `crc` crate with `crc::CRC_16_IBM_SDLC`. Ident
 
 ## SensorObservation layout
 
-Defined in [common/src/observation.rs](../common/src/observation.rs) as `homescope_common::observation::SensorObservation`:
+Defined in [common/src/observation.rs](../common/src/observation.rs). No longer
+a memory-mapped packed struct — `SensorObservation::encode` writes the fields
+explicitly, little-endian, in this order (offsets relative to the start of the
+observation, i.e. frame byte 2):
 
-```rust
-#[repr(C, packed)]
-struct SensorObservation {
-    device_addr: DeviceAddr,  // [0..6]   — [u8; 6], LSB-first (BLE on-air order)
-    seq:         u32,         // [6..10]
-    temp_cdegc:  i16,         // [10..12]
-    rh_cpercent: u16,         // [12..14]
-    battery_mv:  u16,         // [14..16]
-    rssi:        i8,          // [16]
-    age_ms:      u32,         // [17..21]
-}
+| Offset      | Field         | Type        | Source                   | Meaning |
+| ----------- | ------------- | ----------- | ------------------------ | ------- |
+| `[0..6]`    | `device_addr` | `[u8; 6]`   | **receiver** (from AdvA) | The sensor's BLE advertising address, LSB-first (BLE on-air order) — a random static address derived from its FICR `DEVICEADDR`. Not part of the air payload. Rendered as 12 uppercase hex chars on MQTT/HTTP. |
+| `[6..10]`   | `age_ms`      | `u32` LE    | **receiver**             | Milliseconds between BLE capture and USB-CDC send. See "Age and timestamps." |
+| `[10]`      | `rssi`        | `i8` (dBm)  | **receiver**             | Signal strength at the receiver (typ. −30 to −110). `127` is the HCI "not available" sentinel — pass through, treat as suspect. |
+| `[11]`      | `packet_len`  | `u8`        | **receiver**             | N = length of the air packet that follows. Delimits the frame. |
+| `[12..12+N]`| `packet`      | `[u8; N]`   | **sensor** (opaque)      | The air packet, byte-for-byte as received over BLE. The receiver and gateway never interpret it beyond `seq` (below). |
+
+The fixed header is 12 bytes (`SensorObservation::HEADER_LEN`); the maximum
+observation is 12 + 252 = 264 bytes (`SensorObservation::MAX_LEN`).
+
+`DeviceAddr` is a newtype around `[u8; 6]`, stored LSB-first exactly as the
+address appears on air. It renders as 12 uppercase hex chars,
+most-significant byte first (standard BLE address order, no colons). See
+[common/src/device_addr.rs](../common/src/device_addr.rs).
+
+## Air packet (`SensorPacket`) — TV measurement encoding
+
+Defined in [common/src/packet.rs](../common/src/packet.rs) and
+[common/src/measurement.rs](../common/src/measurement.rs). This is the payload
+of the BLE `ManufacturerSpecificData` AD structure (company ID `0xFFFF`
+during development), forwarded opaquely inside the observation:
+
+```
++-----------------+------+---------+------+---------+----
+| seq (u32 LE)    | id   | value   | id   | value   | …
++-----------------+------+---------+------+---------+----
+  [0..4]            1 B    ID-implied length each
 ```
 
-21 bytes total, no padding (`#[repr(C, packed)]`). Multi-byte fields are in target-native byte order. nRF52840 and typical gateway hosts are both little-endian, so this happens to be little-endian on the wire — but the gateway should not assume native endianness; use `SensorObservation::from_bytes` (which internally uses `bytemuck::pod_read_unaligned`) or `Frame::try_from_bytes` to do the decode.
+- **`seq`** — per-sensor monotonic counter, **fixed cleartext header, always
+  at offset 0**. It does protocol work (receiver-side burst dedup, API-side
+  replay/dedup, future AEAD nonce) and is the only part of the packet the
+  receiver reads. Persisted on the sensor across reboots (retained RAM +
+  flash checkpoint with jump-ahead), so it never goes backwards.
+- **TV section** — *type–value*: each measurement is a 1-byte **measurement
+  ID** followed directly by its value. The ID comes from the registry in
+  `common` and binds semantics + wire representation + scale + unit, so the
+  ID **implies the length** — there is deliberately no per-field length byte.
+  Values are little-endian scaled integers; never floats.
 
-`DeviceAddr` is a `#[repr(transparent)]` newtype around `[u8; 6]`, stored LSB-first exactly as the address appears on air. It renders as 12 uppercase hex chars, most-significant byte first (standard BLE address order, no colons). See [common/src/device_addr.rs](../common/src/device_addr.rs).
+### Measurement ID registry
 
-### Field semantics
+| ID     | Meaning     | Repr  | Scale | Unit | Example |
+| ------ | ----------- | ----- | ----- | ---- | ------- |
+| `0x01` | battery     | `u16` | ×1    | mV   | `2950` = 2.950 V |
+| `0x02` | temperature | `i16` | ×0.01 | °C   | `2143` = 21.43 °C |
+| `0x03` | humidity    | `u16` | ×0.01 | %RH  | `4521` = 45.21 %RH |
 
-| Field         | Type         | Source        | Meaning                                                                             |
-| ------------- | ------------ | ------------- | ----------------------------------------------------------------------------------- |
-| `device_addr` | `DeviceAddr` | **receiver** (from AdvA) | The sensor's BLE advertising address — a random static address derived from its FICR `DEVICEADDR`. Observed by the receiver on the advertising report; **not part of the air payload**. Rendered as 12 uppercase hex chars on MQTT/HTTP. |
-| `seq`         | `u32`        | sensor        | Per-sensor monotonic counter. Currently resets on reboot; persistence is planned (see below). |
-| `temp_cdegc`  | `i16`        | sensor        | Temperature in centi-degrees C (2143 = 21.43 °C).                                   |
-| `rh_cpercent` | `u16`        | sensor        | Relative humidity in centi-percent (4521 = 45.21 %RH).                              |
-| `battery_mv`  | `u16`        | sensor        | Battery voltage in millivolts.                                                      |
-| `rssi`        | `i8`         | **receiver**  | Signal strength at the receiver, in dBm (typ. -30 to -110).                         |
-| `age_ms`      | `u32`        | **receiver**  | Milliseconds between BLE capture and USB-CDC send. See "Age and timestamps."        |
+The registry is the single source of truth
+(`homescope_common::measurement::Measurement`); only sensor firmware encodes
+it and only the API decodes it. If a metric ever needs different
+range/resolution, a **new ID** is minted — per-ID reversible, no version
+bump.
 
-Fields marked "receiver" are observed/computed by the receiver dongle and are not part of the over-the-air BLE payload. The sensor-side type (`SensorPacket`, defined in [common/src/packet.rs](../common/src/packet.rs)) is the strict subset `seq` through `battery_mv` — 10 bytes.
+### Decode posture (strict)
+
+Unknown ID, truncated value, or duplicate ID in one packet ⇒ **drop the whole
+packet with a warning** — don't salvage already-parsed fields. Both ends are
+ours; a malformed packet is a bug or foreign traffic, not something to
+tolerate. (Company ID `0xFFFF` is the Bluetooth SIG test ID and must be
+treated as shared airspace: anything in it is untrusted input until AEAD
+lands.)
 
 ## Age and timestamps
 
@@ -102,9 +153,9 @@ age_ms = Instant::now() - Instant::at_capture
 ```
 
 The capture timestamp is recorded the moment a matching BLE advertisement
-arrives at the receiver and is stored alongside the observation in the
-backlog channel. When the observation is eventually written to USB-CDC, the
-delta becomes its `age_ms`.
+arrives at the receiver and is stored alongside the packet bytes in the
+backlog channel (`ScannedPacket`). When the observation is eventually written
+to USB-CDC, the delta becomes its `age_ms`.
 
 The gateway then computes the wall-clock arrival time as:
 
@@ -129,66 +180,63 @@ incorrect.
 
 ## Reference parser algorithm
 
-For implementers writing a parser in another language. The Rust gateway in this repo uses a buffered approach (described below); the byte-at-a-time state machine is here as the canonical spec.
-
-Byte-at-a-time state machine:
+For implementers writing a parser in another language. Byte-at-a-time state
+machine:
 
 - **Hunting:** read 1 byte. If it equals `0x48` → `SawMagic0`. Else stay.
-- **SawMagic0:** read 1 byte. If `0x53` → `InFrame`. If `0x48` → stay in `SawMagic0` (preserves candidate). Else → `Hunting`.
-- **InFrame:** read 23 bytes (payload + CRC) with a short timeout (~100 ms is plenty — actual transmission is sub-millisecond; the timeout only protects against partial-frame stalls). Verify CRC over the 21-byte payload against bytes [21..23] interpreted as little-endian u16. On success, emit the decoded observation. → `Hunting` either way.
+- **SawMagic0:** read 1 byte. If `0x53` → `InHeader`. If `0x48` → stay in
+  `SawMagic0` (preserves candidate). Else → `Hunting`.
+- **InHeader:** read the 12-byte observation header. `packet_len` is its last
+  byte; if `packet_len > 252` → `Hunting` (false sync).
+- **InFrame:** read `packet_len + 2` more bytes (air packet + CRC). Verify
+  CRC over the `12 + packet_len` observation bytes against the trailing
+  little-endian u16. On success, emit the decoded observation. → `Hunting`
+  either way.
 
-Any I/O error, timeout, or CRC mismatch returns to `Hunting`. Don't try to "salvage" 25 bytes of a failed frame — at this packet rate, simply restarting the hunt costs at most one frame and avoids a fully byte-by-byte sliding-window matcher.
+Use a short read timeout (~100 ms is plenty — actual transmission is
+sub-millisecond; the timeout only protects against partial-frame stalls). Any
+I/O error, timeout, or CRC mismatch returns to `Hunting`. Don't try to
+"salvage" bytes of a failed frame — at this packet rate, restarting the hunt
+costs at most one frame.
 
-## Reference parser — Rust gateway implementation
+Note the frame is sent across multiple USB packets (64-byte full-speed bulk
+limit); USB packet boundaries are invisible at the tty level and carry no
+framing meaning — only the magic/length/CRC do.
 
-[gateway/src/decoder.rs](../gateway/src/decoder.rs) implements this as a `tokio_util::codec::Decoder<Item = SensorObservation>` over `BytesMut`, which handles partial-frame buffering across `AsyncRead` boundaries for free:
+## Rust gateway implementation — ⚠️ migration pending
 
-1. `memchr` the first magic byte (`0x48`) in the buffer. If absent → `Ok(None)` (ask for more bytes).
-2. `advance` past everything before the magic byte. If the buffer is now shorter than `FRAME_SIZE` (25) → `Ok(None)`.
-3. Slice a `&[u8; 25]` from the front of the buffer, pass to `Frame::try_from_bytes` (which checks the second magic byte, runs the CRC, and returns `Result<Frame, FrameError>`).
-4. On `Ok(frame)`: `advance(25)`, return `Ok(Some(frame.payload))`. On `Err`: `advance(1)` (skip past the false magic) and loop to search for the next candidate.
+[gateway/src/decoder.rs](../gateway/src/decoder.rs) still implements the
+**v0.4** fixed-25-byte decoder (`memchr` for magic + `Frame::try_from_bytes`).
+The v0.5 plan: a `frame::parse` in `common` with a three-outcome result —
+*incomplete* (need more bytes), *ok* (observation + bytes consumed), or
+*corrupt* (bad magic/CRC ⇒ skip one byte and resync) — so the
+`tokio_util::codec::Decoder` reduces to a loop over it and every
+byte-position fact stays in `common`. Until that lands, the gateway cannot
+parse what the receiver now emits.
 
-CRC mismatches and bad-magic false-syncs are absorbed silently by the loop — they're expected with magic-byte framing. Real I/O errors propagate as `Err` and the gateway exits (its supervisor restarts it).
+## Planned: AEAD (ChaCha20-Poly1305, decrypt in the API)
 
-## Planned: v0.5 — TV payload, then AEAD
+Settled 2026-07-16 (see `NOTES-packet-tv-aead.md`). The TV section becomes
+the ciphertext; `seq` stays cleartext at offset 0:
 
-Settled 2026-07-16 (see `NOTES-packet-tv-aead.md` at the repo root for the
-worked-out plan). The fixed `SensorPacket` layout is replaced by a
-**per-measurement TV encoding** (*type–value* — the length-implied member of
-the TLV family: the measurement ID determines the value's length, there is
-no per-field length byte), which makes the frame **variable-length**:
-
-- Air packet becomes `[seq: u32][id][data][id][data]…` — `seq` stays a fixed
-  header (dedup / replay / future AEAD nonce); each measurement is a 1-byte
-  **measurement ID** followed by its value. The ID comes from a registry in
-  `common` that binds semantics + wire representation + scale + unit (e.g.
-  *temperature = i16, ×0.01 °C*), so the ID **implies the length** — there is
-  no per-field length byte. Unknown ID or truncated data ⇒ the whole packet
-  is dropped with a warning.
-- The frame gains a **payload-length byte** after the magic; the CRC stays
-  CRC-16/IBM-SDLC over the (now variable) payload.
-- The receiver and gateway treat the packet bytes as **opaque** — only sensor
-  firmware encodes and only the API decodes. Adding a measurement type never
-  touches the receiver, gateway, frame format, or MQTT topics.
-- When AEAD lands (ChaCha20-Poly1305, per-device keys, decrypt in the API),
-  the TV section becomes the ciphertext and the cleartext header
-  (`device_addr`, `seq`) is bound as associated data. The USB-CDC frame and
-  MQTT envelope shapes don't change — the opaque blob just becomes
-  ciphertext + 16-byte tag.
-- Prerequisite: **`seq` persistence on the sensor** (RAM retention across
-  System OFF + periodic flash checkpoint with jump-ahead on boot), so the
-  counter never repeats across reboots — required for nonce uniqueness and
-  for the API's monotonic replay/dedup check.
+- Air packet becomes `[seq: u32][ciphertext: N][tag: 16 B]`; the cleartext
+  context (`device_addr` from AdvA + `seq`) is bound as **associated data**,
+  so a valid ciphertext can't be grafted onto another device or seq.
+- Nonce is derived deterministically from the persisted `seq` (no random
+  component — safe because keys are per-device and seq never repeats).
+- **The USB-CDC frame and MQTT envelope shapes don't change** — the opaque
+  packet blob just becomes ciphertext + tag. Receiver and gateway stay
+  keyless and unmodified; only firmware (encrypt) and API (decrypt) change.
 
 ## Known limitations (will change in future versions)
 
-- **Single, fixed payload type.** No version/type/length field after magic —
-  superseded by the v0.5 plan above.
-- **No encryption.** Payload is plaintext. Acceptable on USB CDC between two
-  trusted devices; the BLE air link is the segment that needs AEAD (v0.5
-  plan). Gateways stay keyless by design — decryption happens in the API.
+- **The gateway still speaks v0.4** — see above; until its decoder and MQTT
+  envelope are migrated, the pipeline is receiver-ahead-of-gateway.
+- **No encryption yet.** The air packet is plaintext TV data and anything in
+  radio range can forge well-formed packets (company ID `0xFFFF` is shared).
+  Acceptable during development; fixed by the AEAD step.
+- **No frame-level version field.** Bumping the format means updating both
+  ends together (they share `common`, so version skew is a deploy-ordering
+  concern, not a code one).
 - **Limited BLE-side metadata.** The advertising address is forwarded (that's
   `device_addr`), but PHY, channel index, and per-event details are not.
-- **Sensor reboots reset `seq`.** Fixed by the planned seq persistence (v0.5
-  prerequisite); until then the API's replay/dedup check must tolerate
-  resets.

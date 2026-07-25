@@ -362,8 +362,8 @@ homescope/
 │       ├── wire.rs        # Wire trait (fixed-size LE codec) + unit newtypes (Millivolts, CentiCelsius, CentiPercent, Dbm) + Truncated/BufferTooSmall
 │       ├── measurement.rs # the TV measurement-ID registry: Measurement enum (id ⇒ semantics+repr+scale), encode/decode
 │       ├── packet.rs      # SensorPacket — air payload: [seq: u32][TV section]; encode + parse + Measurements iterator; MAX_WIRE_LEN = 252
-│       ├── observation.rs # SensorObservation (borrowed view) = device_addr + age_ms + rssi + packet_len + opaque packet; cursor encode
-│       ├── frame.rs       # frame::encode — magic + observation + CRC-16/IBM-SDLC (variable length; parse pending for the gateway)
+│       ├── observation.rs # SensorObservation (borrowed view): 11-B header (device_addr, age_ms, rssi) + opaque packet = rest; impls frame::Encode
+│       ├── frame.rs       # content-agnostic framing: Encode trait + encode/parse — [magic][len u16][payload][crc], cap 1024, streaming 3-outcome parse
 │       └── reading.rs     # SensorReading (serde, human units) — the MQTT JSON payload
 ├── gateway/               # Pi-side bridge: USB-CDC decode → MQTT publish
 │   ├── Cargo.toml         # `homescope-gateway`

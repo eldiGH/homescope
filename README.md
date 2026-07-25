@@ -77,15 +77,15 @@ Idempotent — creates the `homescope` user, installs the udev rule and quadlets
 
 ## Wire protocol (receiver → gateway)
 
-Variable-length frames over USB-CDC (protocol v0.5, 16 + N bytes):
+Variable-length, content-agnostic frames over USB-CDC (protocol v0.5, 6 + N bytes):
 
 ```text
-+--------+--------+--------------------------------------+---------------+
-| 0x48   | 0x53   | SensorObservation (12 B hdr + N B)   | CRC-16 (2B LE)|
-+--------+--------+--------------------------------------+---------------+
++--------+--------+---------------+----------------------+---------------+
+| 0x48   | 0x53   | len (u16 LE)  | payload (N bytes)    | CRC-16 (2B LE)|
++--------+--------+---------------+----------------------+---------------+
 ```
 
-CRC is CRC-16/IBM-SDLC over the observation bytes. `SensorObservation` is receiver-observed metadata (the device's advertising address, age, RSSI, packet length) plus the over-the-air `SensorPacket` forwarded **opaquely** — `[seq: u32][measurement-id][value]…`, the TV encoding whose ID registry lives in `common`. Both ends share the codec via `common`. ⚠️ The gateway decoder still speaks v0.4 — its migration is in flight. See [docs/protocol.md](docs/protocol.md) for the full spec, including the planned AEAD step.
+CRC is CRC-16/IBM-SDLC over len + payload. The payload is a `SensorObservation` — receiver-observed metadata (advertising address, age, RSSI) plus the over-the-air `SensorPacket` forwarded **opaquely**: `[seq: u32][measurement-id][value]…`, the TV encoding whose ID registry lives in `common`. Both ends share the codec via `common` (`frame::encode`/`frame::parse` + an `Encode` trait for payloads). ⚠️ The gateway decoder still speaks v0.4 — its migration is in flight. See [docs/protocol.md](docs/protocol.md) for the full spec, including the planned AEAD step.
 
 The gateway republishes each observation as JSON on MQTT: `homescope/sensors/<device-addr>/reading`.
 

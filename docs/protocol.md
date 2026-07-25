@@ -10,13 +10,15 @@
 >
 > **Changes since v0.4:** the fixed `SensorPacket` struct is replaced by the
 > **TV measurement encoding** (type–value; see below), which makes the air
-> packet — and therefore the frame — **variable-length**. `SensorObservation`
-> gained a 1-byte `packet_len` and now carries the air packet as an opaque
-> byte string; the receiver and gateway no longer know what's inside it. Wire
-> structs are no longer memory-mapped (`repr(C, packed)`/bytemuck); both ends
-> use explicit little-endian encode/parse functions. Field order changed
-> (`age_ms` now precedes `rssi`). Frame size: 16 + N bytes (N = air-packet
-> length; 29 bytes with today's three measurements).
+> packet — and therefore the frame — **variable-length**. The frame is now
+> **content-agnostic**: it gained a u16 payload-length field after the magic
+> and carries the payload as an opaque byte string (framing knows nothing
+> about observations). `SensorObservation` carries the air packet opaquely;
+> the receiver and gateway no longer know what's inside it. Wire structs are
+> no longer memory-mapped (`repr(C, packed)`/bytemuck); both ends use
+> explicit little-endian encode/parse functions. Field order changed
+> (`age_ms` now precedes `rssi`). Frame size: 6 bytes overhead + payload
+> (30 bytes total with today's three measurements).
 >
 > **Changes since v0.3:** device identity moved out of the payload — identity
 > is the BLE **advertising address** (AdvA, derived from FICR `DEVICEADDR`),
@@ -35,24 +37,28 @@ packets over USB CDC. The gateway reads `/dev/ttyACM0` (or a udev symlink such
 as `/dev/homescope-receiver` — the deployed setup, see
 [deploy/udev](../deploy/udev/99-homescope-receiver.rules)) and parses frames.
 
-## Frame layout (variable length: 16 + N bytes)
+## Frame layout (variable length: 6 + N bytes)
+
+The frame is **content-agnostic**: it transports an opaque payload byte
+string and knows nothing about what's inside (`common/src/frame.rs`; payload
+types plug in via the `Encode` trait).
 
 ```
-+--------+--------+------------------------------------+----------+----------+
-| MAGIC0 | MAGIC1 | SensorObservation (12 + N bytes)   |  CRC lo  |  CRC hi  |
-| 0x48   | 0x53   | header (12) + air packet (N)       |       u16 LE        |
-+--------+--------+------------------------------------+----------+----------+
-   [0]      [1]    [2 .. 14+N)                           [14+N]     [15+N]
++--------+--------+--------+--------+----------------------+----------+----------+
+| MAGIC0 | MAGIC1 | LEN lo | LEN hi | payload (N bytes)    |  CRC lo  |  CRC hi  |
+| 0x48   | 0x53   |     u16 LE      | opaque               |       u16 LE        |
++--------+--------+--------+--------+----------------------+----------+----------+
+   [0]      [1]      [2]      [3]     [4 .. 4+N)              [4+N]     [5+N]
 ```
 
 - **Magic (bytes 0-1):** ASCII `HS` = `0x48 0x53`. Frame-boundary marker — lets the gateway resync after errors or after opening the stream mid-frame.
-- **Payload (bytes 2..14+N):** `SensorObservation`, encoded field-by-field (layout below). Its `packet_len` byte is what delimits the frame.
-- **CRC (last 2 bytes):** CRC-16/IBM-SDLC over the **observation bytes only** (magic excluded; the `packet_len` byte **is** covered). Little-endian on the wire.
+- **Length (bytes 2-3):** N, the payload length, u16 little-endian. Capped at `frame::MAX_PAYLOAD_LEN` = **1024** — a transport-level anti-stall bound (a parser must reject a bigger claim *before* waiting for the bytes), deliberately not derived from any payload type.
+- **Payload (bytes 4..4+N):** opaque. In this protocol it's a `SensorObservation` (layout below), but the framing layer neither knows nor checks that.
+- **CRC (last 2 bytes):** CRC-16/IBM-SDLC over **length + payload** (bytes 2..4+N; magic excluded, length field covered — a corrupted length is detectable). Little-endian on the wire.
 
-N is bounded by `SensorPacket::MAX_WIRE_LEN` = **252** (the BLE AD-structure
-budget: 255-byte AD length − 1 type byte − 2 company-ID bytes), so the largest
-possible frame is 268 bytes. With the current three-measurement packet, N = 13
-and the frame is 29 bytes.
+Frame overhead is 6 bytes (`frame::OVERHEAD`). With today's observation
+(11-byte header + 13-byte air packet = 24-byte payload) a frame is 30 bytes;
+the observation's maximum payload is 263 bytes (frame max: 269).
 
 ## CRC algorithm
 
@@ -71,20 +77,19 @@ Both firmware and gateway use the `crc` crate with `crc::CRC_16_IBM_SDLC`. Ident
 ## SensorObservation layout
 
 Defined in [common/src/observation.rs](../common/src/observation.rs). No longer
-a memory-mapped packed struct — `SensorObservation::encode` writes the fields
-explicitly, little-endian, in this order (offsets relative to the start of the
-observation, i.e. frame byte 2):
+a memory-mapped packed struct — `SensorObservation` implements the frame's
+`Encode` trait and writes its fields explicitly, little-endian, in this order
+(offsets relative to the start of the frame payload, i.e. frame byte 4):
 
 | Offset      | Field         | Type        | Source                   | Meaning |
 | ----------- | ------------- | ----------- | ------------------------ | ------- |
 | `[0..6]`    | `device_addr` | `[u8; 6]`   | **receiver** (from AdvA) | The sensor's BLE advertising address, LSB-first (BLE on-air order) — a random static address derived from its FICR `DEVICEADDR`. Not part of the air payload. Rendered as 12 uppercase hex chars on MQTT/HTTP. |
 | `[6..10]`   | `age_ms`      | `u32` LE    | **receiver**             | Milliseconds between BLE capture and USB-CDC send. See "Age and timestamps." |
 | `[10]`      | `rssi`        | `i8` (dBm)  | **receiver**             | Signal strength at the receiver (typ. −30 to −110). `127` is the HCI "not available" sentinel — pass through, treat as suspect. |
-| `[11]`      | `packet_len`  | `u8`        | **receiver**             | N = length of the air packet that follows. Delimits the frame. |
-| `[12..12+N]`| `packet`      | `[u8; N]`   | **sensor** (opaque)      | The air packet, byte-for-byte as received over BLE. The receiver and gateway never interpret it beyond `seq` (below). |
+| `[11..]`    | `packet`      | `[u8; …]`   | **sensor** (opaque)      | The air packet, byte-for-byte as received over BLE — **all remaining payload bytes** (the frame's length field delimits it; the observation has no length field of its own). The receiver and gateway never interpret it beyond `seq` (below). |
 
-The fixed header is 12 bytes (`SensorObservation::HEADER_LEN`); the maximum
-observation is 12 + 252 = 264 bytes (`SensorObservation::MAX_LEN`).
+The fixed header is 11 bytes (`SensorObservation::HEADER_LEN`); the maximum
+observation is 11 + 252 = 263 bytes (`SensorObservation::MAX_ENCODED_LEN`).
 
 `DeviceAddr` is a newtype around `[u8; 6]`, stored LSB-first exactly as the
 address appears on air. It renders as 12 uppercase hex chars,
@@ -186,12 +191,20 @@ machine:
 - **Hunting:** read 1 byte. If it equals `0x48` → `SawMagic0`. Else stay.
 - **SawMagic0:** read 1 byte. If `0x53` → `InHeader`. If `0x48` → stay in
   `SawMagic0` (preserves candidate). Else → `Hunting`.
-- **InHeader:** read the 12-byte observation header. `packet_len` is its last
-  byte; if `packet_len > 252` → `Hunting` (false sync).
-- **InFrame:** read `packet_len + 2` more bytes (air packet + CRC). Verify
-  CRC over the `12 + packet_len` observation bytes against the trailing
-  little-endian u16. On success, emit the decoded observation. → `Hunting`
-  either way.
+- **InHeader:** read the 2-byte length field (u16 LE). If `len > 1024`
+  (`MAX_PAYLOAD_LEN`) → `Hunting` (false sync — reject **before** waiting
+  for the claimed bytes, or a corrupted length stalls the parser).
+- **InFrame:** read `len + 2` more bytes (payload + CRC). Verify CRC over
+  the length field + payload (`2 + len` bytes) against the trailing
+  little-endian u16. On success, emit the payload (then parse it as a
+  `SensorObservation`). → `Hunting` either way.
+
+The Rust implementation (`frame::parse` in `common`) collapses this into a
+single function over a growing buffer with three outcomes: *incomplete*
+(need more bytes — not an error), *ok* (payload + total bytes consumed), or
+*corrupt* (bad magic / oversized length / bad CRC ⇒ the caller discards
+exactly **one** byte and retries — a false magic match may hide a real
+frame's start one byte later).
 
 Use a short read timeout (~100 ms is plenty — actual transmission is
 sub-millisecond; the timeout only protects against partial-frame stalls). Any
@@ -207,11 +220,12 @@ framing meaning — only the magic/length/CRC do.
 
 [gateway/src/decoder.rs](../gateway/src/decoder.rs) still implements the
 **v0.4** fixed-25-byte decoder (`memchr` for magic + `Frame::try_from_bytes`).
-The v0.5 plan: a `frame::parse` in `common` with a three-outcome result —
-*incomplete* (need more bytes), *ok* (observation + bytes consumed), or
-*corrupt* (bad magic/CRC ⇒ skip one byte and resync) — so the
-`tokio_util::codec::Decoder` reduces to a loop over it and every
-byte-position fact stays in `common`. Until that lands, the gateway cannot
+The v0.5 pieces it needs now exist in `common` — `frame::parse` (the
+three-outcome streaming parser described above) and `SensorObservation::parse`
+— so the migration is: rewrite the `tokio_util::codec::Decoder` as a loop
+over `frame::parse` (Incomplete → `Ok(None)`; Ok → advance `consumed`, parse
+the observation; Corrupt → advance 1 and rescan), then switch the MQTT
+publish to the opaque-payload envelope. Until that lands, the gateway cannot
 parse what the receiver now emits.
 
 ## Planned: AEAD (ChaCha20-Poly1305, decrypt in the API)

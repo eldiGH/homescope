@@ -35,7 +35,7 @@ pub const MAX_LEN: usize = OVERHEAD + MAX_PAYLOAD_LEN;
 /// A payload that can write itself into a frame.
 ///
 /// Contract: `encode` writes at most `MAX_ENCODED_LEN` bytes to the front of
-/// `out` and returns exactly the count written. [`encode`](crate::frame::encode)
+/// `out` and returns exactly the count written. [`encode`]
 /// relies on this to size the length field and CRC.
 pub trait Encode {
     /// Upper bound on the encoded size, for buffer sizing and the
@@ -186,6 +186,8 @@ pub enum FrameError {
 
 #[cfg(test)]
 mod test {
+    use std::vec;
+
     use super::*;
 
     struct TestEncodeable([u8; 5]);

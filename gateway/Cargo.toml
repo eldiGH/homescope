@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-homescope-common = { workspace = true, features = ["wire", "serde"]}
+homescope-common = { workspace = true, features = ["codec", "serde"]}
 homescope-host-util = { workspace = true }
 
 futures = "0.3.32"

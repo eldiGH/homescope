@@ -97,6 +97,8 @@ measurements! {
 
 #[cfg(test)]
 mod tests {
+    use std::format;
+
     use super::*;
 
     #[test]

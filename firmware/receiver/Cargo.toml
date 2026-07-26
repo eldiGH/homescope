@@ -10,7 +10,7 @@ board-xiao = ["homescope-board/xiao"]
 wait-for-rtt = []
 
 [dependencies]
-homescope-common = { workspace = true, features = ["wire", "defmt"] }
+homescope-common = { workspace = true, features = ["codec", "defmt"] }
 homescope-board = { workspace = true }
 
 bt-hci = { version = "0.8", features = ["defmt"] }

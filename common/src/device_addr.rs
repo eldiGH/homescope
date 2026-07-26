@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "wire", repr(transparent))]
+#[repr(transparent)]
 pub struct DeviceAddr(pub [u8; 6]);
 
 impl DeviceAddr {

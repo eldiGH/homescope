@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{device_addr::DeviceAddr, wire::Dbm};
 
-#[cfg(feature = "wire")]
+#[cfg(feature = "codec")]
 use crate::observation::SensorObservation;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -18,7 +18,7 @@ pub struct ObservationEnvelope {
     pub packet: Vec<u8>,
 }
 
-#[cfg(feature = "wire")]
+#[cfg(feature = "codec")]
 impl ObservationEnvelope {
     pub fn from_observation(observation: SensorObservation, now: DateTime<Utc>) -> Self {
         Self {

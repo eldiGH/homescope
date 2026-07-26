@@ -30,6 +30,7 @@ pub trait Wire: Sized {
 macro_rules! wire_units {
     ( $( $name:ident($inner:ty) ),* $(,)? ) => { $(
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
         pub struct $name(pub $inner);
 
         impl Wire for $name {
@@ -60,7 +61,6 @@ wire_units! {
 }
 
 #[cfg(feature = "defmt")]
-
 impl defmt::Format for Millivolts {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(f, "{}mV", self.0)

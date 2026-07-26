@@ -81,10 +81,10 @@ pub fn encode<T: Encode>(out: &mut [u8], payload: &T) -> Result<usize, BufferToo
 /// Tries to read one frame from the start of `bytes`.
 ///
 /// Built for streaming: `bytes` is a growing buffer that may hold a partial
-/// frame, garbage, or several frames. Judges position 0 only — hunting for
-/// the next magic is the caller's job. Each [`FrameParse`] outcome demands a
-/// different caller action; see its variants. The returned payload borrows
-/// from `bytes`.
+/// frame, garbage, or several frames. Judges position 0 only; on corruption
+/// the returned [`FrameParse::Corrupt`] carries how far to skip to the next
+/// candidate frame start. Each outcome demands a different caller action;
+/// see the variants. The returned payload borrows from `bytes`.
 pub fn parse(bytes: &[u8]) -> FrameParse<'_> {
     let mut rest = bytes;
 
@@ -94,7 +94,10 @@ pub fn parse(bytes: &[u8]) -> FrameParse<'_> {
         };
 
         if byte != bytes_byte {
-            return FrameParse::Corrupt(FrameError::BadMagic);
+            return FrameParse::Corrupt {
+                error: FrameError::BadMagic,
+                discard: seek_next_magic(bytes),
+            };
         }
 
         rest = rest_bytes;
@@ -108,7 +111,10 @@ pub fn parse(bytes: &[u8]) -> FrameParse<'_> {
     let payload_len = PayloadLen::from_le_bytes(*payload_len);
 
     if payload_len as usize > MAX_PAYLOAD_LEN {
-        return FrameParse::Corrupt(FrameError::PayloadTooLarge);
+        return FrameParse::Corrupt {
+            error: FrameError::PayloadTooLarge,
+            discard: seek_next_magic(bytes),
+        };
     }
 
     if payload_crc.len() < payload_len as usize {
@@ -124,15 +130,31 @@ pub fn parse(bytes: &[u8]) -> FrameParse<'_> {
     let calculated_crc = FRAME_CRC.checksum(checksummed);
 
     if crc != calculated_crc {
-        return FrameParse::Corrupt(FrameError::BadCrc);
+        return FrameParse::Corrupt {
+            error: FrameError::BadCrc,
+            discard: seek_next_magic(bytes),
+        };
     }
 
     let payload = &payload_crc[..payload_len as usize];
+    let frame_len = OVERHEAD + payload_len as usize;
 
     FrameParse::Ok {
         payload,
-        consumed: OVERHEAD + payload_len as usize,
+        consumed: frame_len,
     }
+}
+
+/// Distance from position 0 to the next possible frame start: the next
+/// `MAGIC_BYTES[0]` strictly after position 0 (which has already been judged
+/// corrupt), or the whole buffer if there is none. Always ≥ 1.
+///
+/// Invariant: `bytes` is non-empty — an empty buffer returns `Incomplete`
+/// before any corrupt path is reached, so the `[1..]` slice cannot panic.
+fn seek_next_magic(bytes: &[u8]) -> usize {
+    memchr::memchr(MAGIC_BYTES[0], &bytes[1..])
+        .map(|d| d + 1)
+        .unwrap_or(bytes.len())
 }
 
 /// Outcome of [`parse`].
@@ -143,9 +165,12 @@ pub enum FrameParse<'a> {
     Incomplete,
     /// A valid frame: use `payload`, then discard exactly `consumed` bytes.
     Ok { payload: &'a [u8], consumed: usize },
-    /// No valid frame at this position — discard exactly **one** byte and
-    /// retry: a false magic match may hide a real frame one byte later.
-    Corrupt(FrameError),
+    /// No valid frame at position 0 — discard exactly `discard` bytes and
+    /// retry. `discard` is the distance to the next possible frame start
+    /// (the next magic byte strictly after position 0, or the whole buffer
+    /// if there is none), so it is always ≥ 1 and never skips an unexamined
+    /// magic candidate: a false match may hide a real frame's start.
+    Corrupt { error: FrameError, discard: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -217,19 +242,18 @@ mod test {
 
     #[test]
     fn bad_magic() {
-        let (mut buffer, _) = encoded_frame();
-        buffer[0] = 0x00;
-        assert!(matches!(
-            parse(&buffer),
-            FrameParse::Corrupt(FrameError::BadMagic)
-        ));
+        for i in 0..MAGIC_BYTES_LEN {
+            let (mut buffer, _) = encoded_frame();
+            buffer[i] = 0x00;
 
-        let (mut buffer, _) = encoded_frame();
-        buffer[1] = 0x00;
-        assert!(matches!(
-            parse(&buffer),
-            FrameParse::Corrupt(FrameError::BadMagic)
-        ));
+            assert!(matches!(
+                parse(&buffer),
+                FrameParse::Corrupt {
+                    error: FrameError::BadMagic,
+                    discard
+                } if discard == buffer.len()
+            ));
+        }
     }
 
     #[test]
@@ -241,7 +265,10 @@ mod test {
         // or a corrupted length stalls the stream parser
         assert!(matches!(
             parse(&buffer[..MAGIC_BYTES_LEN + PAYLOAD_LEN_SIZE]),
-            FrameParse::Corrupt(FrameError::PayloadTooLarge)
+            FrameParse::Corrupt {
+                error: FrameError::PayloadTooLarge,
+                discard
+            } if discard == MAGIC_BYTES_LEN + PAYLOAD_LEN_SIZE
         ));
     }
 
@@ -251,14 +278,20 @@ mod test {
         buffer[MAGIC_BYTES_LEN + PAYLOAD_LEN_SIZE] ^= 0xFF;
         assert!(matches!(
             parse(&buffer[..written]),
-            FrameParse::Corrupt(FrameError::BadCrc)
+            FrameParse::Corrupt {
+                error: FrameError::BadCrc,
+                discard
+            } if discard == written
         ));
 
         let (mut buffer, written) = encoded_frame();
         buffer[written - 1] ^= 0xFF;
         assert!(matches!(
             parse(&buffer[..written]),
-            FrameParse::Corrupt(FrameError::BadCrc)
+            FrameParse::Corrupt {
+                error: FrameError::BadCrc,
+                discard
+            } if discard == written
         ));
     }
 
@@ -277,23 +310,23 @@ mod test {
     }
 
     #[test]
-    fn skip_one_byte_resync_finds_frame_after_garbage() {
+    fn discard_hint_jumps_to_frame_after_garbage() {
         let (buffer, written) = encoded_frame();
         // garbage starting with a lone magic byte — a false frame start
         let mut stream = vec![b'H', 0x42, 0x00];
         stream.extend_from_slice(&buffer[..written]);
 
-        let mut pos = 0;
-        let (payload, consumed) = loop {
-            match parse(&stream[pos..]) {
-                FrameParse::Ok { payload, consumed } => break (payload, consumed),
-                FrameParse::Corrupt(_) => pos += 1,
-                FrameParse::Incomplete => panic!("stream contains a whole frame"),
-            }
+        // 'H' then 0x42 ≠ 'S' ⇒ BadMagic; the hint must land exactly on the
+        // real frame's magic — one hop, not three
+        let FrameParse::Corrupt { discard, .. } = parse(&stream) else {
+            panic!("garbage prefix must be Corrupt");
         };
+        assert_eq!(discard, 3);
 
-        assert_eq!(pos, 3);
-        assert_eq!(pos + consumed, stream.len());
+        let FrameParse::Ok { payload, consumed } = parse(&stream[discard..]) else {
+            panic!("stream contains a whole frame after the garbage");
+        };
+        assert_eq!(discard + consumed, stream.len());
         assert_eq!(payload, TEST_PAYLOAD);
     }
 

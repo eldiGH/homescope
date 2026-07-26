@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context as _, bail};
 use chrono::Utc;
 use futures::StreamExt;
-use homescope_common::reading::SensorReading;
+use homescope_common::{observation::SensorObservation, observation_envelope::ObservationEnvelope};
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
 use serial2_tokio::SerialPort;
 use tokio::{
@@ -11,9 +11,9 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::codec::FramedRead;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
-use crate::{config::GatewayConfig, decoder::SensorObservationDecoder};
+use crate::{config::GatewayConfig, decoder::FrameDecoder};
 
 mod config;
 mod decoder;
@@ -27,16 +27,16 @@ async fn mqtt_task(mut event_loop: EventLoop) {
     }
 }
 
-async fn mqtt_readings_sender(
-    mut reading_receiver: Receiver<SensorReading>,
+async fn mqtt_envelope_sender(
+    mut envelope_receiver: Receiver<ObservationEnvelope>,
     mqtt_client: AsyncClient,
 ) {
-    while let Some(reading) = reading_receiver.recv().await {
-        match serde_json::to_vec(&reading) {
+    while let Some(envelope) = envelope_receiver.recv().await {
+        match serde_json::to_vec(&envelope) {
             Ok(bytes) => {
                 if let Err(err) = mqtt_client
                     .publish(
-                        format!("homescope/sensors/{}/reading", reading.device_addr),
+                        format!("homescope/sensors/{}/envelope", envelope.device_addr),
                         QoS::AtLeastOnce,
                         false,
                         bytes,
@@ -62,31 +62,42 @@ async fn main() -> anyhow::Result<()> {
     let mqtt_options = MqttOptions::new("gateway", &config.mqtt_host, config.mqtt_port);
     let (client, event_loop) = AsyncClient::new(mqtt_options, 128);
 
-    let (readings_sender, readings_receiver) = channel::<SensorReading>(1024);
+    let (envelope_sender, envelope_receiver) = channel::<ObservationEnvelope>(1024);
 
     tokio::spawn(mqtt_task(event_loop));
-    tokio::spawn(mqtt_readings_sender(readings_receiver, client));
+    tokio::spawn(mqtt_envelope_sender(envelope_receiver, client));
 
     let port = SerialPort::open(&config.receiver_path, 115200)
         .with_context(|| format!("opening {}", &config.receiver_path))?;
 
-    let mut frames = FramedRead::new(port, SensorObservationDecoder);
+    let mut frames = FramedRead::new(port, FrameDecoder);
 
     while let Some(result) = frames.next().await {
-        match result {
-            Ok(observation) => {
-                let received_at =
-                    Utc::now() - chrono::TimeDelta::milliseconds(observation.age_ms.into());
-                let reading: SensorReading =
-                    SensorReading::from_observation(observation, received_at);
-                debug!("packet: {}", reading);
-
-                if readings_sender.send(reading).await.is_err() {
-                    bail!("readings channel closed. fatal error")
-                }
-            }
-
+        let observation_bytes = match result {
+            Ok(bytes) => bytes,
             Err(err) => bail!("serial read error: {err}"),
+        };
+
+        let observation = match SensorObservation::parse(&observation_bytes) {
+            Ok(observation) => observation,
+            Err(err) => {
+                warn!("invalid observation packet: {err}");
+                continue;
+            }
+        };
+
+        let envelope = ObservationEnvelope::from_observation(observation, Utc::now());
+
+        debug!(
+            device_addr = %envelope.device_addr,
+            rssi = envelope.rssi.0,
+            received_at = %envelope.received_at,
+            packet_len = envelope.packet.len(),
+            "envelope decoded"
+        );
+
+        if envelope_sender.send(envelope).await.is_err() {
+            bail!("envelope channel closed. fatal error")
         }
     }
 

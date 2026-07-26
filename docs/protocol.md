@@ -1,12 +1,12 @@
 # Scanner-to-gateway wire protocol — v0.5 (prototype)
 
 > **Status: prototype, v0.5** (2026-07-25 — the TV-measurement-encoding
-> release). Implemented in `common`, the sensor firmware, and the receiver
-> firmware. ⚠️ **The gateway parser has not been migrated yet** — it still
-> expects v0.4 fixed 25-byte frames; updating it (via a `frame::parse` in
-> `common`) is the next task, together with the switch to the opaque-payload
-> MQTT envelope. This format will keep evolving (AEAD next); it's documented
-> here so both ends have a stable target and versions can be diffed.
+> release). Implemented end to end: `common`, the sensor firmware, the
+> receiver firmware, and (since 2026-07-26) the gateway — decoder loop over
+> `frame::parse` plus the opaque-payload MQTT envelope (see "Rust gateway
+> implementation" below). Remaining downstream: API-side TV decode. This
+> format will keep evolving (AEAD next); it's documented here so both ends
+> have a stable target and versions can be diffed.
 >
 > **Changes since v0.4:** the fixed `SensorPacket` struct is replaced by the
 > **TV measurement encoding** (type–value; see below), which makes the air
@@ -202,9 +202,13 @@ machine:
 The Rust implementation (`frame::parse` in `common`) collapses this into a
 single function over a growing buffer with three outcomes: *incomplete*
 (need more bytes — not an error), *ok* (payload + total bytes consumed), or
-*corrupt* (bad magic / oversized length / bad CRC ⇒ the caller discards
-exactly **one** byte and retries — a false magic match may hide a real
-frame's start one byte later).
+*corrupt* (bad magic / oversized length / bad CRC), which carries a
+**`discard` hint**: the number of bytes to drop before retrying, computed
+inside the parser as the distance to the next magic-candidate byte (or the
+whole buffer if there is none). It is always ≥ 1, so the stream is
+guaranteed to make progress, and it never skips an unexamined magic
+candidate — a false magic match may hide a real frame's start one byte
+later, and the hint lands exactly on it.
 
 Use a short read timeout (~100 ms is plenty — actual transmission is
 sub-millisecond; the timeout only protects against partial-frame stalls). Any
@@ -216,17 +220,34 @@ Note the frame is sent across multiple USB packets (64-byte full-speed bulk
 limit); USB packet boundaries are invisible at the tty level and carry no
 framing meaning — only the magic/length/CRC do.
 
-## Rust gateway implementation — ⚠️ migration pending
+## Rust gateway implementation and the MQTT envelope
 
-[gateway/src/decoder.rs](../gateway/src/decoder.rs) still implements the
-**v0.4** fixed-25-byte decoder (`memchr` for magic + `Frame::try_from_bytes`).
-The v0.5 pieces it needs now exist in `common` — `frame::parse` (the
-three-outcome streaming parser described above) and `SensorObservation::parse`
-— so the migration is: rewrite the `tokio_util::codec::Decoder` as a loop
-over `frame::parse` (Incomplete → `Ok(None)`; Ok → advance `consumed`, parse
-the observation; Corrupt → advance 1 and rescan), then switch the MQTT
-publish to the opaque-payload envelope. Until that lands, the gateway cannot
-parse what the receiver now emits.
+[gateway/src/decoder.rs](../gateway/src/decoder.rs) implements a
+`tokio_util::codec::Decoder` as a loop over `frame::parse`: Incomplete →
+`Ok(None)` (wait for more serial bytes); Ok → advance `consumed` and parse
+the payload as a `SensorObservation`; Corrupt → advance by the returned
+`discard` and rescan. A CRC-valid frame whose observation fails to parse is
+dropped and the loop continues with the next frame (this symptom means the
+receiver and gateway disagree about the protocol version).
+
+Each observation is republished as an **opaque JSON envelope** on
+`homescope/sensors/<device-addr>/envelope` (QoS 1): the receiver-observed
+metadata in cleartext, the air packet forwarded byte-for-byte as base64
+(`ObservationEnvelope` in `common/src/observation_envelope.rs`, camelCase):
+
+```json
+{
+  "deviceAddr": "F1E2D3C4B5A6",
+  "rssi": -63,
+  "receivedAt": "2026-07-26T12:34:56.789Z",
+  "packet": "BQAAAAECPAg..."
+}
+```
+
+`receivedAt` is stamped by the gateway as `now − age_ms` (see "Age and
+timestamps"); `packet` is the `[seq][TV…]` air packet, untouched. The
+gateway never looks inside it — decode (and later AEAD verify/decrypt)
+happens in the API.
 
 ## Planned: AEAD (ChaCha20-Poly1305, decrypt in the API)
 
@@ -244,8 +265,9 @@ the ciphertext; `seq` stays cleartext at offset 0:
 
 ## Known limitations (will change in future versions)
 
-- **The gateway still speaks v0.4** — see above; until its decoder and MQTT
-  envelope are migrated, the pipeline is receiver-ahead-of-gateway.
+- **The API does not decode the envelope yet** — it still expects the old
+  decoded-JSON reading payload; the API-side TV decode (base64 → 
+  `SensorPacket::parse` → `Measurements` walk) is the next backend task.
 - **No encryption yet.** The air packet is plaintext TV data and anything in
   radio range can forge well-formed packets (company ID `0xFFFF` is shared).
   Acceptable during development; fixed by the AEAD step.

@@ -66,3 +66,7 @@ grafana-reset:
     podman compose -f compose.dev.yml rm -sf grafana
     podman volume rm --force homescope_grafana-data
     podman compose -f compose.dev.yml up -d --wait grafana
+
+fmt:
+    cargo fmt --all
+    cd firmware && cargo fmt --all

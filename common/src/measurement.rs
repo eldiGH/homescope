@@ -86,6 +86,14 @@ macro_rules! measurements {
                 Self::$variant($ty(value))
             } )*
         }
+
+        impl ::core::fmt::Display for Measurement {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                match self {
+                    $( Self::$variant(value) => write!(f, "{} {}", stringify!($variant), value), )*
+                }
+            }
+        }
     };
 }
 

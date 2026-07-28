@@ -1,5 +1,8 @@
 use anyhow::Context as _;
-use homescope_common::reading::SensorReading;
+use homescope_common::{
+    reading::SensorReading,
+    wire::{CentiCelsius, CentiPercent},
+};
 
 use crate::config::ApiConfig;
 
@@ -25,14 +28,20 @@ pub async fn insert_reading(
     device_id: i32,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
-                    "INSERT INTO readings (time, device_id, seq, temp_degc, rh_percent, battery_mv, rssi) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
-                    reading.received_at,
-                    device_id,
-                    reading.seq as i64,
-                    reading.temp_degc,
-                    reading.rh_percent,
-                    reading.battery_mv as i32,
-                    reading.rssi as i16
-                ).execute(pool).await?;
+        "INSERT INTO readings 
+    (time, device_id, seq, temp_degc, rh_percent, battery_mv, rssi)
+VALUES 
+    ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT DO NOTHING",
+        reading.received_at,
+        device_id,
+        reading.seq as i64,
+        reading.temperature.map(CentiCelsius::as_f64),
+        reading.relative_humidity.map(CentiPercent::as_f64),
+        reading.battery.map(|v| v.0 as i32),
+        reading.rssi.0 as i16
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }

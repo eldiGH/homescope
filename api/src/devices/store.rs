@@ -12,6 +12,7 @@ struct DeviceRow {
 pub struct Device {
     pub id: i32,
     pub device_addr: DeviceAddr,
+    #[allow(dead_code)] // TODO: will be used later with http management endpoints
     pub name: String,
 }
 

@@ -1,0 +1,4 @@
+ALTER TABLE readings 
+	ALTER COLUMN battery_mv DROP NOT NULL,
+	ALTER COLUMN temp_degc DROP NOT NULL,
+	ALTER COLUMN rh_percent DROP NOT NULL;

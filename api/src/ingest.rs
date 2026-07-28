@@ -1,61 +1,81 @@
 use std::{convert::Infallible, time::Duration};
 
 use anyhow::bail;
-use homescope_common::reading::SensorReading;
+use homescope_common::{observation_envelope::ObservationEnvelope, reading::SensorReading};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS::AtLeastOnce};
 use sqlx::PgPool;
 use tokio::{
     sync::mpsc::{Receiver, Sender, channel, error::TrySendError},
     time::sleep,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
-use crate::{config::ApiConfig, db, devices::DeviceRegistry, ingest::unknown::Report};
+use crate::{
+    config::ApiConfig,
+    db,
+    devices::DeviceRegistry,
+    ingest::unknown_devices::{Report, UnknownDevices},
+};
 
-mod unknown;
+mod unknown_devices;
 
-async fn store_readings(
+async fn store_envelopes(
     pool: PgPool,
-    mut readings_receiver: Receiver<SensorReading>,
+    mut envelope_receiver: Receiver<ObservationEnvelope>,
     devices: DeviceRegistry,
 ) -> anyhow::Result<Infallible> {
-    let mut unknown = unknown::UnknownDevices::default();
+    let mut unknown_devices = UnknownDevices::default();
 
-    while let Some(reading) = readings_receiver.recv().await {
-        debug!("reading to insert: {reading}");
-
-        let Some(device) = devices.get(reading.device_addr) else {
-            match unknown.record(reading.device_addr) {
-                Some(Report::New) => {
-                    warn!(device_addr = %reading.device_addr, "unknown device, dropping its readings")
-                }
-                Some(Report::Repeat { count, since }) => {
-                    warn!(device_addr = %reading.device_addr, count, ?since,
-                  "unknown device still transmitting")
-                }
-                Some(Report::Overflow { packets }) => {
-                    warn!(
-                        packets,
-                        "packets from unknown devices beyond tracking capacity"
-                    )
-                }
-                None => {}
-            }
-            continue;
-        };
-
-        if let Err(err) = db::insert_reading(&pool, &reading, device.id).await {
-            error!("db error: {err}");
-        }
+    while let Some(envelope) = envelope_receiver.recv().await {
+        handle_envelope(&envelope, &pool, &devices, &mut unknown_devices).await;
     }
 
     bail!("ingestion channel closed");
 }
 
+#[instrument(skip_all, fields(device_addr = %envelope.device_addr))]
+async fn handle_envelope(
+    envelope: &ObservationEnvelope,
+    pool: &PgPool,
+    devices: &DeviceRegistry,
+    unknown_devices: &mut UnknownDevices,
+) {
+    let Some(device) = devices.get(envelope.device_addr) else {
+        match unknown_devices.record(envelope.device_addr) {
+            Some(Report::New) => {
+                warn!("unknown device, dropping its envelopes")
+            }
+            Some(Report::Repeat { count, since }) => {
+                warn!(count, ?since, "unknown device still transmitting")
+            }
+            Some(Report::Overflow { packets }) => {
+                warn!(
+                    packets,
+                    "packets from unknown devices beyond tracking capacity"
+                )
+            }
+            None => {}
+        }
+        return;
+    };
+
+    let reading = match SensorReading::try_from(envelope) {
+        Ok(reading) => reading,
+        Err(err) => {
+            error!(%err, "invalid packet, dropping");
+            return;
+        }
+    };
+
+    if let Err(err) = db::insert_reading(pool, &reading, device.id).await {
+        error!("db error: {err}");
+    }
+}
+
 async fn subscribe_mqtt(
     host: &str,
     port: u16,
-    readings_sender: Sender<SensorReading>,
+    envelope_sender: Sender<ObservationEnvelope>,
 ) -> anyhow::Result<Infallible> {
     let mut mqtt_options = MqttOptions::new("api", host, port);
     mqtt_options.set_clean_session(false);
@@ -70,21 +90,29 @@ async fn subscribe_mqtt(
             }
 
             Ok(Event::Incoming(Packet::Publish(publish))) => {
-                debug!("message from: {}", publish.topic);
+                debug!(topic = %publish.topic, bytes = publish.payload.len(), "envelope received");
 
-                let Ok(reading) = serde_json::from_slice::<SensorReading>(&publish.payload) else {
-                    error!("Couldn't deserialize publish");
-                    continue;
+                let envelope = match serde_json::from_slice::<ObservationEnvelope>(&publish.payload)
+                {
+                    Ok(e) => e,
+                    Err(err) => {
+                        error!(%err, topic = %publish.topic, "envelope deserialization failed");
+                        continue;
+                    }
                 };
 
-                if let Err(err) = readings_sender.try_send(reading) {
+                if let Err(err) = envelope_sender.try_send(envelope) {
                     match err {
-                        TrySendError::Full(reading) => {
-                            warn!(%reading, "reading insert queue full! couldn't insert reading")
+                        TrySendError::Full(envelope) => {
+                            warn!(
+                                device_addr = %envelope.device_addr,
+                                received_at = %envelope.received_at,
+                                "envelope insert queue full! couldn't insert reading"
+                            )
                         }
 
                         TrySendError::Closed(_) => {
-                            bail!("readings channel closed - store_readings task is gone")
+                            bail!("envelope channel closed - store_envelopes task is gone")
                         }
                     }
                 }
@@ -92,7 +120,7 @@ async fn subscribe_mqtt(
 
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 match client
-                    .subscribe("homescope/sensors/+/reading", AtLeastOnce)
+                    .subscribe("homescope/sensors/+/envelope", AtLeastOnce)
                     .await
                 {
                     Ok(_) => {
@@ -115,10 +143,10 @@ pub async fn run(
     pool: PgPool,
     devices: DeviceRegistry,
 ) -> anyhow::Result<Infallible> {
-    let (readings_sender, readings_receiver) = channel::<SensorReading>(256);
+    let (envelope_sender, envelope_receiver) = channel::<ObservationEnvelope>(256);
 
     tokio::select! {
-        r = subscribe_mqtt(&config.mqtt_host, config.mqtt_port, readings_sender) => r,
-        r = store_readings(pool, readings_receiver, devices) => r
+        r = subscribe_mqtt(&config.mqtt_host, config.mqtt_port, envelope_sender) => r,
+        r = store_envelopes(pool, envelope_receiver, devices) => r
     }
 }

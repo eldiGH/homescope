@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO readings (time, device_id, seq, temp_degc, rh_percent, battery_mv, rssi) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+  "query": "INSERT INTO readings \n    (time, device_id, seq, temp_degc, rh_percent, battery_mv, rssi)\nVALUES \n    ($1, $2, $3, $4, $5, $6, $7)\nON CONFLICT DO NOTHING",
   "describe": {
     "columns": [],
     "parameters": {
@@ -16,5 +16,5 @@
     },
     "nullable": []
   },
-  "hash": "ebeaf104ec4f208fb61dfea9cccb03b40e6bebcfd7e192c4f1f34dc2fe60d3c6"
+  "hash": "d746a892c4c9b29158d9d774367cc963339b17424e3b2653e4b242ce5b3cca48"
 }

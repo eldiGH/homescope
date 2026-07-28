@@ -11,6 +11,7 @@ use crate::devices::{
 #[derive(Clone)]
 pub struct DeviceRegistry {
     cache: Arc<Cache>,
+    #[allow(dead_code)] // TODO: will be used when we do device management http endpoints
     pool: PgPool,
 }
 

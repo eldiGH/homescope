@@ -167,3 +167,97 @@ fn defmt_unit(f: defmt::Formatter, value: i64, scale: u64, unit: &str) {
         ),
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::format;
+
+    use super::*;
+
+    #[test]
+    fn scale_one_units_render_as_integers() {
+        assert_eq!(format!("{}", Millivolts(2950)), "2950mV");
+        assert_eq!(format!("{}", Millivolts(0)), "0mV");
+        assert_eq!(format!("{}", Dbm(-67)), "-67dBm");
+    }
+
+    #[test]
+    fn centi_units_render_two_fraction_digits() {
+        assert_eq!(format!("{}", CentiCelsius(2150)), "21.50°C");
+        assert_eq!(format!("{}", CentiPercent(4875)), "48.75%");
+        assert_eq!(format!("{}", CentiPercent(5000)), "50.00%");
+    }
+
+    /// A fraction below ten has to be zero-padded, or 21.05 reads as 21.5 —
+    /// a tenfold error that still looks like a plausible temperature.
+    #[test]
+    fn single_digit_fractions_are_padded() {
+        assert_eq!(format!("{}", CentiCelsius(2105)), "21.05°C");
+        assert_eq!(format!("{}", CentiCelsius(2100)), "21.00°C");
+        assert_eq!(format!("{}", CentiPercent(4805)), "48.05%");
+    }
+
+    /// The sign is taken before the division, because -50 / 100 is 0 and no
+    /// longer carries it. Values between -1 and 0 are the only ones where the
+    /// whole part cannot supply the sign on its own.
+    #[test]
+    fn negative_centi_values_keep_their_sign() {
+        assert_eq!(format!("{}", CentiCelsius(-50)), "-0.50°C");
+        assert_eq!(format!("{}", CentiCelsius(-5)), "-0.05°C");
+        assert_eq!(format!("{}", CentiCelsius(-1250)), "-12.50°C");
+        assert_eq!(format!("{}", CentiCelsius(0)), "0.00°C");
+    }
+
+    #[test]
+    fn as_f64_divides_by_the_scale() {
+        assert_eq!(Millivolts(2950).as_f64(), 2950.0);
+        assert_eq!(CentiCelsius(2105).as_f64(), 21.05);
+        assert_eq!(CentiCelsius(-1250).as_f64(), -12.5);
+        assert_eq!(CentiPercent(4875).as_f64(), 48.75);
+        assert_eq!(Dbm(-67).as_f64(), -67.0);
+    }
+
+    #[test]
+    fn round_trip_is_little_endian() {
+        let mut buf = [0u8; 2];
+
+        assert_eq!(Millivolts(2950).encode(&mut buf), Ok(2));
+        assert_eq!(buf, [0x86, 0x0B]);
+        assert_eq!(Millivolts::decode(&buf), Ok(Millivolts(2950)));
+
+        assert_eq!(CentiCelsius(-1250).encode(&mut buf), Ok(2));
+        assert_eq!(buf, [0x1E, 0xFB]);
+        assert_eq!(CentiCelsius::decode(&buf), Ok(CentiCelsius(-1250)));
+
+        let mut byte = [0u8; 1];
+        assert_eq!(Dbm(-67).encode(&mut byte), Ok(1));
+        assert_eq!(byte, [0xBD]);
+        assert_eq!(Dbm::decode(&byte), Ok(Dbm(-67)));
+    }
+
+    /// Decoding reads from the front and ignores what follows, which is what
+    /// lets `Measurement::decode` hand it the whole remaining packet.
+    #[test]
+    fn decode_ignores_trailing_bytes_but_rejects_short_input() {
+        assert_eq!(
+            Millivolts::decode(&[0x86, 0x0B, 0xFF, 0xFF]),
+            Ok(Millivolts(2950))
+        );
+        assert_eq!(Millivolts::decode(&[0x86]), Err(Truncated));
+        assert_eq!(Dbm::decode(&[]), Err(Truncated));
+    }
+
+    #[test]
+    fn encode_rejects_a_buffer_one_byte_short() {
+        assert_eq!(Millivolts(1).encode(&mut [0u8; 1]), Err(BufferTooSmall));
+        assert_eq!(Dbm(1).encode(&mut []), Err(BufferTooSmall));
+    }
+
+    #[test]
+    fn size_matches_the_repr() {
+        assert_eq!(Millivolts::SIZE, 2);
+        assert_eq!(CentiCelsius::SIZE, 2);
+        assert_eq!(CentiPercent::SIZE, 2);
+        assert_eq!(Dbm::SIZE, 1);
+    }
+}

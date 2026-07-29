@@ -59,6 +59,16 @@ An earlier revision put a BME688 on indoor nodes for air quality. We dropped it 
 
 So: dedicated parts (SHT45 + BMP581) for the battery fleet; BME68x + BSEC reserved for an optional, mains-powered IAQ node if/when we want it. This also nets a software win — `sht4x` is embedded-hal **1.0** native and `bmp5` is embedded-hal-**async** native (clean Embassy fit), whereas the `bme680` crate is embedded-hal **0.2** blocking.
 
+#### I²C / TWIM findings (2026-07-29)
+
+**`embassy-nrf`'s async TWIM is not cancel-safe** (verified against 0.10.0 source). `Twim::transaction` calls `setup_operations` — which starts EasyDMA and arms the SHORTS — then awaits a bare `poll_fn`. There is **no `OnDrop` guard**: the only `Drop` impl belongs to the `Twim` struct itself, which our firmware never drops. So wrapping a transfer in `with_timeout` and letting the timeout fire leaves the peripheral running, `EVENTS_STOPPED`/`EVENTS_ERROR` uncleared, no `TASKS_STOP` issued, and — the serious part — **EasyDMA still writing into the read buffer, which lived in the stack frame of the future that was just dropped.**
+
+The next transaction then finds a stale `EVENTS_STOPPED` already set, so `async_wait` returns `Ok(())` immediately, before any transfer has happened. The practical signature: **the first timeout looks like a one-off, and every subsequent read fails** — which reads like a hardware fault and isn't.
+
+`Sht4x::measure`'s `with_timeout(100 ms)` is exactly this pattern and has no recovery path; a timeout needs the peripheral reset (or the `Twim` recreated) before the next attempt. When debugging, separate the two questions: *why did it hang the first time* is a wiring/power question (a TWIM only truly hangs when SCL or SDA is stuck low — typically an unpowered slave, or pull-ups sitting on the gated sensor rail), whereas *why does it never recover* is this.
+
+This is also an argument for keeping the I²C pull-ups on the same gated rail as the sensors (see [Power](#power)): a bus powered while its slaves are not is the configuration that produces stuck lines and parasitic feeding through clamp diodes.
+
 #### Temperature accuracy
 
 The SHT45 is factory-calibrated to ±0.1 °C — the sensor is not the limiting factor. Residual error comes from **self-heating and placement**: the die reads its own temperature, which is ambient plus heat from the nearby nRF (especially during radio TX). Mitigations: keep the sensor physically away from the MCU on the PCB, take the reading early after wake before the radio fires, and apply a small **per-device offset** characterized against a reference thermometer **at the production duty cycle** (self-heating depends on cadence, so calibrate at the cadence you'll ship). With no gas heater this is near-trivial — expect an offset well under 1 °C, if any.
@@ -97,7 +107,7 @@ Selected over Thread and ZigBee because:
 - **SDC feature gates** (all build-time opt-ins): `support_ext_adv()` + `support_le_coded_phy()` on the sensor; `support_ext_scan()` + `support_le_coded_phy()` on the receiver. Extended advertising / coded PHY / extended scanning symbols exist **only in the multirole SDC library**, selected by enabling both `peripheral` and `central` cargo features on `nrf-sdc`.
 - **Burst**: 20 ms advertising interval, advertiser held ~400 ms → ~20 events per burst. Each event's payload (`AUX_ADV_IND`) hops to a different data channel, so a burst samples ~20 frequencies — repetition is *frequency diversity* against indoor multipath, not just insurance. (Consequence: per-packet RSSI legitimately swings ±10-15 dB indoors; judge medians, never single readings.)
 - **Burst cadence**: ~0.5 s during benchmarking; production target 1-5 min with System OFF sleep between bursts.
-- **Payload**: `ManufacturerSpecificData` (company ID `0xFFFF` during testing) carrying `SensorPacket` — since 2026-07-25 the **TV measurement encoding** below (`[seq: u32][id][value]…`, 13 B with today's three measurements, capped at `MAX_WIRE_LEN` = 252). Extended advertising allows up to 254 B — required headroom for the planned AEAD (payload + 16 B tag never fit legacy's 31 B).
+- **Payload**: `ManufacturerSpecificData` (company ID `0xFFFF` during testing) carrying `SensorPacket` — since 2026-07-25 the **TV measurement encoding** below (`[seq: u32][id][value]…`, 13 B with today's three measurements, capped at `MAX_WIRE_LEN` = 252; 16 B once v0.6's magic + version header lands). Extended advertising allows up to 254 B — required headroom for the planned AEAD (payload + 16 B tag never fit legacy's 31 B). Company ID `0xFFFF` is the Bluetooth SIG *test* identifier, so the airspace is shared with every unbranded dev board in range: treat anything arriving on it as untrusted input.
 - **Device identity**: the advertising address (AdvA), a random static address derived from FICR `DEVICEADDR` — the packet carries no identity field of its own. *(DeviceAddr refactor, 2026-07 — replaces the earlier FICR-`DEVICEID`-in-payload design.)*
 
 ### Reliability
@@ -156,12 +166,14 @@ Tradeoffs that informed the decision to stay on BLE for now:
 
 ## Data model — TV measurement encoding (settled 2026-07-16; implemented firmware-side 2026-07-25)
 
-> Implementation status: `common` (measurement registry + `wire` module +
-> variable-length observation/frame encoding), sensor firmware, and receiver
-> firmware are done — protocol v0.5, see [protocol.md](protocol.md). Still
-> pending: gateway migration (`frame::parse` in `common` + opaque-payload
-> MQTT envelope), API-side TV decode, and the nullable-metric-columns DB
-> migration.
+> Implementation status: **done end to end** as of 2026-07-28 — `common`
+> (measurement registry + `wire` module + variable-length observation/frame
+> encoding), sensor firmware, receiver firmware, gateway (`frame::parse`
+> decoder + opaque-payload MQTT envelope) and API (envelope subscription → TV
+> decode → TimescaleDB, with nullable metric columns and a
+> `UNIQUE (device_id, seq, time)` constraint). Protocol v0.5 — see
+> [protocol.md](protocol.md). Next on the wire: **v0.6's air-packet magic +
+> version header** (designed 2026-07-29, not implemented), then AEAD.
 
 The fixed `SensorPacket` struct is replaced by a **per-measurement TV
 encoding** — *type–value*: each field is a measurement ID followed directly
@@ -176,14 +188,23 @@ long-range embedded-Rust node + dongle vertical, not the backend).
 
 - **Air packet**: `[seq: u32][id][data][id][data]…` — `seq` stays a fixed
   cleartext header (dedup / replay / AEAD nonce); each measurement is a
-  1-byte ID + value.
+  1-byte ID + value. *(v0.6 prepends `[magic b"HM"][ver: u8]`; the magic is
+  air-side only and stripped by the receiver, `ver` travels downstream. See
+  [protocol.md](protocol.md#planned-v06--air-packet-magic--version-header).)*
 - **Measurement ID registry in `common`**: each ID binds semantics + wire
   representation + scale + unit (e.g. *temperature = i16, ×0.01 °C*). The ID
   implies the length — no per-field length byte. Repr/scale are fixed per ID
   (scaled integers, never floats, on the wire); a metric needing more
   range/resolution later gets a **new ID**, not a format change.
-- **Strict decode posture**: unknown ID, truncated data, or duplicate ID ⇒
-  drop the whole packet with a warning (mirrors the unknown-device rule).
+- **Strict decode posture**: unknown ID, truncated data, duplicate ID, or a
+  packet with *no* measurements ⇒ drop the whole packet with a warning
+  (mirrors the unknown-device rule). The governing rule, settled 2026-07-28:
+  **reject when the packet is unusable or untrustworthy; otherwise store what
+  arrived.** A *missing* metric is neither — a node without a humidity sensor,
+  or one whose SHT45 read failed, still delivers everything else, and the gap
+  in that one series is the signal. Battery is not special-cased: the sensor
+  firmware always emits it, but the API treats it as optional like any other
+  measurement, so a future externally-powered node needs no protocol change.
 - **Receiver and gateway are semantics-blind**: packet bytes are opaque past
   the sensor; only the API decodes. Adding a measurement type touches
   firmware + API + one DB migration — never the receiver, gateway, frame
@@ -219,17 +240,17 @@ Each sensor has a **unique 32-byte ChaCha20-Poly1305 key** baked into firmware a
 ### Payload layout *(revised 2026-07-16 with the TV redesign — see `NOTES-packet-tv-aead.md`)*
 
 ```
-+--------------+---------------------------+----------------+
-| seq counter  | ciphertext (TV section)  | Poly1305 tag   |
-| 4 bytes      | N bytes                   | 16 bytes       |
-+--------------+---------------------------+----------------+
-  ^plaintext^    ^encrypted^                 ^authenticates all of it^
++---------+---------+--------------+--------------------------+---------------+
+| magic   | ver     | seq counter  | ciphertext (TV section)  | Poly1305 tag  |
+| 2 bytes | 1 byte  | 4 bytes      | N bytes                  | 16 bytes      |
++---------+---------+--------------+--------------------------+---------------+
+  ^air only^ ^------- plaintext -------^  ^encrypted^            ^authenticates^
 ```
 
 - **Device identity is not in the payload** — it's the advertising address (AdvA, from FICR `DEVICEADDR`), which the receiver observes and forwards as `device_addr`. The **API** uses it to look up the per-device key (the `devices` table is the key registry; gateways stay keyless — see [Gateway & API integration](#gateway--api-integration)).
 - `seq` (4 B, plaintext) — monotonic, increments every advertisement, **never repeats over device lifetime** (persisted — see below). Provides the AEAD nonce (deterministic construction from seq; no random component needed once seq is persisted) and **replay protection**: the API tracks last-seen per device and rejects `≤`. The same check deduplicates overlapping receivers and MQTT redeliveries.
 - **Ciphertext** = the TV measurement section (whatever this node sampled this cycle).
-- **Associated data** = `device_addr` + `seq` — the cleartext context is authenticated too, so a valid ciphertext can't be replayed against a different device identity or sequence number.
+- **Associated data** = `device_addr` + `ver` + `seq` — the cleartext context is authenticated too, so a valid ciphertext can't be replayed against a different device identity, protocol version or sequence number. `ver` must be in the AAD or it is flippable. The **magic is deliberately excluded**: it is a constant both sides already know (so it adds no entropy) and the receiver strips it before the packet travels anywhere.
 
 The plaintext header + opaque blob structure carries through the whole pipeline: receiver and gateway forward it untouched, MQTT transports it as a JSON envelope (routing/debugging fields readable, sensor values base64 ciphertext), and only the API decrypts. The envelope shape actually arrives *before* AEAD — the moment the TV encoding makes the payload opaque to the gateway — so the crypto step changes nothing downstream of the firmware except the API.
 
@@ -281,15 +302,20 @@ A dedicated **nRF52840 dongle** runs BLE scanning firmware and exposes received 
 ### Receiver firmware responsibilities
 
 1. **Scan**: continuously listen for our manufacturer-ID advertisements (extended scanning on Coded PHY — `scan_ext` + `on_ext_adv_reports`; requires `support_ext_scan` + `support_le_coded_phy` in the SDC build)
-2. **Forward**: emit framed packets to the Pi over USB-CDC (magic + payload + CRC; see [protocol.md](protocol.md))
+2. **Dedup**: an `LruCache<DeviceAddr, u32, 32>` on `seq` collapses each ~20-event burst into one forwarded packet
+3. **Forward**: emit framed packets to the Pi over USB-CDC (magic + payload + CRC; see [protocol.md](protocol.md))
+
+The dongle is **version-blind and stays that way**. Planned for v0.6: check the air-packet magic and strip it before forwarding, and nothing else. Two reasons it must not check `ver`: the magic is a constant so filtering on it never forces a reflash, whereas a version check would make every protocol bump a dongle reflash — and one dongle is destined for the far end of the two-house VPN. More importantly, a node still on old firmware has to stay *visible*: dropped at the dongle it would vanish with no signal, indistinguishable from a dead battery; forwarded, the API names it and the version it's stuck on. Rejection belongs where redeploys are cheap.
+
+The magic check also protects the dedup cache, which is the non-obvious cost of forwarding noise: with 32 slots keyed by `AdvA` and no structural gate in front of them, foreign `0xFFFF` advertisers evict real sensors, and an evicted sensor's next burst forwards all ~20 events instead of one.
 
 ### Pi gateway responsibilities (implemented — `gateway/`)
 
 The gateway is deliberately a **thin, keyless bridge**:
 
 1. **Read**: parse framed packets from the receiver dongle (`RECEIVER_PATH`, default `/dev/homescope-receiver` via the udev rule in [deploy/udev](../deploy/udev/99-homescope-receiver.rules)) using `serial2-tokio` + the `tokio_util::codec::Decoder` in `gateway/src/decoder.rs`
-2. **Timestamp**: convert `SensorObservation` → `SensorReading` with `received_at = Utc::now() − age_ms`
-3. **Publish**: JSON (serde camelCase: `deviceAddr`, `seq`, `tempDegc`, `rhPercent`, `batteryMv`, `rssi`, `receivedAt`) to `homescope/sensors/<device-addr>/reading` at QoS 1, `<device-addr>` rendered as 12 uppercase hex chars. *(The TV encoding has landed firmware-side — protocol v0.5 — so this is the in-flight migration: the per-metric fields get replaced by an opaque `payload` — base64 of the TV bytes, later the ciphertext — and only the API interprets it.)*
+2. **Timestamp**: build an `ObservationEnvelope` from the `SensorObservation` with `received_at = Utc::now() − age_ms` (the clock is passed in explicitly, not read inside the conversion)
+3. **Publish**: opaque JSON (serde camelCase: `deviceAddr`, `rssi`, `receivedAt`, plus the air packet as base64 `packet`) to `homescope/sensors/<device-addr>/envelope` at QoS 1, `<device-addr>` rendered as 12 uppercase hex chars. The gateway is **semantics-blind** — it never parses the packet, and a bad observation is dropped with the loop continuing at the next frame. *(New schema, new topic: the old `…/reading` name was retired along with the decoded-JSON payload it carried.)*
 
 Configuration comes from env vars (`MQTT_HOST`, `MQTT_PORT`, `RECEIVER_PATH`) via the shared `host-util` crate (dotenv + tracing init). Serial errors are fatal by design — the process exits and the supervisor (quadlet, `Restart=on-failure`) restarts it.
 
@@ -297,7 +323,7 @@ Configuration comes from env vars (`MQTT_HOST`, `MQTT_PORT`, `RECEIVER_PATH`) vi
 
 ### MQTT broker (Mosquitto, container on the Pi)
 
-- Topic hierarchy: `homescope/sensors/<device-addr>/reading`. Planned: a per-gateway site prefix — `homescope/<site>/sensors/<device-addr>/reading` — where `site` is *transport provenance* ("which gateway heard this", set per-gateway via env), distinct from the device's owner-assigned `site`/`room` metadata in the DB (a boundary device could legitimately be heard by either gateway). The prefix is also what enables per-gateway broker ACLs (each gateway's credentials publish-only under its own prefix).
+- Topic hierarchy: `homescope/sensors/<device-addr>/envelope`. Planned: a per-gateway site prefix — `homescope/<site>/sensors/<device-addr>/envelope` — where `site` is *transport provenance* ("which gateway heard this", set per-gateway via env), distinct from the device's owner-assigned `site`/`room` metadata in the DB (a boundary device could legitimately be heard by either gateway). The prefix is also what enables per-gateway broker ACLs (each gateway's credentials publish-only under its own prefix).
 - Persistence enabled (`persistence true`, `max_queued_messages 10000`) — with the API's durable session (`clean_session=false`, QoS 1) the broker queues readings across API downtime and replays them on reconnect
 - Currently `allow_anonymous true` on the podman network; `password_file` + per-topic ACLs are planned before the broker is reachable beyond the Pi (two-house VPN rollout)
 - Multiple consumers can subscribe independently (API, Home Assistant, Grafana, etc.)
@@ -314,10 +340,12 @@ Configuration comes from env vars (`MQTT_HOST`, `MQTT_PORT`, `RECEIVER_PATH`) vi
 
 `homescope-api` is the MQTT→TimescaleDB ingest service (the HTTP API is the next layer, not built yet — `axum` is already in the dependency tree):
 
-- **Ingest pipeline**: `rumqttc` subscribes to `homescope/sensors/+/reading` (QoS 1, durable session, client id `api`) → bounded `mpsc` channel (256, `try_send` with drop-and-warn backpressure) → a writer task inserts into Postgres.
-- **Device registry**: a `devices` table (`id`, unique device address — the `hardware_id` column is becoming `device_addr` with the DeviceAddr refactor — and `name`) is loaded at startup into a `DeviceRegistry` — a `Clone` handle over `Arc<Cache>` (sync `RwLock<HashMap>`; guards never held across `.await`). Readings reference `devices.id` via FK.
+- **Ingest pipeline**: `rumqttc` subscribes to `homescope/sensors/+/envelope` (QoS 1, durable session, client id `api`) → bounded `mpsc` channel (256, `try_send` with drop-and-warn backpressure) → a writer task decodes and inserts into Postgres.
+- **TV decode** (2026-07-28): `SensorReading::try_from(&envelope)` in `common` parses the base64 blob with `SensorPacket::parse` and folds `Measurements` into one `Option` per metric. Named `Option` fields rather than a `Vec` or a map, because every consumer — the `INSERT` today, the republished JSON later — wants *present or absent* per metric, and folding into `Option` slots makes a duplicate ID fall out naturally as an occupied slot instead of needing a separate pass. Per-envelope work sits in an `#[instrument]`ed `handle_envelope`, so `device_addr` rides on the span instead of being repeated at every event (and so the span survives the `await` across the insert, which a held `span.enter()` guard would not).
+- **Device registry**: a `devices` table (`id`, unique `device_addr`, `name`) is loaded at startup into a `DeviceRegistry` — a `Clone` handle over `Arc<Cache>` (sync `RwLock<HashMap>`; guards never held across `.await`). Readings reference `devices.id` via FK.
+- **Idempotency**: `readings` carries `UNIQUE (device_id, seq, time)` and inserts use `ON CONFLICT DO NOTHING`. `time` is in the key because TimescaleDB rejects unique indexes on a hypertable that omit the partitioning column. Since `received_at` is stamped by the gateway and carried unchanged in the envelope, an MQTT redelivery collides and is ignored; **multi-receiver dedup is not yet covered** — two receivers stamp different `received_at` for the same `seq`, so that still needs the planned per-device seq monotonicity check.
 - **Unknown devices are dropped, warn-once** (re-reported hourly, bounded tracking with an overflow counter so an id flood can't grow memory). **No auto-registration** — once AEAD lands the `devices` table doubles as the key registry, and a row (with a key) must exist before readings are accepted; auto-registration would race key provisioning.
-- **Schema**: `readings` is a TimescaleDB hypertable partitioned on `time`, indexed `(device_id, time DESC)`. Migrations run at startup when `RUN_MIGRATIONS=true` (sqlx migrate).
+- **Schema**: `readings` is a TimescaleDB hypertable partitioned on `time`, indexed `(device_id, time DESC)`. The metric columns (`temp_degc`, `rh_percent`, `battery_mv`) are **nullable** as of 2026-07-28 — partial packets are a designed outcome, not an error; `time`, `device_id`, `seq` and `rssi` stay NOT NULL. Migrations run at startup when `RUN_MIGRATIONS=true` (sqlx migrate). Note that `api/.sqlx` (the offline query cache) is keyed by a hash of each query *string*, so reformatting SQL orphans the cached entry and breaks the container build, which sets `SQLX_OFFLINE=true` — regenerate with `cargo sqlx prepare` after touching a query.
 - **Known gap — durability during DB outages**: an insert failure currently logs and continues, but rumqttc auto-acks on poll, so readings polled during a DB outage are lost. The end-state is manual acks (`set_manual_acks`) after successful insert, with the per-device `seq` monotonicity check making redelivery idempotent — that check does triple duty (AEAD replay protection, multi-receiver dedup, MQTT redelivery dedup). Graceful shutdown (drain the channel on SIGTERM before exit) is a related pending exercise.
 
 ### Deployment (implemented — `deploy/`)
@@ -355,16 +383,17 @@ homescope/
 ├── justfile               # dev workflow: `just api`, `just gateway`, `just db-seed`, …
 ├── compose.dev.yml        # dev stack: mosquitto + TimescaleDB + Grafana (localhost)
 ├── common/                # shared types (`homescope-common`, no_std-by-default)
-│   ├── Cargo.toml         # feature-gated: `wire` (crc), `serde` (chrono+serde), `defmt`
+│   ├── Cargo.toml         # feature-gated: `codec` (crc+memchr), `serde` (chrono+serde+base64, pulls alloc), `defmt` — none on by default
 │   └── src/
-│       ├── lib.rs
+│       ├── lib.rs         # crate-level feature docs; unconditional #![no_std]
 │       ├── device_addr.rs # DeviceAddr([u8; 6]) — BLE advertising address (AdvA, FICR-derived), hex Display/serde
-│       ├── wire.rs        # Wire trait (fixed-size LE codec) + unit newtypes (Millivolts, CentiCelsius, CentiPercent, Dbm) + Truncated/BufferTooSmall
-│       ├── measurement.rs # the TV measurement-ID registry: Measurement enum (id ⇒ semantics+repr+scale), encode/decode
+│       ├── wire.rs        # Wire trait (fixed-size LE codec) + the wire_units! macro: one declaration per unit emits Wire + Display + defmt::Format + as_f64
+│       ├── measurement.rs # the TV measurement-ID registry: Measurement enum (id ⇒ semantics+repr+scale), encode/decode/Display
 │       ├── packet.rs      # SensorPacket — air payload: [seq: u32][TV section]; encode + parse + Measurements iterator; MAX_WIRE_LEN = 252
 │       ├── observation.rs # SensorObservation (borrowed view): 11-B header (device_addr, age_ms, rssi) + opaque packet = rest; impls frame::Encode
 │       ├── frame.rs       # content-agnostic framing: Encode trait + encode/parse — [magic][len u16][payload][crc], cap 1024, streaming 3-outcome parse
-│       └── reading.rs     # SensorReading (serde, human units) — the MQTT JSON payload
+│       ├── observation_envelope.rs # ObservationEnvelope — the gateway→API MQTT JSON: cleartext header + base64 packet blob
+│       └── reading.rs     # SensorReading — the API's *decoded* type (one Option per metric) + TryFrom<&ObservationEnvelope>
 ├── gateway/               # Pi-side bridge: USB-CDC decode → MQTT publish
 │   ├── Cargo.toml         # `homescope-gateway`
 │   ├── Containerfile
@@ -412,8 +441,8 @@ Rationale:
 
 - **Two workspaces, not one.** A single workspace mixing `thumbv7em-none-eabi` firmware with host-target gateway breaks rust-analyzer — it picks one default target and the other side errors out. Splitting at the `firmware/` boundary lets each IDE session resolve a consistent target. The `common` crate is referenced from both workspaces via `path = "../common"` so the type definitions stay deduplicated.
 - **`firmware/sensor/` and `firmware/receiver/` named by role, not chip.** Both currently target nRF52840; the role is what distinguishes them. If/when a different chip family enters the stack (`firmware/sensor-esp32/` etc.), the suffix grows from the role.
-- **`common` crate** avoids duplicating wire types between firmware (encoder) and gateway (decoder). `no_std` by default with feature-gated extras. Frame layout (magic + observation + CRC), CRC algorithm, and encode logic live in `frame.rs`; the gateway-side `parse` counterpart is the pending half. The gateway-bound payload is `SensorObservation` (opaque air packet plus receiver-observed age/RSSI; see [protocol.md](protocol.md)).
-- **Wire views vs app struct in `common`** *(replaced the earlier `repr(C, packed)`+bytemuck memory-mapped structs with the v0.5 TV redesign)*: `SensorPacket` and `SensorObservation` are **borrowed views** with explicit little-endian `encode`/`parse` functions (owner/view split: owned buffers live with whoever holds the bytes — e.g. the receiver's `ScannedPacket` — and the views are constructed transiently for codec calls). `SensorReading` stays the separate serde-derived app type in human units. Layout knowledge lives in exactly one encode/parse pair per layer; no struct's memory layout is ever reinterpreted as wire bytes.
+- **`common` crate** avoids duplicating wire types between firmware (encoder) and the host side (decoder). `no_std` with **no default features**; every dependency is optional and gated, so each consumer compiles only the layers it uses (`codec` for the binary protocol, `serde` for the JSON DTOs, `defmt` for firmware logging). Library deps carry `default-features = false` and let the leaf binary opt into `std` — without that, `serde` alone breaks the `thumbv7em-none-eabi` build, which a per-crate `cargo check -p` will not reveal because it resolves features narrowly. The feature named `codec` rather than `wire` because a feature and a module sharing a name is a permanent source of confusion. Frame layout, CRC algorithm, and both `encode`/`parse` halves live in `frame.rs`; the gateway-bound payload is `SensorObservation` (opaque air packet plus receiver-observed age/RSSI; see [protocol.md](protocol.md)).
+- **Wire views vs app struct in `common`** *(replaced the earlier `repr(C, packed)`+bytemuck memory-mapped structs with the v0.5 TV redesign)*: `SensorPacket` and `SensorObservation` are **borrowed views** with explicit little-endian `encode`/`parse` functions (owner/view split: owned buffers live with whoever holds the bytes — e.g. the receiver's `ScannedPacket` — and the views are constructed transiently for codec calls). `SensorReading` is the separate *decoded* type — owned, one `Option` per metric, values kept in the scaled unit newtypes (`CentiCelsius` etc.) rather than pre-converted floats, with `as_f64()` generated by `wire_units!` so the scale is written in exactly one place and never re-typed into a SQL query. Layout knowledge lives in exactly one encode/parse pair per layer; no struct's memory layout is ever reinterpreted as wire bytes.
 - **`.cargo/config.toml` lives at `firmware/.cargo/`**, not at repo root — it sets the cross-compile target only for firmware workspace members.
 - **Node variants**: one firmware codebase, with the sensor set selected at build time via Cargo features (e.g. `--features outdoor` adds the optional LTR390; `--features barometer` adds the BMP581 on the one designated indoor node), or detected at boot by probing which I²C devices ACK. All variants share the same `memory.x` and bootloader offset. Avoid maintaining separate binaries/codebases — the only real difference is which sensors are populated.
 
@@ -426,19 +455,21 @@ Rationale:
 3. ✅ **`common` crate** — `SensorPacket` (air payload: seq + TV section), `Measurement` registry, `Wire` unit newtypes, `SensorObservation` (receiver→gateway), `SensorReading` (app type, serde), `DeviceAddr`, frame encoding + CRC-16/IBM-SDLC. Shared by all crates.
 4. ✅ **Receiver dongle firmware** — `firmware/receiver/`. Extended scanning on Coded PHY for our manufacturer-ID advertisements, forwards framed `SensorObservation`s (packet + RSSI + age) over USB-CDC. Robust to host disconnect/reconnect (DTR-aware writes, drop-oldest backlog).
 5. ✅ **Gateway v1 receiver path** — `gateway/` reads `/dev/ttyACM0` (or udev symlink) via `serial2-tokio` + `tokio_util::codec::Decoder`, validates magic + CRC, decodes `SensorObservation`, converts to `SensorReading`.
-6. ✅ **Gateway v1 MQTT publish** — `rumqttc` publishing JSON readings to `homescope/sensors/<hardware-id>/reading` at QoS 1, env-configured (`host-util`), containerized. The temporary range-survey page (axum, port 3000: 10 s rolling delivery %, RSSI stats, reboot detection) served the RF campaign and was then retired to the `reliability-benchmark` branch.
+6. ✅ **Gateway v1 MQTT publish** — `rumqttc` publishing JSON readings to `homescope/sensors/<hardware-id>/reading` at QoS 1, env-configured (`host-util`), containerized. The temporary range-survey page (axum, port 3000: 10 s rolling delivery %, RSSI stats, reboot detection) served the RF campaign and was then retired to the `reliability-benchmark` branch. *(Historical: steps 5-6 describe the v0.3 shape. Both the decoded-JSON payload and the `…/reading` topic were retired with protocol v0.5 — see step 18 ②.)*
 7. ✅ **Actual Coded PHY + RF field campaign (2026-07)** — migrated to real extended advertising (`advertise_ext` / `scan_ext` / `on_ext_adv_reports`), enabled the SDC feature gates + multirole library, TX power via `default_tx_power(8)`, ~20-event bursts. Verdict: the XIAO antenna is the limiting factor → module migration. See [Field findings](#field-findings--rf-debugging-2026-07).
 8. ⏳ **S=8 coding refactor** — drive sensor advertising with raw HCI (`LeSetExtAdvParamsV2` + PHY options) to force S=8 and log the controller-selected TX power; a beacon doesn't need a host stack.
 9. 🔶 **Hardware migration** — ✅ 2× MDBT50Q-DB-40 acquired, house survey passed (2026-07-03, worst spot ≥85 %), MDBT50Q-1MV2 confirmed as production module. ⏳ Custom PCB (VDDH topology, antenna keep-out, SHT45 thermal moat, BMP581/LTR390 footprints on all boards with selective population, 1.27 mm Cortex debug header).
-10. ✅ **API v1 — MQTT→TimescaleDB ingest** (2026-07) — `homescope-api`: `rumqttc` durable-session subscriber → bounded channel → sqlx writer into a `readings` hypertable; `devices` registry table with in-memory cache; unknown devices warn-once + drop (no auto-registration); migrations at startup. HTTP endpoints not started yet (`axum` staged in deps).
+10. ✅ **API v1 — MQTT→TimescaleDB ingest** (2026-07) — `homescope-api`: `rumqttc` durable-session subscriber → bounded channel → sqlx writer into a `readings` hypertable; `devices` registry table with in-memory cache; unknown devices warn-once + drop (no auto-registration); migrations at startup. Migrated to protocol v0.5 on 2026-07-28: subscribes `…/+/envelope`, decodes the TV packet via `SensorReading::try_from`, nullable metric columns, seq-uniqueness constraint. HTTP endpoints not started yet (`axum` staged in deps).
 11. ✅ **Grafana** (2026-07) — provisioned TimescaleDB datasource + committed dashboard, anonymous viewer access, port 4000; `just grafana-pull` round-trips UI edits into the repo. Still to add: per-device delivery-rate panels derived from seq gaps (permanent reliability telemetry).
 12. ✅ **Containerization & deployment** (2026-07) — rootless Podman quadlets (mosquitto, timescaledb, api, gateway, grafana) under a dedicated user; ARM images built in CI → ghcr.io with `AutoUpdate=registry`; idempotent `deploy/deploy.sh`; udev-symlinked receiver. *(Plain quadlets won over the earlier `.kube`/Pod-YAML idea.)*
-13. ⏳ **Ingest durability & lifecycle** — the next backend block: per-device `seq` monotonicity check (one mechanism = AEAD replay protection + multi-receiver dedup + MQTT-redelivery idempotency), manual MQTT acks after successful insert (rumqttc `set_manual_acks`; today a DB outage silently drops polled readings), graceful shutdown (SIGTERM → drain channel → bounded exit).
+13. 🔶 **Ingest durability & lifecycle** — ✅ `UNIQUE (device_id, seq, time)` + `ON CONFLICT DO NOTHING` (2026-07-28), which makes MQTT **redelivery** idempotent because the gateway's `received_at` rides along unchanged. ⏳ Still open: the per-device `seq` monotonicity check (which additionally covers AEAD replay protection and **multi-receiver** dedup — two receivers stamp different `received_at` for one `seq`, so the constraint alone can't catch it), manual MQTT acks after successful insert (rumqttc `set_manual_acks`; today a DB outage silently drops polled readings), graceful shutdown (SIGTERM → drain channel → bounded exit).
 14. ⏳ **Site topology & broker hardening** — for the two-house/VPN deployment: `devices.site`/`room` columns + gateway `SITE` env var and `homescope/<site>/...` topic prefix (one change), then mosquitto `password_file` + per-topic ACLs (per-gateway publish-only credentials, API subscribe-only).
 15. ⏳ **Receiver/gateway plumbing tightening** — real VID/PID (pid.codes) instead of embassy's `0xc0de:0xcafe` placeholder, udev match on FICR serial, `TAG+="systemd"` device unit + `BindsTo=` so the gateway container's lifecycle follows the dongle (replug-safe), `ID_MM_DEVICE_IGNORE`.
 16. ⏳ **Sensor drivers** — ✅ SHT45 over async TWIM (`sht4x` crate); ⏳ BMP581 (`bmp5` async crate) on the designated indoor barometer node; optional LTR390 on the outdoor node.
 17. ⏳ **Watchdog + XIAO alkaline soak test** — watchdog first (probe-less panic = silent HardFault spin that drains the pack), then the unattended reliability/longevity baseline on 2× AA alkaline.
-18. 🔶 **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① ✅ **DeviceAddr refactor** (identity = AdvA, protocol v0.4); ② 🔶 **TV measurement encoding** (protocol v0.5) — ✅ measurement-ID registry in `common`, sensor TV encode, receiver variable-length frames + opaque forwarding (2026-07-25); ⏳ gateway migration (`frame::parse` in `common`, opaque-payload MQTT envelope), API TV decode + nullable metric columns; ③ ✅ **seq persistence** on the sensor (flash checkpoint with jump-ahead — `seq_counter.rs`; retained-RAM part joins with sleep optimization); ④ ⏳ **ChaCha20-Poly1305 AEAD** — encrypt the TV section on the sensor, `device_addr`+`seq` as AAD, forward opaquely, **decrypt in the API**. Fits extended advertising's 254 B budget (never fit legacy's 31 B).
+18. 🔶 **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① ✅ **DeviceAddr refactor** (identity = AdvA, protocol v0.4); ② ✅ **TV measurement encoding** (protocol v0.5) — measurement-ID registry in `common`, sensor TV encode, receiver variable-length frames + opaque forwarding (2026-07-25), gateway `frame::parse` decoder + opaque MQTT envelope (2026-07-26), API TV decode + nullable metric columns + `UNIQUE (device_id, seq, time)` (2026-07-28); ③ ✅ **seq persistence** on the sensor (flash checkpoint with jump-ahead — `seq_counter.rs`; retained-RAM part joins with sleep optimization); ④ ⏳ **v0.6 air-packet header** — `[magic b"HM"][ver: u8]` in front of `seq`; receiver checks + strips the magic and stays version-blind, API dispatches on `ver` (see below); ⑤ ⏳ **ChaCha20-Poly1305 AEAD** — encrypt the TV section on the sensor, `device_addr`+`ver`+`seq` as AAD, forward opaquely, **decrypt in the API**. Fits extended advertising's 254 B budget (never fit legacy's 31 B).
+
+    **Do ④ before ⑤, and soon.** One node is in the field, which is the cheapest the fleet will ever be to migrate, and AEAD is easier to land against a header that is already final. The three bytes cost ~192 µs of extra airtime per advertising event — about 1 % of the ~400 ms the radio is already on per burst.
 19. ⏳ **Sleep & power optimization** — System OFF + RTC wakeup between bursts. Gate sensor rail power during sleep. Measure with PPK2.
 20. ⏳ **Provisioning** *(plan settled 2026-07-20 — see `NOTES-provisioning.md`)* — `homescope-provision` workstation CLI (probe-rs: FICR read → API registration → UICR key write → verify → flash), admin-authenticated `POST /devices` key issuance in the API, and envelope-encrypted device keys at rest (KEK in API secrets). Device identity needs no provisioning — the advertising address is FICR-sourced.
 21. ⏳ **Decoded-readings republish** — API republishes verified+deduped readings as plain JSON (or HA MQTT discovery) for external consumers; the integration surface. Optional, after AEAD.

@@ -10,9 +10,9 @@ This repo is a monorepo with **two Cargo workspaces** split by target architectu
 
 | Path | Crate | Target | What it does |
 |------|-------|--------|--------------|
-| [`common/`](common/) | `homescope-common` | `no_std`-by-default | Shared wire formats: `SensorPacket` (seq + TV section), `Measurement` ID registry, `SensorObservation`, framing + CRC; `ObservationEnvelope` (MQTT JSON, base64 packet), `SensorReading`, `DeviceAddr`. |
-| [`gateway/`](gateway/) | `homescope-gateway` | host (Pi) | Reads framed observations from the receiver over USB-CDC, publishes them as opaque JSON envelopes to MQTT. |
-| [`api/`](api/) | `homescope-api` | host (Pi) | Subscribes to MQTT, resolves devices against a registry, stores readings in TimescaleDB. HTTP endpoints planned. |
+| [`common/`](common/) | `homescope-common` | `no_std`, no default features | Shared wire formats: `SensorPacket` (seq + TV section), `Measurement` ID registry, `SensorObservation`, framing + CRC; `ObservationEnvelope` (MQTT JSON, base64 packet), `SensorReading` (the decoded shape), `DeviceAddr`. Features: `codec`, `serde`, `defmt`. |
+| [`gateway/`](gateway/) | `homescope-gateway` | host (Pi) | Reads framed observations from the receiver over USB-CDC, publishes them as opaque JSON envelopes to MQTT. Semantics-blind — never parses the packet. |
+| [`api/`](api/) | `homescope-api` | host (Pi) | Subscribes to MQTT, resolves devices against a registry, decodes the TV packet, stores readings in TimescaleDB. HTTP endpoints planned. |
 | [`host-util/`](host-util/) | `homescope-host-util` | host | Shared host-side init (dotenv + tracing) and env-var helpers. |
 | [`firmware/board/`](firmware/board/) | `homescope-board` | `thumbv7em-none-eabi` | Board abstraction (`board!(p)` macro + per-board linker scripts; features `board-db40` / `board-xiao`). |
 | [`firmware/sensor/`](firmware/sensor/) | `homescope-sensor` | `thumbv7em-none-eabi` | Battery-powered nRF52840 firmware. Reads sensors (SHT45), broadcasts BLE advertisements. |
@@ -63,9 +63,15 @@ just gateway    # runs homescope-gateway (auto-starts the MQTT broker)
 just api        # runs homescope-api (auto-starts broker + Postgres)
 just db-seed    # loads ~90 days of fake per-minute readings
 just dev        # zellij workspace with the whole stack
+just fmt        # rustfmt across BOTH workspaces (see below)
 ```
 
-Both services are configured via env vars (`MQTT_HOST`, `MQTT_PORT`; gateway: `RECEIVER_PATH`, default `/dev/homescope-receiver`; api: `DB_*`, `RUN_MIGRATIONS`), loaded from `.env`/`.env.default` files.
+Both services are configured via env vars (`MQTT_HOST`, `MQTT_PORT`; gateway: `RECEIVER_PATH`, default `/dev/homescope-receiver`; api: `DB_*`, `RUN_MIGRATIONS`), loaded from per-crate `.env` / `.env.default` files by `host-util`'s `init()`.
+
+Two footguns worth knowing, both from tooling that resolves paths relative to the *current directory*:
+
+- **`dotenvy` searches the working directory and then walks *upward*** — it never descends into subdirectories. Since the env files live in `api/` and `gateway/`, the run recipes carry `[working-directory('api')]` / `[working-directory('gateway')]`. Running `cargo run -p homescope-api` from the repo root instead will fail with `DB_USER must be set` even though the file exists. (`api/.env` is a separate matter: it holds `DATABASE_URL` for sqlx's compile-time macros and must stay put.)
+- **`cargo fmt --all` only covers workspace *members***, and `common` is a path *dependency* of the firmware workspace rather than a member — so neither invocation formats everything. Use `just fmt`, which runs both.
 
 ### Production (Raspberry Pi)
 
@@ -89,18 +95,21 @@ CRC is CRC-16/IBM-SDLC over len + payload. The payload is a `SensorObservation` 
 
 The gateway republishes each observation as an opaque JSON envelope on MQTT (`homescope/sensors/<device-addr>/envelope`): cleartext `deviceAddr`/`rssi`/`receivedAt` plus the air packet as base64, decoded only by the API.
 
+**Next on the wire (v0.6, designed but not implemented)**: the air packet gains a `[magic b"HM"][ver: u8]` header in front of `seq`. The magic is air-side only — the receiver checks it, drops foreign `0xFFFF` traffic before it can evict real sensors from the 32-entry dedup cache, and strips it — while `ver` travels downstream for the API to dispatch on. The dongle deliberately never reads `ver`, so a protocol bump never means reflashing it, and a node left on old firmware stays visible instead of vanishing. See [docs/protocol.md](docs/protocol.md#planned-v06--air-packet-magic--version-header).
+
 ## Status
 
 - ✅ Sensor firmware: Coded-PHY extended advertising, +8 dBm, ~20-event bursts, SHT45 + battery SAADC
 - ✅ Receiver firmware: coded extended scanning, USB-CDC framing, robust to host disconnect/reconnect
 - ✅ Gateway: streaming frame decoder → opaque MQTT envelope (pure bridge, semantics-blind; the range-survey page lives on the `reliability-benchmark` branch)
-- ✅ API: MQTT → TimescaleDB ingest, device registry (unknown devices dropped, no auto-registration), sqlx migrations
+- ✅ API: MQTT envelope → TV decode → TimescaleDB ingest, device registry (unknown devices dropped, no auto-registration), nullable metric columns, `UNIQUE (device_id, seq, time)`, sqlx migrations
 - ✅ Grafana: provisioned datasource + dashboard, anonymous viewer
 - ✅ Deployment: Podman quadlets + CI images (ghcr.io) + idempotent deploy script
 - ✅ Hardware: Raytac MDBT50Q-DB-40 survey passed → custom PCB with MDBT50Q-1MV2 is next
+- ✅ **TV measurement encoding (protocol v0.5) — complete end to end** (2026-07-28): ID registry in `common`, sensor encode, receiver opaque forwarding + persisted seq counters, gateway `frame::parse` decoder + opaque envelope, API decode
+- ⏳ Protocol v0.6: air-packet magic + version header (designed, not implemented) → then per-device ChaCha20-Poly1305 AEAD (decrypt in the API; gateways stay keyless; integrations fed by an API republish of verified readings)
 - ⏳ S=8 coding refactor (raw HCI `LeSetExtAdvParamsV2`)
-- ⏳ Ingest durability (seq dedup, manual MQTT acks), graceful shutdown, site topology + broker ACLs
-- 🔶 TV measurement encoding — ✅ firmware side (ID registry in `common`, sensor encode, receiver opaque forwarding, persisted seq counters); ✅ gateway migration (streaming `frame::parse` decoder, opaque MQTT envelope); ⏳ API TV decode → then per-device ChaCha20-Poly1305 AEAD (decrypt in the API; gateways stay keyless; integrations fed by an API republish of verified readings)
+- ⏳ Ingest durability (per-device seq monotonicity, manual MQTT acks), graceful shutdown, site topology + broker ACLs
 - ⏳ Sleep/power optimization (System OFF + RTC wakeup), watchdog, BMP581/LTR390 drivers
 
 See the **Implementation roadmap** in [docs/architecture.md](docs/architecture.md#implementation-roadmap) for the full plan.

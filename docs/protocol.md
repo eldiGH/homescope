@@ -1,12 +1,15 @@
 # Scanner-to-gateway wire protocol — v0.5 (prototype)
 
-> **Status: prototype, v0.5** (2026-07-25 — the TV-measurement-encoding
-> release). Implemented end to end: `common`, the sensor firmware, the
-> receiver firmware, and (since 2026-07-26) the gateway — decoder loop over
-> `frame::parse` plus the opaque-payload MQTT envelope (see "Rust gateway
-> implementation" below). Remaining downstream: API-side TV decode. This
-> format will keep evolving (AEAD next); it's documented here so both ends
-> have a stable target and versions can be diffed.
+> **Status: prototype, v0.5 — complete end to end** (2026-07-28). `common`,
+> the sensor firmware, the receiver firmware, the gateway (decoder loop over
+> `frame::parse` plus the opaque-payload MQTT envelope) and the API (envelope
+> subscription → TV decode → TimescaleDB) all speak v0.5.
+>
+> **Next: v0.6 adds a magic + version header to the air packet** — designed
+> 2026-07-29, **not yet implemented**; see [Planned: v0.6 air-packet
+> header](#planned-v06--air-packet-magic--version-header). AEAD follows it.
+> The format is documented here so both ends have a stable target and
+> versions can be diffed.
 >
 > **Changes since v0.4:** the fixed `SensorPacket` struct is replaced by the
 > **TV measurement encoding** (type–value; see below), which makes the air
@@ -110,11 +113,13 @@ during development), forwarded opaquely inside the observation:
   [0..4]            1 B    ID-implied length each
 ```
 
-- **`seq`** — per-sensor monotonic counter, **fixed cleartext header, always
-  at offset 0**. It does protocol work (receiver-side burst dedup, API-side
-  replay/dedup, future AEAD nonce) and is the only part of the packet the
-  receiver reads. Persisted on the sensor across reboots (retained RAM +
-  flash checkpoint with jump-ahead), so it never goes backwards.
+- **`seq`** — per-sensor monotonic counter, **fixed cleartext header** (offset
+  0 in v0.5; offset 3 in v0.6). It does protocol work (receiver-side burst
+  dedup, API-side replay/dedup, future AEAD nonce) and is the only *structured*
+  field the receiver reads. Persisted on the sensor across reboots (retained
+  RAM + flash checkpoint with jump-ahead), so it never goes backwards. Its
+  position and width are pinned by the receiver's dedup contract — see
+  [Planned: v0.6](#planned-v06--air-packet-magic--version-header).
 - **TV section** — *type–value*: each measurement is a 1-byte **measurement
   ID** followed directly by its value. The ID comes from the registry in
   `common` and binds semantics + wire representation + scale + unit, so the
@@ -142,7 +147,20 @@ packet with a warning** — don't salvage already-parsed fields. Both ends are
 ours; a malformed packet is a bug or foreign traffic, not something to
 tolerate. (Company ID `0xFFFF` is the Bluetooth SIG test ID and must be
 treated as shared airspace: anything in it is untrusted input until AEAD
-lands.)
+lands. v0.6's magic filters the accidental share of that; only the AEAD tag
+filters the deliberate share.)
+
+An unknown ID is unrecoverable rather than merely unknown: with no per-field
+length byte, the parser cannot skip a value whose width it doesn't know, so
+everything after it is unparseable too. `Measurements` therefore fuses after
+the first error rather than trying to resynchronise.
+
+**A missing measurement is not an error.** Partial packets are the point of
+the encoding — a node with no humidity sensor, or one whose SHT45 read failed,
+still reports what it has, and the API stores the absent metric as a NULL
+column. The rule is: *reject when the packet is unusable or untrustworthy,
+otherwise store what arrived.* A packet with **zero** measurements is rejected
+(`NoMeasurements`) — well formed on the wire, useless as a row.
 
 ## Age and timestamps
 
@@ -249,14 +267,139 @@ timestamps"); `packet` is the `[seq][TV…]` air packet, untouched. The
 gateway never looks inside it — decode (and later AEAD verify/decrypt)
 happens in the API.
 
+### API side (implemented 2026-07-28)
+
+`homescope-api` subscribes to `homescope/sensors/+/envelope` and turns each
+envelope into a row:
+
+1. Resolve `deviceAddr` against the `DeviceRegistry`. Unknown ⇒ warn-once and
+   drop (no auto-registration — the `devices` table becomes the AEAD key
+   registry, and a row must exist before readings are accepted).
+2. `SensorReading::try_from(&envelope)` — `SensorPacket::parse` over the
+   base64 blob, then walk `Measurements` into one `Option` per metric.
+   `SensorReading` lives in `common/src/reading.rs`; it is the *decoded*
+   shape, not a wire type, and carries no version field.
+3. Insert with `ON CONFLICT DO NOTHING` against a
+   `UNIQUE (device_id, seq, time)` constraint. The `time` column is in the
+   key because TimescaleDB rejects unique indexes on a hypertable that omit
+   the partitioning column. Because `received_at` is stamped by the gateway
+   and carried in the envelope unchanged, an MQTT **redelivery** collides and
+   is silently ignored; **multi-receiver** dedup still needs the planned
+   per-device seq monotonicity check, since two receivers stamp different
+   `received_at` values for the same `seq`.
+
+Metric columns are nullable (`temp_degc`, `rh_percent`, `battery_mv`);
+`time`, `device_id`, `seq` and `rssi` are NOT NULL.
+
+## Planned: v0.6 — air-packet magic + version header
+
+Designed 2026-07-29, **not implemented**. Two fields go in front of `seq`:
+
+```
+on air (inside ManufacturerSpecificData, company ID 0xFFFF):
++--------+--------+--------+-----------------+------+---------+----
+| 'H'    | 'M'    | ver    | seq (u32 LE)    | id   | value   | …
+| 0x48   | 0x4D   | u8     |                 |      |         |
++--------+--------+--------+-----------------+------+---------+----
+  [0]      [1]      [2]      [3..7]            [7..]
+
+after the receiver strips the magic — this is `SensorPacket`, the blob that
+travels in the observation and the MQTT envelope:
++--------+-----------------+------+---------+----
+| ver    | seq (u32 LE)    | id   | value   | …
++--------+-----------------+------+---------+----
+  [0]      [1..5]            [5..]
+```
+
+**Magic — `b"HM"`, two bytes, air-side only.** Company ID `0xFFFF` is the
+Bluetooth SIG *test* identifier, so the airspace is shared with every
+unbranded dev board in range. The magic is what lets the receiver reject
+foreign traffic before it costs anything. Declared as a `[u8; 2]`, never a
+`u16`, so there is no endianness question and the check is a slice compare.
+Deliberately different from the frame's `"HS"` so a byte dump tells you which
+layer you are looking at.
+
+Note the two share their leading byte (`0x48`). That is harmless but worth
+knowing: `frame::parse` resyncs by scanning for magic *candidates* with
+`memchr` on `0x48`, so an embedded air magic gives the resync one more
+candidate to reject at the second byte. The parser already handles this
+correctly — a false match is rejected and the discard hint lands on the next
+candidate — and the cost is a byte of rescanning, only on a corrupt frame. If
+that ever becomes annoying, change the air magic's first byte rather than the
+frame's; the frame magic is the one with a written-down spec.
+
+The receiver **strips it**: past the dongle you are on a point-to-point USB
+link that `frame.rs` already delimits, and then on MQTT where the topic
+identifies the sender. Forwarding a constant that no downstream layer can
+learn anything from would only invite re-validation at a layer where passing
+tells you nothing. Each layer strips its own header.
+
+**Why the magic matters more than it looks.** The receiver's dedup cache is
+`LruCache<DeviceAddr, u32, 32>` and the only gate in front of it is "company
+ID `0xFFFF` and at least four bytes". Foreign advertisers therefore claim LRU
+slots keyed by their own `AdvA`, and roughly 32 of them **evict real sensors
+from the dedup cache**. An evicted sensor's next burst no longer dedups, so
+all ~20 advertising events forward as distinct packets — 20× amplification
+into MQTT and the API, precisely when the airspace is busiest. The magic is
+the cheapest possible fix and it is not primarily about bandwidth.
+
+**Version — `u8`, ahead of `seq`, travels downstream.** A single monotonic
+counter, not major/minor: every change to a packet this small is breaking,
+and a minor-version escape hatch is exactly the reasoning that produces
+silent misdecodes. 256 values is a century at one or two revisions a year.
+
+It goes **before** `seq` because a version field must be readable before you
+parse anything else, *including the fields ahead of it*. Behind `seq` you get
+a circular dependency — locating the version requires already knowing `seq`'s
+width, which is what the version was supposed to tell you. The practical
+consequence is diagnostic: with `ver` at a fixed offset an unrecognised
+packet still reports `unknown version 7 from AA:BB:CC`; behind `seq` the same
+packet is undiagnosable and indistinguishable from noise or corruption.
+
+**The receiver does not read `ver`.** It checks the magic, reads `seq` at its
+fixed offset for dedup, and forwards everything from byte 2 on. This is
+deliberate:
+
+- The magic is *constant*, so filtering on it never forces a dongle reflash.
+  Filtering on `ver` would make every protocol bump a reflash — and one dongle
+  is destined for the far end of a VPN.
+- A node still running old firmware must stay **visible**. If the dongle
+  dropped unknown versions, a sensor you forgot to reflash would vanish with
+  no signal, indistinguishable from a dead battery or an RF problem. Forwarded,
+  the API reports `unsupported version 1 from AA:BB:CC` and you know which node
+  to go find.
+
+**Version handling in the API**: dispatch on `ver` at the wire boundary, one
+parse function per version, all producing the same internal `SensorReading`.
+The version never enters the internal type — it is a wire concern that dies at
+the parse boundary. Until a second version exists this is a `match` with one
+arm and a catch-all `UnsupportedVersion` error; parsers for versions that were
+never shipped are speculative and will be wrong when needed.
+
+**`seq` stays the dedup key.** Its position and width are pinned by the
+receiver's contract, which is a real constraint but an inert one: `seq` cannot
+be removed (it is the AEAD nonce source *and* the API's replay check) and a
+`u32` at one packet per minute wraps in ~8000 years. A CRC32-over-payload dedup
+key was considered — it would make the dongle fully blind to structure — but it
+does not unpin `seq` either: without a per-transmission-varying field, two
+identical consecutive readings become byte-identical and dedup would swallow
+the second, losing the liveness signal. (Use CRC32, not CRC16, if this is ever
+revisited: at 1 packet/min CRC16 collides about once per device per 45 days,
+silently dropping a real reading.) Post-AEAD the Poly1305 tag is already a
+per-packet unique value and is the natural key if the change is ever made.
+
 ## Planned: AEAD (ChaCha20-Poly1305, decrypt in the API)
 
-Settled 2026-07-16 (see `NOTES-packet-tv-aead.md`). The TV section becomes
-the ciphertext; `seq` stays cleartext at offset 0:
+Settled 2026-07-16 (see `NOTES-packet-tv-aead.md`), layered on top of v0.6.
+The TV section becomes the ciphertext; the `ver` + `seq` header stays
+cleartext:
 
-- Air packet becomes `[seq: u32][ciphertext: N][tag: 16 B]`; the cleartext
-  context (`device_addr` from AdvA + `seq`) is bound as **associated data**,
-  so a valid ciphertext can't be grafted onto another device or seq.
+- Air packet becomes `[magic][ver][seq: u32][ciphertext: N][tag: 16 B]`; the
+  cleartext context (`device_addr` from AdvA + `ver` + `seq`) is bound as
+  **associated data**, so a valid ciphertext can't be grafted onto another
+  device, version or seq. `ver` *must* be in the AAD or it is flippable.
+  The magic is **not** in the AAD — it is a constant both sides already know,
+  so it contributes nothing, and it isn't transmitted past the receiver.
 - Nonce is derived deterministically from the persisted `seq` (no random
   component — safe because keys are per-device and seq never repeats).
 - **The USB-CDC frame and MQTT envelope shapes don't change** — the opaque
@@ -265,14 +408,25 @@ the ciphertext; `seq` stays cleartext at offset 0:
 
 ## Known limitations (will change in future versions)
 
-- **The API does not decode the envelope yet** — it still expects the old
-  decoded-JSON reading payload; the API-side TV decode (base64 → 
-  `SensorPacket::parse` → `Measurements` walk) is the next backend task.
 - **No encryption yet.** The air packet is plaintext TV data and anything in
   radio range can forge well-formed packets (company ID `0xFFFF` is shared).
-  Acceptable during development; fixed by the AEAD step.
-- **No frame-level version field.** Bumping the format means updating both
-  ends together (they share `common`, so version skew is a deploy-ordering
-  concern, not a code one).
+  Acceptable during development; fixed by the AEAD step. Note the v0.6 magic
+  filters *accidental* collisions only — about 1 in 65536 of random foreign
+  traffic still passes, and anyone can transmit the constant deliberately.
+  It is a noise filter, never an authenticity check.
+- **No version field yet** (arriving in v0.6). Today, bumping the format means
+  updating both ends together — they share `common`, so version skew is a
+  deploy-ordering concern rather than a code one. The gap is visible right
+  now: a node still running pre-v0.5 firmware emits `[seq][temp][rh][batt]`,
+  whose `seq` happens to land at the same offset, so the receiver forwards it
+  and the API parses byte 4 (the low byte of `temp_cdegc`) as a measurement
+  ID. That is almost always an unknown ID and the packet is rejected — but
+  only *almost*: it decodes cleanly into plausible stored values when the
+  temperature's low byte and the humidity's high byte both happen to fall in
+  `1..=3`, i.e. below roughly 10 %RH. Indoors that never fires. That is luck,
+  not design, and it is what the version byte exists to end.
+- **No frame-level (USB-CDC) version field.** The frame layer is versioned by
+  this document only; v0.6's version byte lives in the air packet, which is
+  the layer whose producers are flashed firmware in the field.
 - **Limited BLE-side metadata.** The advertising address is forwarded (that's
   `device_addr`), but PHY, channel index, and per-event details are not.

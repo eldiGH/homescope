@@ -74,8 +74,12 @@ impl<'a> EventHandler for PacketHandler<'a> {
                     payload,
                 }) = ad
                 {
-                    let Ok(SensorPacket { seq, .. }) = SensorPacket::parse(payload) else {
-                        defmt::error!("could not parse packet: {}", payload);
+                    let Ok(packet) = SensorPacket::strip_air_magic(payload) else {
+                        continue;
+                    };
+
+                    let Ok(SensorPacket { seq, .. }) = SensorPacket::parse(packet) else {
+                        defmt::error!("could not parse packet: {}", packet);
                         continue;
                     };
                     let device_addr = DeviceAddr(report.addr.0);
@@ -91,7 +95,7 @@ impl<'a> EventHandler for PacketHandler<'a> {
 
                     cache.insert(device_addr, seq);
 
-                    let Ok(packet) = Vec::from_slice(payload) else {
+                    let Ok(packet) = Vec::from_slice(packet) else {
                         continue;
                     };
 

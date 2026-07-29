@@ -18,10 +18,10 @@ impl PacketBuilder {
         &mut self,
         measurements: &[Measurement],
     ) -> Result<PacketBuffer, PacketBuilderError> {
-        let mut buffer: PacketBuffer = Vec::from([0; SensorPacket::MAX_ENCODED_LEN]);
+        let mut buffer: PacketBuffer = Vec::from([0; SensorPacket::MAX_AIR_LEN]);
 
         let buffer_len =
-            SensorPacket::encode(self.seq_counter.next().await?, measurements, &mut buffer)?;
+            SensorPacket::encode_air(self.seq_counter.next().await?, measurements, &mut buffer)?;
 
         buffer.truncate(buffer_len);
         Ok(buffer)
@@ -46,5 +46,5 @@ impl From<BufferTooSmall> for PacketBuilderError {
     }
 }
 
-pub type PacketBuffer = Vec<u8, { SensorPacket::MAX_ENCODED_LEN }>;
+pub type PacketBuffer = Vec<u8, { SensorPacket::MAX_AIR_LEN }>;
 pub type PacketSignal = Signal<ThreadModeRawMutex, PacketBuffer>;

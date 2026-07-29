@@ -1,15 +1,17 @@
-# Scanner-to-gateway wire protocol — v0.5 (prototype)
+# Scanner-to-gateway wire protocol — v0.6 (prototype)
 
-> **Status: prototype, v0.5 — complete end to end** (2026-07-28). `common`,
+> **Status: prototype, v0.6 — complete end to end** (2026-07-29). `common`,
 > the sensor firmware, the receiver firmware, the gateway (decoder loop over
 > `frame::parse` plus the opaque-payload MQTT envelope) and the API (envelope
-> subscription → TV decode → TimescaleDB) all speak v0.5.
+> subscription → TV decode → TimescaleDB) all speak v0.6. **AEAD is next.**
 >
-> **Next: v0.6 adds a magic + version header to the air packet** — designed
-> 2026-07-29, **not yet implemented**; see [Planned: v0.6 air-packet
-> header](#planned-v06--air-packet-magic--version-header). AEAD follows it.
-> The format is documented here so both ends have a stable target and
-> versions can be diffed.
+> **Changes since v0.5:** the air packet gained a two-byte **magic** (`b"HP"`,
+> air-side only — the receiver checks and strips it) and a one-byte **version**
+> ahead of `seq`. `SensorPacket` downstream is therefore `[ver][seq][body]`.
+> `SensorPacket::parse` handles only that prefix and stays version-blind;
+> `SensorPacket::decode` dispatches on `ver` and yields the canonical
+> `Metrics`. Air packet grows 13 → 16 bytes with today's three measurements;
+> frames 30 → 33. See [the version charter](#the-version-charter).
 >
 > **Changes since v0.4:** the fixed `SensorPacket` struct is replaced by the
 > **TV measurement encoding** (type–value; see below), which makes the air
@@ -60,7 +62,7 @@ types plug in via the `Encode` trait).
 - **CRC (last 2 bytes):** CRC-16/IBM-SDLC over **length + payload** (bytes 2..4+N; magic excluded, length field covered — a corrupted length is detectable). Little-endian on the wire.
 
 Frame overhead is 6 bytes (`frame::OVERHEAD`). With today's observation
-(11-byte header + 13-byte air packet = 24-byte payload) a frame is 30 bytes;
+(11-byte header + 16-byte air packet = 27-byte payload) a frame is 33 bytes;
 the observation's maximum payload is 263 bytes (frame max: 269).
 
 ## CRC algorithm
@@ -107,19 +109,24 @@ of the BLE `ManufacturerSpecificData` AD structure (company ID `0xFFFF`
 during development), forwarded opaquely inside the observation:
 
 ```
-+-----------------+------+---------+------+---------+----
-| seq (u32 LE)    | id   | value   | id   | value   | …
-+-----------------+------+---------+------+---------+----
-  [0..4]            1 B    ID-implied length each
++--------+-----------------+------+---------+------+---------+----
+| ver    | seq (u32 LE)    | id   | value   | id   | value   | …
++--------+-----------------+------+---------+------+---------+----
+  [0]      [1..5]            1 B    ID-implied length each
 ```
 
+(On air this is preceded by the two-byte magic, which the receiver strips —
+see [Air-packet magic + version header](#air-packet-magic--version-header).)
+
+- **`ver`** — protocol version of everything after `seq`. Read by the API,
+  never by the receiver. See [the version charter](#the-version-charter).
 - **`seq`** — per-sensor monotonic counter, **fixed cleartext header** (offset
-  0 in v0.5; offset 3 in v0.6). It does protocol work (receiver-side burst
+  1 downstream, offset 3 on air). It does protocol work (receiver-side burst
   dedup, API-side replay/dedup, future AEAD nonce) and is the only *structured*
   field the receiver reads. Persisted on the sensor across reboots (retained
   RAM + flash checkpoint with jump-ahead), so it never goes backwards. Its
   position and width are pinned by the receiver's dedup contract — see
-  [Planned: v0.6](#planned-v06--air-packet-magic--version-header).
+  [the magic + version header](#air-packet-magic--version-header).
 - **TV section** — *type–value*: each measurement is a 1-byte **measurement
   ID** followed directly by its value. The ID comes from the registry in
   `common` and binds semantics + wire representation + scale + unit, so the
@@ -160,7 +167,7 @@ the encoding — a node with no humidity sensor, or one whose SHT45 read failed,
 still reports what it has, and the API stores the absent metric as a NULL
 column. The rule is: *reject when the packet is unusable or untrustworthy,
 otherwise store what arrived.* A packet with **zero** measurements is rejected
-(`NoMeasurements`) — well formed on the wire, useless as a row.
+(`DecodeError::Empty`) — well formed on the wire, useless as a row.
 
 ## Age and timestamps
 
@@ -291,15 +298,15 @@ envelope into a row:
 Metric columns are nullable (`temp_degc`, `rh_percent`, `battery_mv`);
 `time`, `device_id`, `seq` and `rssi` are NOT NULL.
 
-## Planned: v0.6 — air-packet magic + version header
+## Air-packet magic + version header
 
-Designed 2026-07-29, **not implemented**. Two fields go in front of `seq`:
+Landed 2026-07-29 (v0.6). Two fields sit in front of `seq`:
 
 ```
 on air (inside ManufacturerSpecificData, company ID 0xFFFF):
 +--------+--------+--------+-----------------+------+---------+----
-| 'H'    | 'M'    | ver    | seq (u32 LE)    | id   | value   | …
-| 0x48   | 0x4D   | u8     |                 |      |         |
+| 'H'    | 'P'    | ver    | seq (u32 LE)    | id   | value   | …
+| 0x48   | 0x50   | u8     |                 |      |         |
 +--------+--------+--------+-----------------+------+---------+----
   [0]      [1]      [2]      [3..7]            [7..]
 
@@ -311,22 +318,32 @@ travels in the observation and the MQTT envelope:
   [0]      [1..5]            [5..]
 ```
 
-**Magic — `b"HM"`, two bytes, air-side only.** Company ID `0xFFFF` is the
+**Magic — `b"HP"`, two bytes, air-side only.** Company ID `0xFFFF` is the
 Bluetooth SIG *test* identifier, so the airspace is shared with every
 unbranded dev board in range. The magic is what lets the receiver reject
 foreign traffic before it costs anything. Declared as a `[u8; 2]`, never a
 `u16`, so there is no endianness question and the check is a slice compare.
-Deliberately different from the frame's `"HS"` so a byte dump tells you which
-layer you are looking at.
+Deliberately different from the frame's `"HS"`, though **not** for any
+correctness reason: because the receiver strips it, the air magic never enters
+the USB stream, so the two constants never coexist in one byte sequence and
+identical values would work. They are kept distinct because they answer
+different questions — the frame magic only has to be *findable* after stream
+corruption (its value is arbitrary), while the air magic has to be *unlikely*
+to collide with a foreign `0xFFFF` advertisement (its value is a selectivity
+choice that might grow to three bytes if the airspace gets noisy). Sharing one
+constant would couple two decisions that have no reason to move together, and
+would quietly become unsafe if anyone ever added a raw-air-bytes passthrough.
 
-Note the two share their leading byte (`0x48`). That is harmless but worth
-knowing: `frame::parse` resyncs by scanning for magic *candidates* with
-`memchr` on `0x48`, so an embedded air magic gives the resync one more
-candidate to reject at the second byte. The parser already handles this
-correctly — a false match is rejected and the discard hint lands on the next
-candidate — and the cost is a byte of rescanning, only on a corrupt frame. If
-that ever becomes annoying, change the air magic's first byte rather than the
-frame's; the frame magic is the one with a written-down spec.
+Since it is a convention rather than an invariant, it is **not** enforced with
+a `const` assert — `packet.rs` and `frame.rs` deliberately don't depend on each
+other, and an assert whose violation breaks nothing trains readers to skim past
+the asserts that do matter. Cross-referencing doc comments on the two constants
+carry it instead.
+
+Unrelated but worth not confusing with the above: arbitrary payload bytes
+*can* contain `0x48 0x53` by chance (a `device_addr` pair, a `seq`, a
+measurement value). That is inherent to magic-delimited framing and is what the
+length field and CRC are for.
 
 The receiver **strips it**: past the dongle you are on a point-to-point USB
 link that `frame.rs` already delimits, and then on MQTT where the topic
@@ -369,12 +386,118 @@ deliberate:
   the API reports `unsupported version 1 from AA:BB:CC` and you know which node
   to go find.
 
-**Version handling in the API**: dispatch on `ver` at the wire boundary, one
-parse function per version, all producing the same internal `SensorReading`.
-The version never enters the internal type — it is a wire concern that dies at
-the parse boundary. Until a second version exists this is a `match` with one
-arm and a catch-all `UnsupportedVersion` error; parsers for versions that were
-never shipped are speculative and will be wrong when needed.
+### The version charter
+
+> **`ver` names the format of everything after `seq`. Nothing else.**
+
+That scope is forced by decisions made elsewhere, and stating it prevents the
+field from becoming a catch-all:
+
+- The **prefix** (`magic`, `ver`, `seq`) is dongle-visible and therefore frozen.
+  Changing it is a **new magic**, not a version bump — a bump could not help,
+  because the receiver never reads `ver`.
+- **Measurement semantics** belong to the ID registry. A new metric, a new
+  resolution, a new unit, a status flag: all new IDs, no bump.
+- What remains is the **body layout**, and `ver` is its name.
+
+#### When to bump
+
+| Change | Action |
+| --- | --- |
+| New metric, resolution, unit, status flag | **New measurement ID.** No bump. |
+| New node variant / different populated sensors | **Nothing.** TV already expresses it. |
+| Body layout changes (batching, encryption, TLV, crypto parameters, a packet-type byte) | **Bump `ver`.** |
+| `seq` moves or resizes; anything in the prefix changes | **New magic.** |
+
+Never reuse a number. Never bump without a body change that an older parser
+would misread — a bump that changes nothing teaches you to ignore the field.
+
+#### What it is actually for
+
+The realistic cases, in the order we think they'll arrive:
+
+1. **Batching several readings per advertisement.** Today one packet is one
+   reading, so sampling resolution and radio cadence are the same number. To
+   sample every 15 s but transmit every 5 min, the body becomes
+   `[count][Δt][TV][Δt][TV]…` — roughly 60 bytes inside a 254-byte budget, for
+   20× the time resolution at the same radio duty cycle. The TV registry cannot
+   express this; it is a body-layout change.
+2. **Crypto parameter changes.** ChaCha20-Poly1305 → XChaCha20-Poly1305 if
+   seq-derived 96-bit nonces prove awkward, a different nonce derivation, a
+   different tag length. Crypto choices get revisited on a multi-year horizon
+   more often than packet layouts do, and none of them is a new ID.
+3. **A packet-type byte**, if transmissions ever diversify (boot announcement,
+   diagnostic dump). Introducing one is itself a body change, so it arrives via
+   a bump — but note `ver` must **not** be overloaded to mean type ("v3 = the
+   status format" is a field meaning two things and validating neither).
+4. **TV → TLV.** Lower probability, since deploying the API before flashing
+   firmware keeps unknown IDs from occurring. It is the classic reason protocols
+   grow length prefixes, and it is a body change if it ever happens.
+
+#### Why it earns its byte even at one version
+
+Two things, neither of which is authenticity — AEAD covers that, and a version
+byte adds nothing there:
+
+- It converts *silent misparse* into *named rejection*. This is not
+  hypothetical: a node still on pre-v0.5 firmware emits `[seq][temp][rh][batt]`,
+  and the only reason it isn't writing garbage rows today is that indoor
+  humidity keeps the stale bytes outside the valid-ID range (see
+  [Known limitations](#known-limitations-will-change-in-future-versions)).
+- After AEAD it separates **stale firmware** from **bad key**. Without it both
+  surface identically as a failed tag check, and those two have completely
+  different fixes — reflash versus re-provision. With it, the API can report
+  `device X is on v1, expected v2` before it ever touches the key.
+
+The deciding argument is asymmetry rather than any single use case: keeping the
+byte and never bumping costs one byte, one field and one match arm, while
+adding it later costs a fleet-wide flag day *and* leaves you diagnosing a mixed
+fleet with the diagnostic missing.
+
+Note what is **not** an argument for it. AEAD arrives as a hard cutover — the
+API stops accepting cleartext outright — so there is no dual-accept window and
+therefore no downgrade path for a version byte to close.
+
+#### Handling versions in code
+
+The pattern is **one canonical model, one adapter per version** — an
+anti-corruption layer. `ver` never enters the canonical type; it is a wire
+concern that dies at the parse boundary, so every version's parser yields the
+same `SensorReading`. Layout in `common`:
+
+- `SensorPacket::parse` handles the **version-invariant prefix only** and must
+  **not** validate `ver` — the receiver calls it purely to read `seq`, and a
+  version check there would resurrect exactly the stale-node blindness the
+  design avoids.
+- Body access performs the dispatch and returns `UnsupportedVersion(u8)`.
+- `body` stays **private**. That privacy, not the `match`, is what actually
+  enforces the version check: a public body lets a caller read the section
+  without dispatching, and the first time that happens `ver` becomes
+  decoration.
+- Each version's body **decoder** lives in its own module (`packet/v1.rs`) with
+  its own `MAX_BODY_LEN`.
+
+**Encoding is single-version.** A sensor only ever emits the current format, so
+there is exactly one encoder and it lives with the prefix, writing a named
+`CURRENT_VERSION` rather than a literal. Old encoders are *not* kept: an old
+encoder tested against its own parser verifies round-tripping, not wire
+compatibility — the pair can drift together and still pass. Regression tests
+for retired versions use **golden byte arrays**, ideally captured from real
+firmware, which cannot drift.
+
+**Growing the canonical model.** When a new version adds a field, construct
+`SensorReading` with every field spelled out and never `..Default::default()`.
+An added field then fails to compile in every older version's parser until you
+decide what it means there; with a default, an old parser silently starts
+reporting a value it never received.
+
+**What `Option` does not cover: cardinality.** `Option<T>` says "this version
+didn't carry that field". Batching says "this version carries *N* readings",
+which is a different shape — one v2 packet becomes several rows. So keep all
+`SensorReading` construction inside the single `TryFrom<&ObservationEnvelope>`
+so the eventual 1→N change touches one function and the insert loop rather than
+scattered call sites. The schema already tolerates it: `UNIQUE (device_id, seq,
+time)` includes `time`, so several readings sharing one `seq` don't collide.
 
 **`seq` stays the dedup key.** Its position and width are pinned by the
 receiver's contract, which is a real constraint but an inert one: `seq` cannot

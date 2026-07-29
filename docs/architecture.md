@@ -107,7 +107,7 @@ Selected over Thread and ZigBee because:
 - **SDC feature gates** (all build-time opt-ins): `support_ext_adv()` + `support_le_coded_phy()` on the sensor; `support_ext_scan()` + `support_le_coded_phy()` on the receiver. Extended advertising / coded PHY / extended scanning symbols exist **only in the multirole SDC library**, selected by enabling both `peripheral` and `central` cargo features on `nrf-sdc`.
 - **Burst**: 20 ms advertising interval, advertiser held ~400 ms → ~20 events per burst. Each event's payload (`AUX_ADV_IND`) hops to a different data channel, so a burst samples ~20 frequencies — repetition is *frequency diversity* against indoor multipath, not just insurance. (Consequence: per-packet RSSI legitimately swings ±10-15 dB indoors; judge medians, never single readings.)
 - **Burst cadence**: ~0.5 s during benchmarking; production target 1-5 min with System OFF sleep between bursts.
-- **Payload**: `ManufacturerSpecificData` (company ID `0xFFFF` during testing) carrying `SensorPacket` — since 2026-07-25 the **TV measurement encoding** below (`[seq: u32][id][value]…`, 13 B with today's three measurements, capped at `MAX_WIRE_LEN` = 252; 16 B once v0.6's magic + version header lands). Extended advertising allows up to 254 B — required headroom for the planned AEAD (payload + 16 B tag never fit legacy's 31 B). Company ID `0xFFFF` is the Bluetooth SIG *test* identifier, so the airspace is shared with every unbranded dev board in range: treat anything arriving on it as untrusted input.
+- **Payload**: `ManufacturerSpecificData` (company ID `0xFFFF` during testing) carrying `SensorPacket` — since 2026-07-25 the **TV measurement encoding** below (`[magic][ver][seq: u32][id][value]…` since v0.6, 16 B on air with today's three measurements, capped at `MAX_WIRE_LEN` = 252). Extended advertising allows up to 254 B — required headroom for the planned AEAD (payload + 16 B tag never fit legacy's 31 B). Company ID `0xFFFF` is the Bluetooth SIG *test* identifier, so the airspace is shared with every unbranded dev board in range: treat anything arriving on it as untrusted input.
 - **Device identity**: the advertising address (AdvA), a random static address derived from FICR `DEVICEADDR` — the packet carries no identity field of its own. *(DeviceAddr refactor, 2026-07 — replaces the earlier FICR-`DEVICEID`-in-payload design.)*
 
 ### Reliability
@@ -171,9 +171,9 @@ Tradeoffs that informed the decision to stay on BLE for now:
 > encoding), sensor firmware, receiver firmware, gateway (`frame::parse`
 > decoder + opaque-payload MQTT envelope) and API (envelope subscription → TV
 > decode → TimescaleDB, with nullable metric columns and a
-> `UNIQUE (device_id, seq, time)` constraint). Protocol v0.5 — see
-> [protocol.md](protocol.md). Next on the wire: **v0.6's air-packet magic +
-> version header** (designed 2026-07-29, not implemented), then AEAD.
+> `UNIQUE (device_id, seq, time)` constraint). Protocol **v0.6** as of 2026-07-29,
+> which added the air-packet magic + version header — see
+> [protocol.md](protocol.md). Next on the wire: AEAD.
 
 The fixed `SensorPacket` struct is replaced by a **per-measurement TV
 encoding** — *type–value*: each field is a measurement ID followed directly
@@ -188,9 +188,17 @@ long-range embedded-Rust node + dongle vertical, not the backend).
 
 - **Air packet**: `[seq: u32][id][data][id][data]…` — `seq` stays a fixed
   cleartext header (dedup / replay / AEAD nonce); each measurement is a
-  1-byte ID + value. *(v0.6 prepends `[magic b"HM"][ver: u8]`; the magic is
+  1-byte ID + value. *(v0.6 prepends `[magic b"HP"][ver: u8]` — landed 2026-07-29; the magic is
   air-side only and stripped by the receiver, `ver` travels downstream. See
-  [protocol.md](protocol.md#planned-v06--air-packet-magic--version-header).)*
+  [protocol.md](protocol.md#air-packet-magic--version-header).)*
+- **Three axes of change, three mechanisms** — the rule that keeps them from
+  colliding: a new *metric* is a **new measurement ID**; a new *body layout*
+  (batching, encryption, a packet-type byte) is a **`ver` bump**; a change to
+  the dongle-visible *prefix* (`magic`/`ver`/`seq`) is a **new magic**, because
+  the receiver never reads `ver` and so a bump could not reach it. Nothing
+  needs two of these at once, and reaching for the wrong one is the signal that
+  a design has drifted. Full charter in
+  [protocol.md](protocol.md#the-version-charter).
 - **Measurement ID registry in `common`**: each ID binds semantics + wire
   representation + scale + unit (e.g. *temperature = i16, ×0.01 °C*). The ID
   implies the length — no per-field length byte. Repr/scale are fixed per ID
@@ -209,7 +217,7 @@ long-range embedded-Rust node + dongle vertical, not the backend).
   the sensor; only the API decodes. Adding a measurement type touches
   firmware + API + one DB migration — never the receiver, gateway, frame
   format, or topics. (Consequence: the USB-CDC frame becomes variable-length
-  — protocol v0.5.)
+  — protocol v0.5; the magic + version header followed in v0.6.)
 - **Node variants dissolve**: a node advertises whatever its populated
   sensors measured this cycle; "SHT45+BMP581 node" is not a named layout
   anywhere downstream. Cargo features select drivers, nothing else.
@@ -305,7 +313,7 @@ A dedicated **nRF52840 dongle** runs BLE scanning firmware and exposes received 
 2. **Dedup**: an `LruCache<DeviceAddr, u32, 32>` on `seq` collapses each ~20-event burst into one forwarded packet
 3. **Forward**: emit framed packets to the Pi over USB-CDC (magic + payload + CRC; see [protocol.md](protocol.md))
 
-The dongle is **version-blind and stays that way**. Planned for v0.6: check the air-packet magic and strip it before forwarding, and nothing else. Two reasons it must not check `ver`: the magic is a constant so filtering on it never forces a reflash, whereas a version check would make every protocol bump a dongle reflash — and one dongle is destined for the far end of the two-house VPN. More importantly, a node still on old firmware has to stay *visible*: dropped at the dongle it would vanish with no signal, indistinguishable from a dead battery; forwarded, the API names it and the version it's stuck on. Rejection belongs where redeploys are cheap.
+The dongle is **version-blind and stays that way**. Since v0.6 it checks the air-packet magic and strips it before forwarding, and does nothing else with the contents. Two reasons it must not check `ver`: the magic is a constant so filtering on it never forces a reflash, whereas a version check would make every protocol bump a dongle reflash — and one dongle is destined for the far end of the two-house VPN. More importantly, a node still on old firmware has to stay *visible*: dropped at the dongle it would vanish with no signal, indistinguishable from a dead battery; forwarded, the API names it and the version it's stuck on. Rejection belongs where redeploys are cheap.
 
 The magic check also protects the dedup cache, which is the non-obvious cost of forwarding noise: with 32 slots keyed by `AdvA` and no structural gate in front of them, foreign `0xFFFF` advertisers evict real sensors, and an evicted sensor's next burst forwards all ~20 events instead of one.
 
@@ -467,9 +475,9 @@ Rationale:
 15. ⏳ **Receiver/gateway plumbing tightening** — real VID/PID (pid.codes) instead of embassy's `0xc0de:0xcafe` placeholder, udev match on FICR serial, `TAG+="systemd"` device unit + `BindsTo=` so the gateway container's lifecycle follows the dongle (replug-safe), `ID_MM_DEVICE_IGNORE`.
 16. ⏳ **Sensor drivers** — ✅ SHT45 over async TWIM (`sht4x` crate); ⏳ BMP581 (`bmp5` async crate) on the designated indoor barometer node; optional LTR390 on the outdoor node.
 17. ⏳ **Watchdog + XIAO alkaline soak test** — watchdog first (probe-less panic = silent HardFault spin that drains the pack), then the unattended reliability/longevity baseline on 2× AA alkaline.
-18. 🔶 **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① ✅ **DeviceAddr refactor** (identity = AdvA, protocol v0.4); ② ✅ **TV measurement encoding** (protocol v0.5) — measurement-ID registry in `common`, sensor TV encode, receiver variable-length frames + opaque forwarding (2026-07-25), gateway `frame::parse` decoder + opaque MQTT envelope (2026-07-26), API TV decode + nullable metric columns + `UNIQUE (device_id, seq, time)` (2026-07-28); ③ ✅ **seq persistence** on the sensor (flash checkpoint with jump-ahead — `seq_counter.rs`; retained-RAM part joins with sleep optimization); ④ ⏳ **v0.6 air-packet header** — `[magic b"HM"][ver: u8]` in front of `seq`; receiver checks + strips the magic and stays version-blind, API dispatches on `ver` (see below); ⑤ ⏳ **ChaCha20-Poly1305 AEAD** — encrypt the TV section on the sensor, `device_addr`+`ver`+`seq` as AAD, forward opaquely, **decrypt in the API**. Fits extended advertising's 254 B budget (never fit legacy's 31 B).
+18. 🔶 **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① ✅ **DeviceAddr refactor** (identity = AdvA, protocol v0.4); ② ✅ **TV measurement encoding** (protocol v0.5) — measurement-ID registry in `common`, sensor TV encode, receiver variable-length frames + opaque forwarding (2026-07-25), gateway `frame::parse` decoder + opaque MQTT envelope (2026-07-26), API TV decode + nullable metric columns + `UNIQUE (device_id, seq, time)` (2026-07-28); ③ ✅ **seq persistence** on the sensor (flash checkpoint with jump-ahead — `seq_counter.rs`; retained-RAM part joins with sleep optimization); ④ ✅ **v0.6 air-packet header** (2026-07-29) — `[magic b"HP"][ver: u8]` in front of `seq`; receiver checks + strips the magic and stays version-blind, API dispatches on `ver`; ⑤ ⏳ **ChaCha20-Poly1305 AEAD** — encrypt the TV section on the sensor, `device_addr`+`ver`+`seq` as AAD, forward opaquely, **decrypt in the API**. Fits extended advertising's 254 B budget (never fit legacy's 31 B).
 
-    **Do ④ before ⑤, and soon.** One node is in the field, which is the cheapest the fleet will ever be to migrate, and AEAD is easier to land against a header that is already final. The three bytes cost ~192 µs of extra airtime per advertising event — about 1 % of the ~400 ms the radio is already on per burst.
+    ④ landed before ⑤ deliberately: one node in the field is the cheapest the fleet will ever be to migrate, and AEAD is easier against a header that is already final. The three bytes cost ~192 µs of extra airtime per advertising event — about 1 % of the ~400 ms the radio is already on per burst.
 19. ⏳ **Sleep & power optimization** — System OFF + RTC wakeup between bursts. Gate sensor rail power during sleep. Measure with PPK2.
 20. ⏳ **Provisioning** *(plan settled 2026-07-20 — see `NOTES-provisioning.md`)* — `homescope-provision` workstation CLI (probe-rs: FICR read → API registration → UICR key write → verify → flash), admin-authenticated `POST /devices` key issuance in the API, and envelope-encrypted device keys at rest (KEK in API secrets). Device identity needs no provisioning — the advertising address is FICR-sourced.
 21. ⏳ **Decoded-readings republish** — API republishes verified+deduped readings as plain JSON (or HA MQTT discovery) for external consumers; the integration surface. Optional, after AEAD.

@@ -83,7 +83,7 @@ Idempotent — creates the `homescope` user, installs the udev rule and quadlets
 
 ## Wire protocol (receiver → gateway)
 
-Variable-length, content-agnostic frames over USB-CDC (protocol v0.5, 6 + N bytes):
+Variable-length, content-agnostic frames over USB-CDC (protocol v0.6, 6 + N bytes):
 
 ```text
 +--------+--------+---------------+----------------------+---------------+
@@ -91,11 +91,11 @@ Variable-length, content-agnostic frames over USB-CDC (protocol v0.5, 6 + N byte
 +--------+--------+---------------+----------------------+---------------+
 ```
 
-CRC is CRC-16/IBM-SDLC over len + payload. The payload is a `SensorObservation` — receiver-observed metadata (advertising address, age, RSSI) plus the over-the-air `SensorPacket` forwarded **opaquely**: `[seq: u32][measurement-id][value]…`, the TV encoding whose ID registry lives in `common`. Both ends share the codec via `common` (`frame::encode`/`frame::parse` + an `Encode` trait for payloads). See [docs/protocol.md](docs/protocol.md) for the full spec, including the planned AEAD step.
+CRC is CRC-16/IBM-SDLC over len + payload. The payload is a `SensorObservation` — receiver-observed metadata (advertising address, age, RSSI) plus the over-the-air `SensorPacket` forwarded **opaquely**: `[ver: u8][seq: u32][measurement-id][value]…`, the TV encoding whose ID registry lives in `common`. Both ends share the codec via `common` (`frame::encode`/`frame::parse` + an `Encode` trait for payloads). See [docs/protocol.md](docs/protocol.md) for the full spec, including the planned AEAD step.
 
 The gateway republishes each observation as an opaque JSON envelope on MQTT (`homescope/sensors/<device-addr>/envelope`): cleartext `deviceAddr`/`rssi`/`receivedAt` plus the air packet as base64, decoded only by the API.
 
-**Next on the wire (v0.6, designed but not implemented)**: the air packet gains a `[magic b"HM"][ver: u8]` header in front of `seq`. The magic is air-side only — the receiver checks it, drops foreign `0xFFFF` traffic before it can evict real sensors from the 32-entry dedup cache, and strips it — while `ver` travels downstream for the API to dispatch on. The dongle deliberately never reads `ver`, so a protocol bump never means reflashing it, and a node left on old firmware stays visible instead of vanishing. See [docs/protocol.md](docs/protocol.md#planned-v06--air-packet-magic--version-header).
+**Air-packet header (v0.6, landed 2026-07-29)**: the air packet carries a `[magic b"HP"][ver: u8]` header in front of `seq`. The magic is air-side only — the receiver checks it, drops foreign `0xFFFF` traffic before it can evict real sensors from the 32-entry dedup cache, and strips it — while `ver` travels downstream for the API to dispatch on. The dongle deliberately never reads `ver`, so a protocol bump never means reflashing it, and a node left on old firmware stays visible instead of vanishing. See [docs/protocol.md](docs/protocol.md#air-packet-magic--version-header).
 
 ## Status
 
@@ -107,7 +107,8 @@ The gateway republishes each observation as an opaque JSON envelope on MQTT (`ho
 - ✅ Deployment: Podman quadlets + CI images (ghcr.io) + idempotent deploy script
 - ✅ Hardware: Raytac MDBT50Q-DB-40 survey passed → custom PCB with MDBT50Q-1MV2 is next
 - ✅ **TV measurement encoding (protocol v0.5) — complete end to end** (2026-07-28): ID registry in `common`, sensor encode, receiver opaque forwarding + persisted seq counters, gateway `frame::parse` decoder + opaque envelope, API decode
-- ⏳ Protocol v0.6: air-packet magic + version header (designed, not implemented) → then per-device ChaCha20-Poly1305 AEAD (decrypt in the API; gateways stay keyless; integrations fed by an API republish of verified readings)
+- ✅ Protocol v0.6: air-packet magic + version header (receiver filters + strips the magic; API dispatches on `ver`)
+- ⏳ Next: per-device ChaCha20-Poly1305 AEAD (decrypt in the API; gateways stay keyless; integrations fed by an API republish of verified readings)
 - ⏳ S=8 coding refactor (raw HCI `LeSetExtAdvParamsV2`)
 - ⏳ Ingest durability (per-device seq monotonicity, manual MQTT acks), graceful shutdown, site topology + broker ACLs
 - ⏳ Sleep/power optimization (System OFF + RTC wakeup), watchdog, BMP581/LTR390 drivers

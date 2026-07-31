@@ -1,3 +1,28 @@
+//! Flash-checkpointed monotonic packet counter.
+//!
+//! Two-page circular append log of "reserved until" ceilings; on boot the
+//! counter resumes at the highest ceiling seen rather than at the last value
+//! issued, so a reboot always jumps *forward*, never back.
+//!
+//! # This counter is load-bearing for the AEAD nonce
+//!
+//! `common`'s `packet::cipher` derives the ChaCha20-Poly1305 nonce directly
+//! from `seq`, with no random component. That is only sound because this
+//! module guarantees `seq` never repeats and never rewinds for a given device
+//! — key material is per-device, so `seq` is the sole source of nonce
+//! uniqueness.
+//!
+//! Nonce reuse under one key is not a degradation, it is a collapse: it costs
+//! confidentiality *and* unforgeability, retroactively, for every packet
+//! sharing the nonce. A counter that restarted at zero after a battery swap
+//! would reuse every nonce it had already issued.
+//!
+//! So the jump-ahead is a **security** property, not a wear-levelling
+//! convenience. Any change that could let `next_seq` go backwards — shrinking
+//! `RESERVATION_BLOCK`, resuming from the last issued value, reusing the
+//! region — must be checked against `common/src/packet/cipher.rs::nonce`
+//! first.
+
 use nrf_sdc::mpsl::{Flash, FlashError};
 
 unsafe extern "C" {

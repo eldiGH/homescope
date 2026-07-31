@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-homescope-common = { workspace = true, features = ["serde", "codec"]}
+homescope-common = { workspace = true, features = ["serde", "codec", "crypto"]}
 homescope-host-util = { workspace = true }
 
 anyhow = "1.0.103"

@@ -1,9 +1,40 @@
-# Scanner-to-gateway wire protocol — v0.6 (prototype)
+# Scanner-to-gateway wire protocol — v0.7 (prototype)
 
-> **Status: prototype, v0.6 — complete end to end** (2026-07-29). `common`,
-> the sensor firmware, the receiver firmware, the gateway (decoder loop over
-> `frame::parse` plus the opaque-payload MQTT envelope) and the API (envelope
-> subscription → TV decode → TimescaleDB) all speak v0.6. **AEAD is next.**
+> **Status: prototype, v0.7 — complete end to end, validated on hardware**
+> (2026-07-31). The sensor seals, the API opens, and readings land in
+> TimescaleDB; confirmed live with a BLE sniffer (header readable through
+> `seq`, body opaque past it). The **receiver and gateway needed no changes at
+> all** — they never touch the body, and the commit that added encryption has
+> an empty diff for `gateway/`.
+>
+> ⚠️ **All nodes currently share one hardcoded key**, compiled into both the
+> sensor and the API. That is a bring-up shortcut, not the design: it buys
+> integrity against outsiders but nothing between devices, and the key is in
+> git. Replaced by per-device UICR keys — see
+> [Planned: key provisioning](#planned-key-provisioning). Remaining after
+> that: KEK-wrapped keys at rest, then the `homescope-provision` CLI.
+>
+> **Decided 2026-07-31 — AEAD does *not* bump `ver`; it stays 1.** The
+> [charter](#when-to-bump) lists encryption as a body-layout change, so this
+> is a deliberate exception. The rule exists to stop an old parser silently
+> misreading new bytes, and here there is no old parser to protect: nothing
+> was deployed, and AEAD is a hard cutover with no dual-accept window, so a
+> bump would mark a boundary no device can ever be on the wrong side of.
+> Version 1 therefore means *sealed* TV body; no plaintext-body version was
+> ever in the field. (Incidentally the misparse could not have happened
+> anyway: every measurement is 3 bytes, so a plaintext body is always `3n`
+> while a sealed one is `3n + 16` — never a multiple of 3, so the TV walk
+> always ends `Truncated`. That is arithmetic luck, not design, and it
+> evaporates the day a measurement of a different width is minted.)
+>
+> **Changes since v0.6:** the TV section is sealed with **ChaCha20-Poly1305**
+> under a per-device key. The air packet becomes
+> `[magic][ver][seq][ciphertext][tag: 16]`; `ver` and `seq` stay cleartext and
+> are bound as associated data along with `device_addr`. Packet grows 16 → 32
+> bytes with today's three measurements; frames 31 → 47. `SensorPacket::encode`
+> and `decode` now require a `PacketCipher`, and both live behind a new
+> `crypto` cargo feature — so a build without it (receiver, gateway) has no
+> `decode` method at all. See [AEAD](#aead-chacha20-poly1305-decrypt-in-the-api).
 >
 > **Changes since v0.5:** the air packet gained a two-byte **magic** (`b"HP"`,
 > air-side only — the receiver checks and strips it) and a one-byte **version**
@@ -11,7 +42,9 @@
 > `SensorPacket::parse` handles only that prefix and stays version-blind;
 > `SensorPacket::decode` dispatches on `ver` and yields the canonical
 > `Metrics`. Air packet grows 13 → 16 bytes with today's three measurements;
-> frames 30 → 33. See [the version charter](#the-version-charter).
+> frames 30 → 31 (the frame grows by only one byte, not three: `ver` is added
+> but the receiver strips the two-byte magic before framing). See
+> [the version charter](#the-version-charter).
 >
 > **Changes since v0.4:** the fixed `SensorPacket` struct is replaced by the
 > **TV measurement encoding** (type–value; see below), which makes the air
@@ -62,8 +95,12 @@ types plug in via the `Encode` trait).
 - **CRC (last 2 bytes):** CRC-16/IBM-SDLC over **length + payload** (bytes 2..4+N; magic excluded, length field covered — a corrupted length is detectable). Little-endian on the wire.
 
 Frame overhead is 6 bytes (`frame::OVERHEAD`). With today's observation
-(11-byte header + 16-byte air packet = 27-byte payload) a frame is 33 bytes;
+(11-byte header + 30-byte packet = 41-byte payload) a frame is **47 bytes**;
 the observation's maximum payload is 263 bytes (frame max: 269).
+
+The packet is 30 bytes here, not the 32 seen on air: the receiver strips the
+two-byte magic before framing, so what travels downstream is
+`[ver][seq][ciphertext][tag]`.
 
 ## CRC algorithm
 
@@ -109,10 +146,20 @@ of the BLE `ManufacturerSpecificData` AD structure (company ID `0xFFFF`
 during development), forwarded opaquely inside the observation:
 
 ```
-+--------+-----------------+------+---------+------+---------+----
-| ver    | seq (u32 LE)    | id   | value   | id   | value   | …
-+--------+-----------------+------+---------+------+---------+----
-  [0]      [1..5]            1 B    ID-implied length each
++--------+-----------------+------------------------------+----------+
+| ver    | seq (u32 LE)    | ciphertext(TV section)       | tag (16) |
++--------+-----------------+------------------------------+----------+
+  [0]      [1..5]            [5..len-16]                    trailing
+  \_________ cleartext, AAD _/ \________ sealed (AEAD) ______________/
+```
+
+where the TV section, once opened, is:
+
+```
++------+---------+------+---------+----
+| id   | value   | id   | value   | …
++------+---------+------+---------+----
+  1 B    ID-implied length each
 ```
 
 (On air this is preceded by the two-byte magic, which the receiver strips —
@@ -511,43 +558,120 @@ revisited: at 1 packet/min CRC16 collides about once per device per 45 days,
 silently dropping a real reading.) Post-AEAD the Poly1305 tag is already a
 per-packet unique value and is the natural key if the change is ever made.
 
-## Planned: AEAD (ChaCha20-Poly1305, decrypt in the API)
+## AEAD (ChaCha20-Poly1305, decrypt in the API)
 
-Settled 2026-07-16 (see `NOTES-packet-tv-aead.md`), layered on top of v0.6.
-The TV section becomes the ciphertext; the `ver` + `seq` header stays
-cleartext:
+Settled 2026-07-16 (see `NOTES-packet-tv-aead.md`), implemented in `common` on
+2026-07-31 ([common/src/packet/cipher.rs](../common/src/packet/cipher.rs)).
+The TV section is the ciphertext; the `ver` + `seq` header stays cleartext.
 
-- Air packet becomes `[magic][ver][seq: u32][ciphertext: N][tag: 16 B]`; the
-  cleartext context (`device_addr` from AdvA + `ver` + `seq`) is bound as
-  **associated data**, so a valid ciphertext can't be grafted onto another
-  device, version or seq. `ver` *must* be in the AAD or it is flippable.
-  The magic is **not** in the AAD — it is a constant both sides already know,
-  so it contributes nothing, and it isn't transmitted past the receiver.
-- Nonce is derived deterministically from the persisted `seq` (no random
-  component — safe because keys are per-device and seq never repeats).
-- **The USB-CDC frame and MQTT envelope shapes don't change** — the opaque
-  packet blob just becomes ciphertext + tag. Receiver and gateway stay
-  keyless and unmodified; only firmware (encrypt) and API (decrypt) change.
+### Construction
+
+| | |
+|---|---|
+| algorithm | ChaCha20-Poly1305 (96-bit nonce, 128-bit tag) |
+| key | 32 B, **per device**; sensor side in UICR, API side in `devices` |
+| nonce | `seq` (u32 LE) in the low 4 bytes, remaining 8 zero |
+| AAD | `device_addr (6) ‖ ver (1) ‖ seq (4 LE)` — 11 bytes |
+| sealed | the TV section only |
+| tag | 16 B, trailing the ciphertext |
+
+**What the AAD buys.** Each field blocks one substitution an attacker could
+otherwise make while leaving the ciphertext intact and valid:
+
+- `device_addr` — replaying one device's packet as another's
+- `ver` — feeding an authentic body to a different version's decoder
+- `seq` — re-labelling a stale reading as a fresh one
+
+`ver` *must* be in the AAD or it is flippable, which matters the moment a
+second version exists. The **magic is deliberately excluded**: it is constant,
+so an attacker cannot vary it to any effect, and the receiver strips it — so
+including it would only oblige the API to re-materialise bytes it never
+receives.
+
+**Why the nonce needs no random component.** Keys are per-device, so `seq`
+alone makes nonces unique within a keyspace — *provided* `seq` never repeats
+or rewinds. That is not a property of the crypto layer; it is enforced by the
+sensor's flash checkpoint with jump-ahead
+([seq_counter.rs](../firmware/sensor/src/seq_counter.rs)). Nonce reuse under
+one key destroys confidentiality *and* unforgeability retroactively, so that
+counter is a security component and both files carry a comment saying so.
+
+### Layering
+
+Decryption happens in `packet::decode`, **above** the `ver` dispatch and
+outside the version modules. Two consequences worth keeping:
+
+- The version modules (`packet::v1`) stay keyless, so their golden tests pin
+  literal wire bytes rather than a key.
+- Everything past authentication concerns a genuinely authentic packet, which
+  is what makes the errors actionable: a failed tag says *re-provision this
+  device*, `UnsupportedVersion` says *reflash it*. If `ver` were rejected
+  before the tag was checked, that diagnostic would be reporting on noise.
+
+`decode` copies the body into a fixed-size stack scratch buffer (no `alloc`,
+bounded by `MAX_WIRE_LEN`), so a `SensorPacket` can keep a shared borrow and
+`parse` stays usable on the receiver's immutable scan buffer.
+
+### What does not change
+
+**The USB-CDC frame and MQTT envelope shapes are untouched** — the opaque
+packet blob is simply ciphertext + tag now. The receiver and gateway need no
+code changes and hold no keys; only the sensor (encrypt) and the API
+(decrypt) do.
+
+This is enforced rather than trusted: the cipher lives behind a `crypto` cargo
+feature that the receiver and gateway do not enable, so in their builds
+`SensorPacket` has no `decode` method to call.
+
+### Cutover
+
+AEAD is a **hard switch with no dual-accept window** — a sealed packet is
+unreadable to an old API and a plaintext packet fails authentication at a new
+one. With one node in the field this is just "flash both"; that is exactly why
+the v0.6 magic + version header landed first, while the fleet was at its
+cheapest to migrate.
+
+## Planned: key provisioning
+
+Per-device keys are generated once by the API and burned into the sensor's
+UICR (`CUSTOMER[0..7]`) by a workstation CLI — see `NOTES-provisioning.md`.
+Until that exists, bring-up uses **one hardcoded key** on both ends (a const
+in the sensor, a row inserted by hand) so the crypto path can be proven
+end to end without the provisioning tool. That shortcut must not reach a
+deployment.
+
+API-side, keys are stored **envelope-encrypted**: the DB holds each device key
+sealed under a KEK that lives in the API's secrets, so a leaked backup is not
+a leaked fleet. The property is that DB contents alone are useless, and the
+operational payoff is that rotating the KEK re-wraps N rows instead of
+requiring a probe and an open enclosure per node.
 
 ## Known limitations (will change in future versions)
 
-- **No encryption yet.** The air packet is plaintext TV data and anything in
-  radio range can forge well-formed packets (company ID `0xFFFF` is shared).
-  Acceptable during development; fixed by the AEAD step. Note the v0.6 magic
-  filters *accidental* collisions only — about 1 in 65536 of random foreign
-  traffic still passes, and anyone can transmit the constant deliberately.
-  It is a noise filter, never an authenticity check.
-- **No version field yet** (arriving in v0.6). Today, bumping the format means
-  updating both ends together — they share `common`, so version skew is a
-  deploy-ordering concern rather than a code one. The gap is visible right
-  now: a node still running pre-v0.5 firmware emits `[seq][temp][rh][batt]`,
-  whose `seq` happens to land at the same offset, so the receiver forwards it
-  and the API parses byte 4 (the low byte of `temp_cdegc`) as a measurement
-  ID. That is almost always an unknown ID and the packet is rejected — but
-  only *almost*: it decodes cleanly into plausible stored values when the
-  temperature's low byte and the humidity's high byte both happen to fall in
-  `1..=3`, i.e. below roughly 10 %RH. Indoors that never fires. That is luck,
-  not design, and it is what the version byte exists to end.
+- **One key for the whole fleet, and it is in git.** Bring-up uses a hardcoded
+  constant on both ends rather than per-device UICR keys. Outsiders still
+  cannot forge readings, but every node can impersonate every other node, and
+  anyone with repository access can forge for all of them. Fixed by
+  [provisioning](#planned-key-provisioning) — the next step.
+- **Nothing authenticates the sender of a *frame*.** The AEAD covers the air
+  packet; the USB-CDC framing and the MQTT envelope around it are unprotected,
+  so a compromised gateway can drop, delay or duplicate observations at will.
+  It cannot fabricate a reading (no key), which is the property that lets
+  gateways stay keyless — but availability is entirely in its hands. The v0.6
+  magic remains an accidental-collision filter, never an authenticity check.
+- **The `seq` counter is not yet checked for replay.** AEAD stops an attacker
+  *forging* a packet, but a captured one can still be re-transmitted verbatim
+  — the tag is valid and the AAD matches, because nothing about it was
+  altered. Replay is defeated by the per-device monotonic `seq` check in the
+  API, which does not exist yet (see `NOTES-ingest-db-error-handling.md`; the
+  `UNIQUE (device_id, seq, time)` constraint added 2026-07-28 covers MQTT
+  redelivery but not a deliberate replay at a later timestamp). Until that
+  lands, treat authenticity as "this came from the device at some point",
+  not "this is current".
+- **Cleartext observation metadata is unauthenticated.** `rssi`, `age_ms` and
+  `received_at` are stamped by the receiver and gateway, *after* the sensor
+  sealed the packet, so they cannot be covered by the tag. Nothing
+  security-relevant may depend on them.
 - **No frame-level (USB-CDC) version field.** The frame layer is versioned by
   this document only; v0.6's version byte lives in the air packet, which is
   the layer whose producers are flashed firmware in the field.

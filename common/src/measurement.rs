@@ -4,9 +4,11 @@ use crate::wire::{BufferTooSmall, CentiCelsius, CentiPercent, Millivolts, Trunca
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 #[error("unknown MeasurementId: {0:#04x}")]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct MeasurementIdUnknownError(pub u8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DecodeError {
     #[error(transparent)]
     Truncated(#[from] Truncated),

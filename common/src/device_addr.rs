@@ -1,8 +1,12 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct DeviceAddr(pub [u8; 6]);
+pub struct DeviceAddr(pub Inner);
+
+type Inner = [u8; 6];
 
 impl DeviceAddr {
+    pub const SIZE: usize = size_of::<Inner>();
+
     pub fn encode_hex<'a>(&self, buf: &'a mut [u8; 12]) -> &'a str {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
 

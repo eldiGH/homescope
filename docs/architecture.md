@@ -107,7 +107,7 @@ Selected over Thread and ZigBee because:
 - **SDC feature gates** (all build-time opt-ins): `support_ext_adv()` + `support_le_coded_phy()` on the sensor; `support_ext_scan()` + `support_le_coded_phy()` on the receiver. Extended advertising / coded PHY / extended scanning symbols exist **only in the multirole SDC library**, selected by enabling both `peripheral` and `central` cargo features on `nrf-sdc`.
 - **Burst**: 20 ms advertising interval, advertiser held ~400 ms → ~20 events per burst. Each event's payload (`AUX_ADV_IND`) hops to a different data channel, so a burst samples ~20 frequencies — repetition is *frequency diversity* against indoor multipath, not just insurance. (Consequence: per-packet RSSI legitimately swings ±10-15 dB indoors; judge medians, never single readings.)
 - **Burst cadence**: ~0.5 s during benchmarking; production target 1-5 min with System OFF sleep between bursts.
-- **Payload**: `ManufacturerSpecificData` (company ID `0xFFFF` during testing) carrying `SensorPacket` — since 2026-07-25 the **TV measurement encoding** below (`[magic][ver][seq: u32][id][value]…` since v0.6, 16 B on air with today's three measurements, capped at `MAX_WIRE_LEN` = 252). Extended advertising allows up to 254 B — required headroom for the planned AEAD (payload + 16 B tag never fit legacy's 31 B). Company ID `0xFFFF` is the Bluetooth SIG *test* identifier, so the airspace is shared with every unbranded dev board in range: treat anything arriving on it as untrusted input.
+- **Payload**: `ManufacturerSpecificData` (company ID `0xFFFF` during testing) carrying `SensorPacket` — since 2026-07-25 the **TV measurement encoding** below (`[magic][ver][seq: u32][id][value]…` since v0.6, 16 B on air with today's three measurements, capped at `MAX_WIRE_LEN` = 252). Since v0.7 the TV section is AEAD-sealed (32 B on air). Extended advertising allows up to 254 B — the headroom that made this possible; payload + 16 B tag never fit legacy's 31 B. Company ID `0xFFFF` is the Bluetooth SIG *test* identifier, so the airspace is shared with every unbranded dev board in range: treat anything arriving on it as untrusted input.
 - **Device identity**: the advertising address (AdvA), a random static address derived from FICR `DEVICEADDR` — the packet carries no identity field of its own. *(DeviceAddr refactor, 2026-07 — replaces the earlier FICR-`DEVICEID`-in-payload design.)*
 
 ### Reliability
@@ -235,15 +235,19 @@ long-range embedded-Rust node + dongle vertical, not the backend).
 
 ### Threat model
 
-- **Confidentiality**: nobody reads our sensor values
-- **Integrity**: nobody can forge plausible-looking readings
-- **Replay**: nobody can capture an advertisement and re-broadcast it later
+- **Confidentiality**: nobody reads our sensor values — ✅ as of 2026-07-31
+- **Integrity**: nobody can forge plausible-looking readings — ✅ against outsiders; ⚠️ not *between* devices until per-device keys replace the shared bring-up key
+- **Replay**: nobody can capture an advertisement and re-broadcast it later — ⏳ **not yet**. AEAD does nothing here: a captured packet re-sent verbatim has a valid tag and matching AAD, because nothing about it was altered. Replay is defeated by the API's per-device monotonic `seq` check, which is still outstanding (roadmap 13).
 
 Note that the primary value is **authenticity**, not confidentiality: without the AEAD tag, anything in radio range emitting a well-formed packet gets written to the database. Confidentiality (occupancy patterns leak from T/H data) is the secondary win — and ChaCha20-Poly1305 provides both for the same 16-byte cost.
 
 ### Mechanism: ChaCha20-Poly1305 AEAD with per-device keys
 
-Each sensor has a **unique 32-byte ChaCha20-Poly1305 key** baked into firmware at flash time. Per-device (not network-wide) so extracting one device's firmware does not compromise the rest.
+Each sensor has a **unique 32-byte ChaCha20-Poly1305 key**, held in the chip's UICR and written once at provisioning time (see [Key provisioning](#key-provisioning) — one firmware binary serves the whole fleet). Per-device rather than network-wide, so extracting one device's key does not compromise the rest.
+
+**Status (2026-07-31): live end to end.** The sensor seals, the API opens, readings land in TimescaleDB; verified on hardware with a BLE sniffer (header readable through `seq`, body opaque past it). `packet::cipher` is covered by round-trip, tamper, per-AAD-field, verify-before-decrypt and known-answer tests. ⚠️ **All nodes currently share one hardcoded key** compiled into both ends — a bring-up shortcut that gives integrity against outsiders but none between devices. Remaining: per-device UICR keys via `homescope-provision`, then KEK-wrapped storage.
+
+**Keyless intermediaries are enforced, not just intended.** The cipher sits behind a `crypto` cargo feature that the receiver and gateway do not enable, so in their builds `SensorPacket` exposes only `parse` and `strip_air_magic` — there is no `decode` method to call and no key type to hold. The architectural decision is checked by the compiler.
 
 ### Payload layout *(revised 2026-07-16 with the TV redesign — see `NOTES-packet-tv-aead.md`)*
 
@@ -265,6 +269,8 @@ The plaintext header + opaque blob structure carries through the whole pipeline:
 ### Seq persistence (prerequisite — sensor side)
 
 Nonce reuse under the same key is catastrophic for ChaCha20-Poly1305, and reboots (battery swap, watchdog reset, panic) would restart a RAM-only counter at 0. **Implemented (2026-07, sensor `seq_counter.rs`)**: a flash checkpoint (two-page circular append log of `u32` ceilings, reservation block 1024) with **jump-ahead on boot** (`resume at checkpoint + N`, never backwards); retained-RAM counter across System OFF wake cycles joins when sleep optimization lands. At a 60 s cadence and N=1024 that's one flash write per ~17 h against a 10k-cycle page endurance — decades of margin. This also fixes the "reboots reset seq" caveat in the API's monotonic replay/dedup check.
+
+Because the nonce is derived from `seq` with no random component, this counter is a **security component, not a wear-levelling convenience**: `seq` is the sole source of nonce uniqueness within a device's keyspace, so any change that could let it rewind — resuming from the last issued value, shrinking the reservation block, reusing the region — breaks the crypto rather than merely the bookkeeping. `seq_counter.rs` and `common/src/packet/cipher.rs` each carry a comment pointing at the other; keep both in step.
 
 ### Key provisioning
 
@@ -475,7 +481,7 @@ Rationale:
 15. ⏳ **Receiver/gateway plumbing tightening** — real VID/PID (pid.codes) instead of embassy's `0xc0de:0xcafe` placeholder, udev match on FICR serial, `TAG+="systemd"` device unit + `BindsTo=` so the gateway container's lifecycle follows the dongle (replug-safe), `ID_MM_DEVICE_IGNORE`.
 16. ⏳ **Sensor drivers** — ✅ SHT45 over async TWIM (`sht4x` crate); ⏳ BMP581 (`bmp5` async crate) on the designated indoor barometer node; optional LTR390 on the outdoor node.
 17. ⏳ **Watchdog + XIAO alkaline soak test** — watchdog first (probe-less panic = silent HardFault spin that drains the pack), then the unattended reliability/longevity baseline on 2× AA alkaline.
-18. 🔶 **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① ✅ **DeviceAddr refactor** (identity = AdvA, protocol v0.4); ② ✅ **TV measurement encoding** (protocol v0.5) — measurement-ID registry in `common`, sensor TV encode, receiver variable-length frames + opaque forwarding (2026-07-25), gateway `frame::parse` decoder + opaque MQTT envelope (2026-07-26), API TV decode + nullable metric columns + `UNIQUE (device_id, seq, time)` (2026-07-28); ③ ✅ **seq persistence** on the sensor (flash checkpoint with jump-ahead — `seq_counter.rs`; retained-RAM part joins with sleep optimization); ④ ✅ **v0.6 air-packet header** (2026-07-29) — `[magic b"HP"][ver: u8]` in front of `seq`; receiver checks + strips the magic and stays version-blind, API dispatches on `ver`; ⑤ ⏳ **ChaCha20-Poly1305 AEAD** — encrypt the TV section on the sensor, `device_addr`+`ver`+`seq` as AAD, forward opaquely, **decrypt in the API**. Fits extended advertising's 254 B budget (never fit legacy's 31 B).
+18. 🔶 **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① ✅ **DeviceAddr refactor** (identity = AdvA, protocol v0.4); ② ✅ **TV measurement encoding** (protocol v0.5) — measurement-ID registry in `common`, sensor TV encode, receiver variable-length frames + opaque forwarding (2026-07-25), gateway `frame::parse` decoder + opaque MQTT envelope (2026-07-26), API TV decode + nullable metric columns + `UNIQUE (device_id, seq, time)` (2026-07-28); ③ ✅ **seq persistence** on the sensor (flash checkpoint with jump-ahead — `seq_counter.rs`; retained-RAM part joins with sleep optimization); ④ ✅ **v0.6 air-packet header** (2026-07-29) — `[magic b"HP"][ver: u8]` in front of `seq`; receiver checks + strips the magic and stays version-blind, API dispatches on `ver`; ⑤ ✅ **ChaCha20-Poly1305 AEAD** (2026-07-31, protocol v0.7) — the sensor seals the TV section, `device_addr`+`ver`+`seq` as AAD, nonce derived from the persisted `seq`; receiver and gateway forward it opaquely and needed **no code changes**, the API decrypts. `ver` deliberately stayed at 1 (nothing deployed, no dual-accept window). The cipher sits behind a `crypto` cargo feature the keyless components don't enable, so they have no `decode` method to call. Fits extended advertising's 254 B budget (never fit legacy's 31 B). ⚠️ Shared hardcoded key until ⑳ provisioning lands.
 
     ④ landed before ⑤ deliberately: one node in the field is the cheapest the fleet will ever be to migrate, and AEAD is easier against a header that is already final. The three bytes cost ~192 µs of extra airtime per advertising event — about 1 % of the ~400 ms the radio is already on per burst.
 19. ⏳ **Sleep & power optimization** — System OFF + RTC wakeup between bursts. Gate sensor rail power during sleep. Measure with PPK2.

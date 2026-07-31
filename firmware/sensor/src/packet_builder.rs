@@ -1,17 +1,24 @@
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use heapless::Vec;
-use homescope_common::{measurement::Measurement, packet::SensorPacket, wire::BufferTooSmall};
+use homescope_common::{
+    measurement::Measurement,
+    packet::{EncodeError, SensorPacket, cipher::PacketCipher},
+};
 use nrf_sdc::mpsl::FlashError;
 
 use crate::seq_counter::SeqCounter;
 
 pub struct PacketBuilder {
     seq_counter: SeqCounter,
+    cipher: PacketCipher,
 }
 
 impl PacketBuilder {
-    pub fn new(seq_counter: SeqCounter) -> Self {
-        Self { seq_counter }
+    pub fn new(seq_counter: SeqCounter, cipher: PacketCipher) -> Self {
+        Self {
+            seq_counter,
+            cipher,
+        }
     }
 
     pub async fn build(
@@ -20,8 +27,12 @@ impl PacketBuilder {
     ) -> Result<PacketBuffer, PacketBuilderError> {
         let mut buffer: PacketBuffer = Vec::from([0; SensorPacket::MAX_AIR_LEN]);
 
-        let buffer_len =
-            SensorPacket::encode_air(self.seq_counter.next().await?, measurements, &mut buffer)?;
+        let buffer_len = SensorPacket::encode_air(
+            self.seq_counter.next().await?,
+            measurements,
+            &mut buffer,
+            &self.cipher,
+        )?;
 
         buffer.truncate(buffer_len);
         Ok(buffer)
@@ -30,19 +41,19 @@ impl PacketBuilder {
 
 #[derive(Clone, Copy, PartialEq, Eq, defmt::Format)]
 pub enum PacketBuilderError {
-    FlashError(FlashError),
-    EncodeError(BufferTooSmall),
+    Flash(FlashError),
+    Encode(EncodeError),
 }
 
 impl From<FlashError> for PacketBuilderError {
     fn from(value: FlashError) -> Self {
-        PacketBuilderError::FlashError(value)
+        PacketBuilderError::Flash(value)
     }
 }
 
-impl From<BufferTooSmall> for PacketBuilderError {
-    fn from(value: BufferTooSmall) -> Self {
-        PacketBuilderError::EncodeError(value)
+impl From<EncodeError> for PacketBuilderError {
+    fn from(value: EncodeError) -> Self {
+        PacketBuilderError::Encode(value)
     }
 }
 

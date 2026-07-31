@@ -59,7 +59,7 @@ async fn handle_envelope(
         return;
     };
 
-    let reading = match SensorReading::try_from(envelope) {
+    let reading = match SensorReading::open_envelope(envelope, &device.cipher) {
         Ok(reading) => reading,
         Err(err) => {
             error!(%err, "invalid packet, dropping");
@@ -67,7 +67,7 @@ async fn handle_envelope(
         }
     };
 
-    if let Err(err) = db::insert_reading(pool, &reading, device.id).await {
+    if let Err(err) = db::insert_reading(pool, &reading, device.device.id).await {
         error!("db error: {err}");
     }
 }

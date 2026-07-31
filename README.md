@@ -91,7 +91,7 @@ Variable-length, content-agnostic frames over USB-CDC (protocol v0.6, 6 + N byte
 +--------+--------+---------------+----------------------+---------------+
 ```
 
-CRC is CRC-16/IBM-SDLC over len + payload. The payload is a `SensorObservation` — receiver-observed metadata (advertising address, age, RSSI) plus the over-the-air `SensorPacket` forwarded **opaquely**: `[ver: u8][seq: u32][measurement-id][value]…`, the TV encoding whose ID registry lives in `common`. Both ends share the codec via `common` (`frame::encode`/`frame::parse` + an `Encode` trait for payloads). See [docs/protocol.md](docs/protocol.md) for the full spec, including the planned AEAD step.
+CRC is CRC-16/IBM-SDLC over len + payload. The payload is a `SensorObservation` — receiver-observed metadata (advertising address, age, RSSI) plus the over-the-air `SensorPacket` forwarded **opaquely**: `[ver: u8][seq: u32][sealed TV section][tag: 16]`, the TV encoding whose ID registry lives in `common`. Both ends share the codec via `common` (`frame::encode`/`frame::parse` + an `Encode` trait for payloads). The TV section is AEAD-sealed on the sensor and opened in the API, so the gateway forwards ciphertext it holds no key for. See [docs/protocol.md](docs/protocol.md) for the full spec.
 
 The gateway republishes each observation as an opaque JSON envelope on MQTT (`homescope/sensors/<device-addr>/envelope`): cleartext `deviceAddr`/`rssi`/`receivedAt` plus the air packet as base64, decoded only by the API.
 

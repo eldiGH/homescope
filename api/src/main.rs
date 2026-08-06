@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<Infallible> {
         sqlx::migrate!().run(&pool).await?;
     }
 
-    let devices = DeviceRegistry::load(pool.clone()).await?;
+    let devices = DeviceRegistry::load(pool.clone(), &config.kek_path).await?;
 
     tokio::select! { r = ingest::run(&config, pool, devices) => {r} }
 }

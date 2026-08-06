@@ -31,6 +31,10 @@
 #[cfg(feature = "serde")]
 extern crate alloc;
 
+pub mod device_addr;
+pub mod measurement;
+pub mod wire;
+
 #[cfg(test)]
 extern crate std;
 
@@ -40,16 +44,13 @@ pub mod packet;
 #[cfg(feature = "codec")]
 pub mod observation;
 
-#[cfg(feature = "serde")]
-pub mod reading;
-
 #[cfg(feature = "codec")]
 pub mod frame;
 
-pub mod device_addr;
-
-pub mod measurement;
-pub mod wire;
-
 #[cfg(feature = "serde")]
 pub mod observation_envelope;
+#[cfg(feature = "serde")]
+pub mod reading;
+
+#[cfg(feature = "crypto")]
+pub mod device_key;

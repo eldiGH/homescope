@@ -26,7 +26,7 @@ use super::AEAD_TAG_SIZE;
 use chacha20poly1305::{AeadInOut, KeyInit, Nonce};
 use thiserror::Error;
 
-use crate::device_addr::DeviceAddr;
+use crate::{device_addr::DeviceAddr, device_key::DeviceKey};
 
 const _: () = assert!(
     AEAD_TAG_SIZE == size_of::<chacha20poly1305::Tag>(),
@@ -45,10 +45,10 @@ impl PacketCipher {
 
     const ASSOCIATED_DATA_SIZE: usize = Self::DEVICE_ADDR_SIZE + Self::SEQ_SIZE + Self::VER_SIZE;
 
-    pub fn new(key: &[u8; 32], device_addr: DeviceAddr) -> Self {
+    pub fn new(key: DeviceKey, device_addr: DeviceAddr) -> Self {
         Self {
             device_addr,
-            cipher: chacha20poly1305::ChaChaPoly1305::new(key.into()),
+            cipher: chacha20poly1305::ChaChaPoly1305::new(key.as_bytes().into()),
         }
     }
 
@@ -174,14 +174,14 @@ mod test {
     const SEQ: u32 = 21;
     const PLAINTEXT: [u8; 8] = [0x03, 0x9C, 0x24, 0x10, 0xB8, 0xC6, 0x54, 0x38];
 
-    const KEY: [u8; 32] = [
+    const KEY: DeviceKey = DeviceKey::from_bytes([
         0xCE, 0x57, 0xF1, 0xC9, 0x9D, 0xA6, 0x14, 0x42, 0x14, 0x0A, 0x9F, 0x58, 0xD2, 0xC4, 0x54,
         0x7B, 0xDB, 0x68, 0x40, 0xDC, 0xCB, 0xFE, 0x41, 0x56, 0x86, 0x26, 0x3D, 0xD8, 0xAC, 0x2B,
         0x0D, 0x1B,
-    ];
+    ]);
 
     fn cipher() -> PacketCipher {
-        PacketCipher::new(&KEY, ADDR)
+        PacketCipher::new(KEY, ADDR)
     }
 
     /// Seals `plaintext` the way the sensor does and returns the body the API
@@ -321,7 +321,7 @@ mod test {
     fn wrong_device_addr_is_rejected() {
         let mut body = sealed(&cipher(), VERSION, SEQ, &PLAINTEXT);
 
-        let impostor = PacketCipher::new(&KEY, DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]));
+        let impostor = PacketCipher::new(KEY, DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]));
 
         assert_eq!(
             impostor.decrypt_in_place(VERSION, SEQ, &mut body),
@@ -333,11 +333,12 @@ mod test {
     fn wrong_key_is_rejected() {
         let mut body = sealed(&cipher(), VERSION, SEQ, &PLAINTEXT);
 
-        let mut other_key = KEY;
+        let mut other_key = *KEY.as_bytes();
         other_key[0] ^= 0x01;
 
         assert_eq!(
-            PacketCipher::new(&other_key, ADDR).decrypt_in_place(VERSION, SEQ, &mut body),
+            PacketCipher::new(DeviceKey::from_bytes(other_key), ADDR)
+                .decrypt_in_place(VERSION, SEQ, &mut body),
             Err(DecryptionError::Authentication)
         );
     }

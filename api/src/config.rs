@@ -1,4 +1,4 @@
-use std::env::var;
+use std::{env::var, path::PathBuf};
 
 use anyhow::Context;
 use homescope_host_util::env::env_var_or;
@@ -13,6 +13,7 @@ pub struct ApiConfig {
     pub run_migrations: bool,
     pub mqtt_host: String,
     pub mqtt_port: u16,
+    pub kek_path: PathBuf,
 }
 
 impl ApiConfig {
@@ -27,6 +28,7 @@ impl ApiConfig {
             run_migrations: env_var_or("RUN_MIGRATIONS", false)?,
             mqtt_host: var("MQTT_HOST").context("MQTT_HOST must be set")?,
             mqtt_port: env_var_or("MQTT_PORT", 1883)?,
+            kek_path: var("KEK_PATH").context("KEK_PATH must be set")?.into(),
         })
     }
 }

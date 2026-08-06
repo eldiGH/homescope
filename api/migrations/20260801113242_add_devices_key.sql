@@ -1,0 +1,3 @@
+ALTER TABLE devices 
+	ADD key BYTEA,
+	ADD key_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();

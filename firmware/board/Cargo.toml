@@ -6,6 +6,8 @@ edition = "2024"
 [features]
 db40 = []
 xiao = []
+device-key = ["homescope-common/crypto"]
+defmt = ["dep:defmt"]
 
 [lib]
 bench=false
@@ -15,6 +17,7 @@ test=false
 homescope-common = { workspace = true }
 
 embassy-nrf = { version = "0.10.0", features = ["nrf52840", "unstable-pac"] }
+defmt = { version = "1.1.1", optional = true }
 
 [package.metadata.embassy]
 build = [

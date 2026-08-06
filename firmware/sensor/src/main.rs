@@ -82,6 +82,8 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "wait-for-rtt")]
     while !defmt_rtt::in_blocking_mode() {}
 
+    let device_key = unwrap!(homescope_board::chip::device_key());
+
     let mut config = embassy_nrf::config::Config::default();
     config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
 
@@ -168,17 +170,9 @@ async fn main(spawner: Spawner) {
 
     let seq_counter = unwrap!(SeqCounter::load(sdc_flash).await);
 
-    let device_addr = homescope_board::device_addr();
+    let device_addr = homescope_board::chip::device_addr();
 
-    let cipher = PacketCipher::new(
-        // TODO: Dev only, will be replaced by KEK + provisioning later on
-        &[
-            0x5F, 0xE3, 0x41, 0x54, 0x0A, 0x81, 0x66, 0x60, 0xF0, 0x65, 0x69, 0x14, 0x5B, 0xC0,
-            0x22, 0x7E, 0x46, 0xAF, 0x9E, 0xCC, 0x36, 0x16, 0xA9, 0x8C, 0xFC, 0x35, 0xC6, 0x32,
-            0xAD, 0xD4, 0xAC, 0x5D,
-        ],
-        device_addr,
-    );
+    let cipher = PacketCipher::new(device_key, device_addr);
     let packet_builder = PacketBuilder::new(seq_counter, cipher);
 
     spawner.spawn(unwrap!(telemetry_task(

@@ -143,11 +143,13 @@ async fn main(spawner: Spawner) {
 
     let mut serial_buf = [0u8; 12];
 
+    let device_addr = homescope_board::chip::device_addr();
+
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Homescope");
     config.product = Some("Homescope Receiver");
-    config.serial_number = Some(homescope_board::device_addr().encode_hex(&mut serial_buf));
+    config.serial_number = Some(device_addr.encode_hex(&mut serial_buf));
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
@@ -181,7 +183,7 @@ async fn main(spawner: Spawner) {
 
     let observations_channel: ScannedPacketChannel = Channel::new();
 
-    let ble_fut = ble_scan::run(sdc, &observations_channel, homescope_board::device_addr());
+    let ble_fut = ble_scan::run(sdc, &observations_channel, device_addr);
 
     let usb_writer_fut = async {
         loop {

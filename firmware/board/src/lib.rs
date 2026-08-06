@@ -1,7 +1,8 @@
 #![no_std]
 
+pub mod chip;
+
 use embassy_nrf::{Peri, gpio::AnyPin, saadc::AnyInput};
-use homescope_common::device_addr::DeviceAddr;
 
 #[cfg(all(feature = "xiao", feature = "db40"))]
 compile_error!("enable exactly one board feature");
@@ -45,11 +46,4 @@ macro_rules! board {
             battery_divider_ratio: 1,
         }
     };
-}
-
-pub fn device_addr() -> DeviceAddr {
-    let [b4, b5, _, _] = embassy_nrf::pac::FICR.deviceaddr(1).read().to_le_bytes();
-    let [b0, b1, b2, b3] = embassy_nrf::pac::FICR.deviceaddr(0).read().to_le_bytes();
-
-    DeviceAddr([b0, b1, b2, b3, b4, b5 | 0xC0])
 }

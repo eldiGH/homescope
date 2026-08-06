@@ -49,7 +49,12 @@ pub mod frame;
 
 #[cfg(feature = "serde")]
 pub mod observation_envelope;
-#[cfg(feature = "serde")]
+
+// `reading` decodes an envelope end to end, so it needs all three: `serde` for
+// the envelope, `codec` for `packet`, `crypto` to open it. Gating it on `serde`
+// alone left `--features crypto,serde` unbuildable — a combination no consumer
+// happens to select, which is exactly why it went unnoticed.
+#[cfg(all(feature = "serde", feature = "codec", feature = "crypto"))]
 pub mod reading;
 
 #[cfg(feature = "crypto")]

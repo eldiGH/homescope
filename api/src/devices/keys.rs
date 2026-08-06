@@ -74,10 +74,26 @@ impl SealedDeviceKey {
     }
 
     pub fn seal(keyring: &KekRing, dek: DeviceKey, device_addr: DeviceAddr) -> Self {
+        Self::seal_with_nonce(keyring, dek, device_addr, XNonce::generate())
+    }
+
+    /// The body of [`seal`](Self::seal) with the nonce supplied rather than
+    /// drawn at random.
+    ///
+    /// Exists so the known-answer test can pin the exact output bytes; a
+    /// random nonce would make the sealed blob different every run and the
+    /// only assertion left would be a round-trip, which cannot detect a
+    /// changed AAD or a shifted offset (seal and open would move together).
+    /// Never call this with a nonce that is not freshly random.
+    fn seal_with_nonce(
+        keyring: &KekRing,
+        dek: DeviceKey,
+        device_addr: DeviceAddr,
+        nonce: XNonce,
+    ) -> Self {
         let (kek_ver, kek) = keyring.get_current();
         let cipher = XChaCha20Poly1305::new(&kek.0.into());
 
-        let nonce = XNonce::generate();
         let aad = Self::associated_data(Self::VERSION, kek_ver, device_addr);
 
         let sealed = cipher
@@ -215,6 +231,15 @@ impl KekRing {
                 .with_context(|| format!("couldn't load kek file: {}", kek_file.display()))?,
         );
 
+        Self::parse(&content).with_context(|| format!("invalid kek file: {}", kek_file.display()))
+    }
+
+    /// Parses the KEK file format, split out from [`load`](Self::load) so the
+    /// parser is testable without touching the filesystem.
+    ///
+    /// ⚠️ `content` is key material. No error raised here may echo a *value*
+    /// — field names and line numbers only.
+    fn parse(content: &str) -> anyhow::Result<Self> {
         let mut current_ver: Option<u8> = None;
         let mut keys: HashMap<u8, Kek> = HashMap::new();
 
@@ -283,5 +308,429 @@ impl KekRing {
                 .get(&self.current_ver)
                 .expect("validated in KekRing::load"),
         )
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    const ADDR: DeviceAddr = DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+    const OTHER_ADDR: DeviceAddr = DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]);
+
+    const KEK_1_HEX: &str = "1F2E3D4C5B6A79889796A5B4C3D2E1F00F1E2D3C4B5A69788796A5B4C3D2E1F0";
+    const KEK_2_HEX: &str = "A0B1C2D3E4F50617283940516273849506172839405162738495A6B7C8D9E0F1";
+
+    const DEK: DeviceKey = DeviceKey::from_bytes([
+        0xCE, 0x57, 0xF1, 0xC9, 0x9D, 0xA6, 0x14, 0x42, 0x14, 0x0A, 0x9F, 0x58, 0xD2, 0xC4, 0x54,
+        0x7B, 0xDB, 0x68, 0x40, 0xDC, 0xCB, 0xFE, 0x41, 0x56, 0x86, 0x26, 0x3D, 0xD8, 0xAC, 0x2B,
+        0x0D, 0x1B,
+    ]);
+
+    const NONCE: [u8; layout::NONCE_SIZE] = [
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        0x00, 0x13, 0x37, 0xC0, 0xDE, 0xF0, 0x0D, 0xBE, 0xEF,
+    ];
+
+    /// A ring holding generation 1 only, with `current = 1`.
+    fn ring() -> KekRing {
+        KekRing::parse(&format!("current = 1\n1 = {KEK_1_HEX}\n")).expect("valid kek file")
+    }
+
+    fn seal(keyring: &KekRing) -> SealedDeviceKey {
+        SealedDeviceKey::seal_with_nonce(keyring, DEK, ADDR, XNonce::from(NONCE))
+    }
+
+    // ---- format ----------------------------------------------------------
+
+    /// Fixed inputs, fixed output bytes.
+    ///
+    /// **This is the only test that can fail when the stored format changes.**
+    /// Round-tripping cannot: `seal` and `open` derive the AAD from the same
+    /// helper and read the same offsets, so reordering the AAD fields or
+    /// shifting a slice boundary moves both halves together and every
+    /// round-trip stays green — while every row already in `devices` becomes
+    /// permanently unopenable.
+    ///
+    /// If this test fails, the question is not "how do I update the
+    /// expectation" but "what happens to the rows already written".
+    #[test]
+    fn known_answer() {
+        assert_eq!(
+            seal(&ring()).0,
+            [
+                // ver, kek_ver
+                0x01, 0x01, //
+                // nonce
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+                0xFF, 0x00, 0x13, 0x37, 0xC0, 0xDE, 0xF0, 0x0D, 0xBE, 0xEF, //
+                // ciphertext
+                0x41, 0xD0, 0x2E, 0x69, 0x1A, 0x14, 0x87, 0xE0, 0xD6, 0x4D, 0x6D, 0xA5, 0x3B, 0x03,
+                0x77, 0x11, 0x1A, 0x3A, 0x7A, 0x60, 0x61, 0xCC, 0xF8, 0xA0, 0x45, 0x27, 0xB0, 0x11,
+                0xD0, 0xFC, 0xAD, 0xCE, //
+                // tag
+                0xBF, 0x32, 0x87, 0x3C, 0x30, 0xF6, 0xE3, 0x99, 0x71, 0x1E, 0xA1, 0xD6, 0x09, 0xE2,
+                0xD8, 0xBD,
+            ]
+        );
+    }
+
+    #[test]
+    fn header_is_readable_without_the_kek() {
+        let sealed = seal(&ring());
+
+        assert_eq!(sealed.ver(), SealedDeviceKey::VERSION);
+        assert_eq!(sealed.kek_ver(), 1);
+    }
+
+    #[test]
+    fn round_trip() {
+        let ring = ring();
+
+        assert_eq!(
+            seal(&ring)
+                .open(&ring, ADDR)
+                .expect("open failed")
+                .as_bytes(),
+            DEK.as_bytes()
+        );
+    }
+
+    #[test]
+    fn seal_draws_a_fresh_nonce_every_time() {
+        let ring = ring();
+
+        assert_ne!(
+            SealedDeviceKey::seal(&ring, DEK, ADDR).0,
+            SealedDeviceKey::seal(&ring, DEK, ADDR).0,
+            "a repeated nonce under one KEK would be catastrophic"
+        );
+    }
+
+    // ---- associated data -------------------------------------------------
+
+    /// The field that is actually load-bearing. Every row is sealed under the
+    /// *same* KEK, so without `device_addr` in the AAD an attacker with write
+    /// access could move one device's blob onto another's row: it would open
+    /// cleanly, tag valid, and the API would silently hold the wrong key.
+    #[test]
+    fn aad_binds_device_addr() {
+        let ring = ring();
+
+        assert_eq!(
+            seal(&ring).open(&ring, OTHER_ADDR).unwrap_err(),
+            OpenError::Authentication
+        );
+    }
+
+    /// `ver` is read back out of the blob to rebuild the AAD, so flipping the
+    /// stored byte also flips the AAD and the tag stops matching. (Reaching
+    /// `open` at all requires bypassing `TryFrom`, which rejects the version
+    /// first — see `parse_rejects_unsupported_version`.)
+    #[test]
+    fn aad_binds_ver() {
+        let ring = ring();
+        let mut sealed = seal(&ring);
+        sealed.0[layout::VER] = 2;
+
+        assert_eq!(
+            sealed.open(&ring, ADDR).unwrap_err(),
+            OpenError::Authentication
+        );
+    }
+
+    /// Flipping `kek_ver` to a generation that *is* loaded selects the wrong
+    /// key, so this fails as an authentication error rather than
+    /// `KekNotLoaded`.
+    #[test]
+    fn aad_binds_kek_ver() {
+        let ring = KekRing::parse(&format!("current = 1\n1 = {KEK_1_HEX}\n2 = {KEK_2_HEX}\n"))
+            .expect("valid kek file");
+
+        let mut sealed = seal(&ring);
+        sealed.0[layout::KEK_VER] = 2;
+
+        assert_eq!(
+            sealed.open(&ring, ADDR).unwrap_err(),
+            OpenError::Authentication
+        );
+    }
+
+    #[test]
+    fn tampered_ciphertext_is_rejected() {
+        let ring = ring();
+        let mut sealed = seal(&ring);
+        sealed.0[layout::SEALED.start] ^= 0x01;
+
+        assert_eq!(
+            sealed.open(&ring, ADDR).unwrap_err(),
+            OpenError::Authentication
+        );
+    }
+
+    #[test]
+    fn tampered_nonce_is_rejected() {
+        let ring = ring();
+        let mut sealed = seal(&ring);
+        sealed.0[layout::NONCE.start] ^= 0x01;
+
+        assert_eq!(
+            sealed.open(&ring, ADDR).unwrap_err(),
+            OpenError::Authentication
+        );
+    }
+
+    #[test]
+    fn tampered_tag_is_rejected() {
+        let ring = ring();
+        let mut sealed = seal(&ring);
+        sealed.0[SealedDeviceKey::SIZE - 1] ^= 0x01;
+
+        assert_eq!(
+            sealed.open(&ring, ADDR).unwrap_err(),
+            OpenError::Authentication
+        );
+    }
+
+    // ---- kek selection ---------------------------------------------------
+
+    /// The whole reason `kek_ver` is stored: a blob sealed under a generation
+    /// the running process has not loaded must say *which* generation is
+    /// missing, not fail as an indistinguishable auth error.
+    #[test]
+    fn missing_kek_generation_is_named() {
+        let sealed = seal(
+            &KekRing::parse(&format!("current = 2\n2 = {KEK_2_HEX}\n")).expect("valid kek file"),
+        );
+
+        assert_eq!(
+            sealed.open(&ring(), ADDR).unwrap_err(),
+            OpenError::KekNotLoaded(2)
+        );
+    }
+
+    /// Same generation number, different key material — the version byte is a
+    /// lookup hint, never a proof. Authentication is what actually decides.
+    #[test]
+    fn wrong_kek_under_the_right_generation_is_rejected() {
+        let impostor =
+            KekRing::parse(&format!("current = 1\n1 = {KEK_2_HEX}\n")).expect("valid kek file");
+
+        assert_eq!(
+            seal(&ring()).open(&impostor, ADDR).unwrap_err(),
+            OpenError::Authentication
+        );
+    }
+
+    // ---- parsing a stored blob -------------------------------------------
+
+    #[test]
+    fn parse_accepts_what_seal_produced() {
+        let sealed = seal(&ring());
+
+        assert_eq!(
+            SealedDeviceKey::try_from(&sealed.0[..])
+                .expect("parse failed")
+                .0,
+            sealed.0
+        );
+    }
+
+    /// The length is exact, not a minimum — a longer column value is a corrupt
+    /// row, not a blob with something appended.
+    #[test]
+    fn parse_rejects_wrong_length() {
+        let sealed = seal(&ring());
+        let mut too_long = sealed.0.to_vec();
+        too_long.push(0x00);
+
+        assert_eq!(
+            SealedDeviceKey::try_from(&sealed.0[..SealedDeviceKey::SIZE - 1]).unwrap_err(),
+            ParseError::InvalidLen {
+                len: SealedDeviceKey::SIZE - 1
+            }
+        );
+        assert_eq!(
+            SealedDeviceKey::try_from(&too_long[..]).unwrap_err(),
+            ParseError::InvalidLen {
+                len: SealedDeviceKey::SIZE + 1
+            }
+        );
+        assert_eq!(
+            SealedDeviceKey::try_from(&[][..]).unwrap_err(),
+            ParseError::InvalidLen { len: 0 }
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_version() {
+        let mut bytes = seal(&ring()).0;
+        bytes[layout::VER] = 2;
+
+        assert_eq!(
+            SealedDeviceKey::try_from(&bytes[..]).unwrap_err(),
+            ParseError::UnsupportedVersion(2)
+        );
+    }
+
+    // ---- kek hex ---------------------------------------------------------
+
+    #[test]
+    fn kek_hex_is_decoded_msb_first() {
+        assert_eq!(
+            Kek::try_from("00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF")
+                .expect("valid hex")
+                .0,
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+                0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
+                0xCC, 0xDD, 0xEE, 0xFF,
+            ]
+        );
+    }
+
+    #[test]
+    fn kek_hex_is_case_insensitive() {
+        assert_eq!(
+            Kek::try_from(KEK_1_HEX).expect("valid hex").0,
+            Kek::try_from(&*KEK_1_HEX.to_lowercase())
+                .expect("valid hex")
+                .0
+        );
+    }
+
+    /// A 63-character string must not decode 31 bytes and leave the last zero
+    /// — `chunks_exact` silently drops the odd trailing byte, so the length
+    /// check in front of it is load-bearing.
+    #[test]
+    fn kek_hex_rejects_wrong_length() {
+        assert_eq!(
+            Kek::try_from(&KEK_1_HEX[..63]).unwrap_err(),
+            KekParseError::InvalidLen(63)
+        );
+        assert_eq!(Kek::try_from("").unwrap_err(), KekParseError::InvalidLen(0));
+    }
+
+    #[test]
+    fn kek_hex_rejects_non_hex() {
+        let mut bad = KEK_1_HEX.to_string();
+        bad.replace_range(0..2, "ZZ");
+
+        assert_eq!(Kek::try_from(&*bad).unwrap_err(), KekParseError::InvlidChar);
+    }
+
+    // ---- kek file --------------------------------------------------------
+
+    #[test]
+    fn loads_generations_and_current() {
+        let ring = KekRing::parse(&format!("current = 2\n1 = {KEK_1_HEX}\n2 = {KEK_2_HEX}\n"))
+            .expect("valid kek file");
+
+        assert_eq!(ring.get_current().0, 2);
+        assert_eq!(ring.get_current().1.0, Kek::try_from(KEK_2_HEX).unwrap().0);
+        assert_eq!(
+            ring.get(1).expect("generation 1 loaded").0,
+            Kek::try_from(KEK_1_HEX).unwrap().0
+        );
+        assert!(ring.get(3).is_none());
+    }
+
+    /// `current` may name a generation that is not the highest — promoting a
+    /// new KEK has to be a separate step from adding it, or a rotation could
+    /// never be staged or rolled back.
+    #[test]
+    fn current_need_not_be_the_newest_generation() {
+        let ring = KekRing::parse(&format!("current = 1\n1 = {KEK_1_HEX}\n2 = {KEK_2_HEX}\n"))
+            .expect("valid kek file");
+
+        assert_eq!(ring.get_current().0, 1);
+    }
+
+    #[test]
+    fn comments_and_blank_lines_are_ignored() {
+        let ring = KekRing::parse(&format!(
+            "# rotated 2026-08-06\n\
+             \n\
+             current = 1   # promoted after the laptop rebuild\n\
+             \t\n\
+             1 = {KEK_1_HEX} # original\n"
+        ))
+        .expect("valid kek file");
+
+        assert_eq!(ring.get_current().0, 1);
+        assert_eq!(ring.get_current().1.0, Kek::try_from(KEK_1_HEX).unwrap().0);
+    }
+
+    #[test]
+    fn missing_current_is_rejected() {
+        assert!(KekRing::parse(&format!("1 = {KEK_1_HEX}\n")).is_err());
+    }
+
+    #[test]
+    fn duplicate_current_is_rejected() {
+        assert!(
+            KekRing::parse(&format!(
+                "current = 1\ncurrent = 2\n1 = {KEK_1_HEX}\n2 = {KEK_2_HEX}\n"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn duplicate_generation_is_rejected() {
+        assert!(
+            KekRing::parse(&format!("current = 1\n1 = {KEK_1_HEX}\n1 = {KEK_2_HEX}\n")).is_err()
+        );
+    }
+
+    /// Otherwise `get_current`'s `expect` would be a live panic path rather
+    /// than an invariant established at load.
+    #[test]
+    fn current_without_a_matching_generation_is_rejected() {
+        assert!(KekRing::parse(&format!("current = 2\n1 = {KEK_1_HEX}\n")).is_err());
+    }
+
+    #[test]
+    fn malformed_lines_are_rejected() {
+        for content in [
+            "current 1\n",                     // no '='
+            "current = notanumber\n",          // non-numeric version
+            "current = 999\n",                 // out of u8 range
+            "current = 1\nnotaversion = 00\n", // non-numeric generation
+            "current = 1\n1 = nothexatall\n",  // bad key material
+        ] {
+            assert!(
+                KekRing::parse(content).is_err(),
+                "should have been rejected: {content:?}"
+            );
+        }
+    }
+
+    /// The file *is* the KEKs. An error that echoes a value would put key
+    /// material into logs, which is where errors end up.
+    #[test]
+    fn errors_never_echo_key_material() {
+        let err = KekRing::parse(&format!("current = 1\n1 = {KEK_1_HEX}\n1 = {KEK_2_HEX}\n"))
+            .err()
+            .expect("duplicate generation should be rejected");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains(KEK_1_HEX),
+            "leaked key material: {rendered}"
+        );
+        assert!(
+            !rendered.contains(KEK_2_HEX),
+            "leaked key material: {rendered}"
+        );
+    }
+
+    #[test]
+    fn secrets_are_redacted_in_debug() {
+        assert_eq!(
+            format!("{:?}", Kek::try_from(KEK_1_HEX).unwrap()),
+            "Kek(<redacted>)"
+        );
+        assert_eq!(format!("{DEK:?}"), "DeviceKey(<redacted>)");
     }
 }

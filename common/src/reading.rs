@@ -65,19 +65,22 @@ mod test {
     use alloc::{vec, vec::Vec};
 
     use super::*;
-    use crate::{measurement::Measurement, packet::cipher::DecryptionError, wire::Truncated};
+    use crate::{
+        device_key::DeviceKey, measurement::Measurement, packet::cipher::DecryptionError,
+        wire::Truncated,
+    };
 
     const ADDR: DeviceAddr = DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
     const RSSI: Dbm = Dbm(-72);
 
-    const KEY: [u8; 32] = [
+    const KEY: DeviceKey = DeviceKey::from_bytes([
         0xCE, 0x57, 0xF1, 0xC9, 0x9D, 0xA6, 0x14, 0x42, 0x14, 0x0A, 0x9F, 0x58, 0xD2, 0xC4, 0x54,
         0x7B, 0xDB, 0x68, 0x40, 0xDC, 0xCB, 0xFE, 0x41, 0x56, 0x86, 0x26, 0x3D, 0xD8, 0xAC, 0x2B,
         0x0D, 0x1B,
-    ];
+    ]);
 
     fn cipher() -> PacketCipher {
-        PacketCipher::new(&KEY, ADDR)
+        PacketCipher::new(KEY, ADDR)
     }
 
     fn envelope(packet: Vec<u8>) -> ObservationEnvelope {
@@ -182,7 +185,7 @@ mod test {
     fn another_devices_cipher_cannot_open_the_envelope() {
         let envelope = envelope(packet_bytes(&cipher(), 42, &[Measurement::battery(2950)]));
 
-        let other = PacketCipher::new(&KEY, DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]));
+        let other = PacketCipher::new(KEY, DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]));
 
         assert_eq!(
             SensorReading::open_envelope(&envelope, &other),

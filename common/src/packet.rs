@@ -266,6 +266,7 @@ mod test {
     use super::*;
     use crate::{
         device_addr::DeviceAddr,
+        device_key::DeviceKey,
         measurement::MeasurementIdUnknownError,
         packet::cipher::{DecryptionError, PacketCipher},
     };
@@ -273,11 +274,11 @@ mod test {
     const SEQ: u32 = 5;
     const ADDR: DeviceAddr = DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
 
-    const KEY: [u8; 32] = [
+    const KEY: DeviceKey = DeviceKey::from_bytes([
         0xCE, 0x57, 0xF1, 0xC9, 0x9D, 0xA6, 0x14, 0x42, 0x14, 0x0A, 0x9F, 0x58, 0xD2, 0xC4, 0x54,
         0x7B, 0xDB, 0x68, 0x40, 0xDC, 0xCB, 0xFE, 0x41, 0x56, 0x86, 0x26, 0x3D, 0xD8, 0xAC, 0x2B,
         0x0D, 0x1B,
-    ];
+    ]);
 
     /// The three measurements the fleet emits today, in registry order.
     const ALL_THREE: [Measurement; 3] = [
@@ -287,7 +288,7 @@ mod test {
     ];
 
     fn cipher() -> PacketCipher {
-        PacketCipher::new(&KEY, ADDR)
+        PacketCipher::new(KEY, ADDR)
     }
 
     fn encoded(cipher: &PacketCipher, seq: u32, measurements: &[Measurement]) -> Vec<u8> {

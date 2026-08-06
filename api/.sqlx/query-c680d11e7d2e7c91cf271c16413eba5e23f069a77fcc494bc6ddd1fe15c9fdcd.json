@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\nSELECT\n    id, device_addr, name\nFROM devices\n",
+  "query": "\nSELECT\n    id, device_addr, name, key, key_updated_at\nFROM devices\n",
   "describe": {
     "columns": [
       {
@@ -35,6 +35,28 @@
             "name": "name"
           }
         }
+      },
+      {
+        "ordinal": 3,
+        "name": "key",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "key"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "key_updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "key_updated_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -43,8 +65,10 @@
     "nullable": [
       false,
       false,
+      false,
+      true,
       false
     ]
   },
-  "hash": "cff134cf392cbc720fb96d10ec7d224cf5e1540e6f3e29ca258f98630e141a60"
+  "hash": "c680d11e7d2e7c91cf271c16413eba5e23f069a77fcc494bc6ddd1fe15c9fdcd"
 }

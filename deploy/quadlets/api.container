@@ -9,6 +9,12 @@ Network=homescope.network
 AutoUpdate=registry
 EnvironmentFile=%h/.config/homescope/api.env
 
+# The KEK arrives as a tmpfs file, never as an environment variable — env would
+# put it in /proc/<pid>/environ and in `podman inspect` output. KEK_PATH names
+# the path; the secret itself is created once by deploy.sh (setup_kek).
+Secret=homescope-kek,type=mount,target=kek,mode=0400
+Environment=KEK_PATH=/run/secrets/kek
+
 Environment=DB_HOST=homescope-db
 Environment=DB_PORT=5432
 Environment=DB_DATABASE=homescope

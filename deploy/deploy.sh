@@ -15,6 +15,10 @@
 # recursive chown corrupts every image and volume in it.
 #
 # Secrets are generated once and never overwritten on reruns.
+#
+# The KEK is the exception to "secrets live in $CONFIG_DIR": it is a podman
+# secret, so it reaches the API as a tmpfs file under /run/secrets rather than
+# as an environment variable. See setup_kek.
 
 set -euo pipefail
 
@@ -26,7 +30,10 @@ CONFIG_DIR="$HOMESCOPE_DIR/.config/homescope"
 QUADLET_DIR="$HOMESCOPE_DIR/.config/containers/systemd"
 STAGING_DIR="$HOMESCOPE_DIR/deploy-src"
 
-MIN_PODMAN_VERSION="4.4" # quadlet support
+# Name of the podman secret holding the KEK ring (see setup_kek).
+KEK_SECRET="homescope-kek"
+
+MIN_PODMAN_VERSION="4.5" # 4.4 for quadlets, 4.5 for `podman secret exists`
 
 log() {
 	echo ">>> $*"
@@ -39,6 +46,11 @@ die() {
 
 generate_password() {
 	openssl rand -hex 24
+}
+
+# 32 bytes as 64 hex chars — the width homescope-api's KEK parser requires.
+generate_kek() {
+	openssl rand -hex 32
 }
 
 ### Root phase ################################################################
@@ -126,9 +138,10 @@ stage_deploy_tree() {
 # carries them through the environment, so the runuser'd bash below runs the
 # exact functions defined in this file — no flags, no second script.
 drop_to_homescope() {
-	export STAGING_DIR HOMESCOPE_USER HOMESCOPE_DIR CONFIG_DIR QUADLET_DIR
-	export -f log die generate_password setup_secrets setup_configs \
-		setup_quadlets setup_autoupdate_timer start_services homescope_phase
+	export STAGING_DIR HOMESCOPE_USER HOMESCOPE_DIR CONFIG_DIR QUADLET_DIR KEK_SECRET
+	export -f log die generate_password generate_kek setup_secrets setup_kek \
+		setup_configs setup_quadlets setup_autoupdate_timer start_services \
+		homescope_phase
 
 	exec runuser -u "$HOMESCOPE_USER" -- bash -c 'set -euo pipefail; homescope_phase'
 }
@@ -180,6 +193,53 @@ setup_secrets() {
 	EOF
 
 	chmod 600 "$CONFIG_DIR"/*.env
+}
+
+# The KEK wraps every per-device AEAD key stored in devices.key. It is the one
+# secret that must never live in the database or in a database backup: with it,
+# a leaked dump yields the whole fleet's keys; without it, the dump is inert.
+#
+# A podman secret rather than an env file, for two reasons. It is delivered as
+# a tmpfs file under /run/secrets, so it never enters the API's environment —
+# an env var would be readable from /proc/<pid>/environ by anything running as
+# this user, inherited by every child process, and echoed by `podman inspect`.
+# And `podman secret create -` reads stdin, so the generated key never touches
+# a filesystem outside podman's own storage.
+#
+# Rotation is deliberately NOT automated here. It means: add a generation to
+# the ring, re-wrap every devices.key row, promote it with `current`, then drop
+# the old line. Doing that from a converge script would risk orphaning rows.
+setup_kek() {
+	if podman secret exists "$KEK_SECRET"; then
+		log "KEK secret already exists, skipping"
+		return
+	fi
+
+	log "Generating KEK (generation 1)"
+
+	# Format must match homescope-api's parser: `current = N` plus one
+	# `N = <64 hex>` line per generation. Generation numbers are foreign keys
+	# into devices.kek_ver and are never renumbered or reused.
+	{
+		echo "# homescope KEK ring — wraps the per-device keys in devices.key."
+		echo "# Generated $(date -Is) by deploy.sh."
+		echo "current = 1"
+		echo "1 = $(generate_kek)"
+	} | podman secret create "$KEK_SECRET" -
+
+	cat >&2 <<-EOF
+
+		!!  A new KEK was generated. Back it up NOW, somewhere other than
+		!!  wherever the database backups go — same drive means one theft or
+		!!  one failure takes both, which is the exact scenario it defends
+		!!  against. Losing it means re-provisioning every sensor by hand.
+		!!
+		!!      sudo podman secret inspect --showsecret \\
+		!!          -f '{{.SecretData}}' $KEK_SECRET
+		!!
+		!!  (as $HOMESCOPE_USER — see the wrapping in backup-db.sh)
+
+	EOF
 }
 
 setup_configs() {
@@ -254,6 +314,7 @@ homescope_phase() {
 
 	setup_configs
 	setup_secrets
+	setup_kek
 	setup_quadlets
 	setup_autoupdate_timer
 	start_services

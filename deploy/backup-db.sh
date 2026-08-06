@@ -30,6 +30,18 @@
 #
 # The globals-<stamp>.sql file is only needed when restoring onto a fresh
 # cluster (roles/passwords); on the existing cluster the roles already exist.
+#
+# NOT IN THESE BACKUPS, ON PURPOSE: the KEK. devices.key holds every sensor's
+# AEAD key wrapped under it, so a dump plus the KEK is the whole fleet, and a
+# dump alone is inert — which is the entire point, and only holds while the two
+# are stored apart. Back the KEK up separately, off this machine:
+#
+#     sudo -u homescope XDG_RUNTIME_DIR=/run/user/$(id -u homescope) \
+#         podman secret inspect --showsecret -f '{{.SecretData}}' homescope-kek
+#
+# A restore onto a fresh machine needs both. Without the KEK the rows survive
+# but no device key can be opened, and every sensor must be re-provisioned by
+# hand.
 
 set -euo pipefail
 

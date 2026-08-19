@@ -51,7 +51,19 @@ impl DeviceKey {
     pub fn as_bytes(&self) -> &[u8; Self::SIZE] {
         &self.0
     }
+
+    #[cfg(feature = "keygen")]
+    pub fn generate() -> Result<Self, KeyGenError> {
+        let mut bytes: [u8; Self::SIZE] = [0; _];
+
+        getrandom::fill(&mut bytes)?;
+
+        Ok(Self(bytes))
+    }
 }
+
+#[cfg(feature = "keygen")]
+pub type KeyGenError = getrandom::Error;
 
 #[cfg(test)]
 mod test {

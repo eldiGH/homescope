@@ -45,7 +45,7 @@ impl PacketCipher {
 
     const ASSOCIATED_DATA_SIZE: usize = Self::DEVICE_ADDR_SIZE + Self::SEQ_SIZE + Self::VER_SIZE;
 
-    pub fn new(key: DeviceKey, device_addr: DeviceAddr) -> Self {
+    pub fn new(key: &DeviceKey, device_addr: DeviceAddr) -> Self {
         Self {
             device_addr,
             cipher: chacha20poly1305::ChaChaPoly1305::new(key.as_bytes().into()),
@@ -181,7 +181,7 @@ mod test {
     ]);
 
     fn cipher() -> PacketCipher {
-        PacketCipher::new(KEY, ADDR)
+        PacketCipher::new(&KEY, ADDR)
     }
 
     /// Seals `plaintext` the way the sensor does and returns the body the API
@@ -321,7 +321,7 @@ mod test {
     fn wrong_device_addr_is_rejected() {
         let mut body = sealed(&cipher(), VERSION, SEQ, &PLAINTEXT);
 
-        let impostor = PacketCipher::new(KEY, DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]));
+        let impostor = PacketCipher::new(&KEY, DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]));
 
         assert_eq!(
             impostor.decrypt_in_place(VERSION, SEQ, &mut body),
@@ -337,7 +337,7 @@ mod test {
         other_key[0] ^= 0x01;
 
         assert_eq!(
-            PacketCipher::new(DeviceKey::from_bytes(other_key), ADDR)
+            PacketCipher::new(&DeviceKey::from_bytes(other_key), ADDR)
                 .decrypt_in_place(VERSION, SEQ, &mut body),
             Err(DecryptionError::Authentication)
         );

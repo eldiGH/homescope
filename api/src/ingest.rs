@@ -68,7 +68,7 @@ async fn handle_envelope(
     };
 
     if let Err(err) = db::insert_reading(pool, &reading, device.device.id).await {
-        error!("db error: {err}");
+        error!(%err, "db error");
     }
 }
 
@@ -85,7 +85,7 @@ async fn subscribe_mqtt(
     loop {
         match event_loop.poll().await {
             Err(err) => {
-                error!("mqtt err: {err}");
+                error!(%err, "mqtt error");
                 sleep(Duration::from_secs(1)).await;
             }
 
@@ -128,7 +128,7 @@ async fn subscribe_mqtt(
                     }
 
                     Err(err) => {
-                        error!("mqtt subscribe request failed: {err}");
+                        error!(%err, "mqtt subscribe request failed");
                     }
                 }
             }

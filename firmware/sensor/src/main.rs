@@ -172,7 +172,7 @@ async fn main(spawner: Spawner) {
 
     let device_addr = homescope_board::chip::device_addr();
 
-    let cipher = PacketCipher::new(device_key, device_addr);
+    let cipher = PacketCipher::new(&device_key, device_addr);
     let packet_builder = PacketBuilder::new(seq_counter, cipher);
 
     spawner.spawn(unwrap!(telemetry_task(

@@ -18,6 +18,12 @@ impl DeviceAddr {
 
         core::str::from_utf8(buf).expect("every byte comes from hex array")
     }
+
+    pub fn as_i64(&self) -> i64 {
+        let [a0, a1, a2, a3, a4, a5] = self.0;
+
+        i64::from_le_bytes([a0, a1, a2, a3, a4, a5, 0, 0])
+    }
 }
 
 impl core::fmt::Display for DeviceAddr {

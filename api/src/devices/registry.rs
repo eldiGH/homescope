@@ -4,21 +4,24 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use homescope_common::{device_addr::DeviceAddr, packet::cipher::PacketCipher};
+use homescope_common::{
+    device_addr::DeviceAddr,
+    device_key::{DeviceKey, KeyGenError},
+    packet::cipher::PacketCipher,
+};
 use sqlx::PgPool;
+use thiserror::Error;
 use tracing::{error, info};
 
 use crate::devices::{
-    keys::KekRing,
-    store::{self, Device},
+    keys::{KekRing, SealedDeviceKey},
+    store::{self, Device, StoreError},
 };
 
 #[derive(Clone)]
 pub struct DeviceRegistry {
     cache: Arc<RwLock<HashMap<DeviceAddr, Arc<RegisteredDevice>>>>,
-    #[allow(dead_code)] // TODO: will be used when we do device management http endpoints
     pool: PgPool,
-    #[allow(dead_code)] // TODO: will be used when adding new devices will be implemented
     keyring: Arc<KekRing>,
 }
 
@@ -46,7 +49,7 @@ impl DeviceRegistry {
                     device_addr,
                     Arc::new(RegisteredDevice {
                         cipher: PacketCipher::new(
-                            device
+                            &device
                                 .key
                                 .open(&keyring, device_addr)
                                 .inspect_err(|err| {
@@ -81,9 +84,85 @@ impl DeviceRegistry {
             .get(&device_addr)
             .cloned()
     }
+
+    pub async fn provision(
+        &self,
+        addr: DeviceAddr,
+        name: &str,
+    ) -> Result<(Arc<RegisteredDevice>, DeviceKey), DeviceError> {
+        let key = DeviceKey::generate()?;
+        let sealed_key = SealedDeviceKey::seal(&self.keyring, &key, addr);
+
+        let device = store::insert_device(
+            &self.pool,
+            store::InsertDevice {
+                name,
+                key: sealed_key,
+                device_addr: addr,
+            },
+        )
+        .await?;
+
+        let registered_device = Arc::new(RegisteredDevice {
+            device,
+            cipher: PacketCipher::new(&key, addr),
+        });
+
+        self.cache
+            .write()
+            .expect("devices cache lock poisoned")
+            .insert(addr, registered_device.clone());
+
+        Ok((registered_device, key))
+    }
+
+    pub async fn rotate_key(
+        &self,
+        addr: DeviceAddr,
+    ) -> Result<(Arc<RegisteredDevice>, DeviceKey), DeviceError> {
+        let key = DeviceKey::generate()?;
+        let sealed_key = SealedDeviceKey::seal(&self.keyring, &key, addr);
+
+        let device = store::update_key(&self.pool, addr, sealed_key)
+            .await?
+            .ok_or(DeviceError::NotFound)?;
+
+        let new_device = Arc::new(RegisteredDevice {
+            device,
+            cipher: PacketCipher::new(&key, addr),
+        });
+
+        self.cache
+            .write()
+            .expect("devices cache lock poisoned")
+            .insert(addr, new_device.clone());
+
+        Ok((new_device, key))
+    }
 }
 
 pub struct RegisteredDevice {
     pub device: Device,
     pub cipher: PacketCipher,
+}
+
+#[derive(Debug, Error)]
+pub enum DeviceError {
+    #[error("device already provisioned")]
+    AlreadyExists,
+    #[error("device not found")]
+    NotFound,
+    #[error("key generation failed: {0}")]
+    KeyGen(#[from] KeyGenError),
+    #[error(transparent)]
+    Store(StoreError),
+}
+
+impl From<StoreError> for DeviceError {
+    fn from(value: StoreError) -> Self {
+        match value {
+            StoreError::DuplicateDeviceAddr => DeviceError::AlreadyExists,
+            err => DeviceError::Store(err),
+        }
+    }
 }

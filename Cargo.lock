@@ -240,6 +240,7 @@ dependencies = [
  "cipher",
  "cpufeatures 0.3.0",
  "rand_core",
+ "zeroize",
 ]
 
 [[package]]
@@ -252,6 +253,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -788,6 +790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "subtle",
  "thiserror",
  "tokio",
  "tower-http",
@@ -805,6 +808,7 @@ dependencies = [
  "chrono",
  "crc",
  "defmt",
+ "getrandom 0.4.3",
  "memchr",
  "serde",
  "thiserror",

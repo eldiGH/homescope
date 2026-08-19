@@ -15,6 +15,28 @@ EnvironmentFile=%h/.config/homescope/api.env
 Secret=homescope-kek,type=mount,target=kek,mode=0400
 Environment=KEK_PATH=/run/secrets/kek
 
+# The admin bearer token guarding /devices, delivered the same way and for the
+# same reasons (setup_admin_token). Unlike the KEK it is regenerable: losing it
+# costs a `podman secret rm` + rerun of deploy.sh, not a fleet re-provision.
+Secret=homescope-admin-token,type=mount,target=admin-token,mode=0400
+Environment=ADMIN_TOKEN_PATH=/run/secrets/admin-token
+
+# 0.0.0.0 is the *container's* namespace, not the host's — the host-side
+# exposure is decided entirely by PublishPort below. Binding loopback here
+# would make the published port unreachable.
+Environment=HTTP_BIND=0.0.0.0:3000
+
+# Published on loopback only, so the bearer token never crosses the LAN in
+# cleartext — there is no TLS terminator in front of this yet, and
+# homescope-provision treats HTTPS as a hard requirement. Reach it from a
+# workstation over an SSH tunnel:
+#
+#     ssh -N -L 4001:127.0.0.1:4001 <pi>
+#     homescope-provision --api http://127.0.0.1:4001 ...
+#
+# Widen this to `4001:3000` only once something terminates TLS in front.
+PublishPort=127.0.0.1:4001:3000
+
 Environment=DB_HOST=homescope-db
 Environment=DB_PORT=5432
 Environment=DB_DATABASE=homescope

@@ -16,9 +16,10 @@
 #
 # Secrets are generated once and never overwritten on reruns.
 #
-# The KEK is the exception to "secrets live in $CONFIG_DIR": it is a podman
-# secret, so it reaches the API as a tmpfs file under /run/secrets rather than
-# as an environment variable. See setup_kek.
+# Two secrets are exceptions to "secrets live in $CONFIG_DIR" — the KEK and the
+# admin API token. Both are podman secrets, so they reach the API as tmpfs files
+# under /run/secrets rather than as environment variables. See setup_kek and
+# setup_admin_token.
 
 set -euo pipefail
 
@@ -30,8 +31,9 @@ CONFIG_DIR="$HOMESCOPE_DIR/.config/homescope"
 QUADLET_DIR="$HOMESCOPE_DIR/.config/containers/systemd"
 STAGING_DIR="$HOMESCOPE_DIR/deploy-src"
 
-# Name of the podman secret holding the KEK ring (see setup_kek).
+# Names of the podman secrets (see setup_kek / setup_admin_token).
 KEK_SECRET="homescope-kek"
+ADMIN_TOKEN_SECRET="homescope-admin-token"
 
 MIN_PODMAN_VERSION="4.5" # 4.4 for quadlets, 4.5 for `podman secret exists`
 
@@ -50,6 +52,13 @@ generate_password() {
 
 # 32 bytes as 64 hex chars — the width homescope-api's KEK parser requires.
 generate_kek() {
+	openssl rand -hex 32
+}
+
+# 32 bytes as 64 hex chars. Deliberately not a UUID: v4 has ample entropy, but
+# UUID is a format for uniqueness rather than unpredictability and not every
+# generator on the path is cryptographic. Same effort, one fewer question.
+generate_admin_token() {
 	openssl rand -hex 32
 }
 
@@ -138,8 +147,10 @@ stage_deploy_tree() {
 # carries them through the environment, so the runuser'd bash below runs the
 # exact functions defined in this file — no flags, no second script.
 drop_to_homescope() {
-	export STAGING_DIR HOMESCOPE_USER HOMESCOPE_DIR CONFIG_DIR QUADLET_DIR KEK_SECRET
-	export -f log die generate_password generate_kek setup_secrets setup_kek \
+	export STAGING_DIR HOMESCOPE_USER HOMESCOPE_DIR CONFIG_DIR QUADLET_DIR \
+		KEK_SECRET ADMIN_TOKEN_SECRET
+	export -f log die generate_password generate_kek generate_admin_token \
+		setup_secrets setup_kek setup_admin_token \
 		setup_configs setup_quadlets setup_autoupdate_timer start_services \
 		homescope_phase
 
@@ -242,6 +253,48 @@ setup_kek() {
 	EOF
 }
 
+# The bearer token guarding the device-management endpoints — the ones that
+# mint a key, and the ones that rotate a deployed sensor's key out from under
+# it. `device_addr` is broadcast in the clear in every BLE advertisement, so
+# an unauthenticated rotate endpoint is a one-request denial of service against
+# the whole fleet by anyone who can reach the port.
+#
+# A podman secret for the same reasons as the KEK: tmpfs under /run/secrets
+# instead of the environment, and `podman secret create -` reads stdin so the
+# token never touches a filesystem outside podman's storage.
+#
+# Unlike the KEK this one is NOT worth backing up — it derives nothing and
+# protects nothing at rest. Revocation is exactly "generate a new one":
+#
+#     podman secret rm homescope-admin-token && sudo ./deploy/deploy.sh
+setup_admin_token() {
+	if podman secret exists "$ADMIN_TOKEN_SECRET"; then
+		log "Admin token secret already exists, skipping"
+		return
+	fi
+
+	log "Generating admin API token"
+
+	# Piped, never assigned: the token stays out of shell variables and out of
+	# any process's argv. homescope-api reads the first line and trims it, so
+	# openssl's trailing newline is fine — but nothing else may be in here.
+	generate_admin_token | podman secret create "$ADMIN_TOKEN_SECRET" -
+
+	cat >&2 <<-EOF
+
+		!!  A new admin API token was generated. Read it out and store it on
+		!!  the workstation that runs homescope-provision:
+		!!
+		!!      sudo -u $HOMESCOPE_USER XDG_RUNTIME_DIR=/run/user/\$(id -u $HOMESCOPE_USER) \\
+		!!          podman secret inspect --showsecret -f '{{.SecretData}}' $ADMIN_TOKEN_SECRET
+		!!
+		!!  The API is published on loopback only (see api.container), so reach
+		!!  it through an SSH tunnel rather than over the LAN — nothing
+		!!  terminates TLS in front of it yet and the token is a bearer token.
+
+	EOF
+}
+
 setup_configs() {
 	log "Syncing container configs"
 
@@ -315,6 +368,7 @@ homescope_phase() {
 	setup_configs
 	setup_secrets
 	setup_kek
+	setup_admin_token
 	setup_quadlets
 	setup_autoupdate_timer
 	start_services

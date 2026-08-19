@@ -100,10 +100,7 @@ pub fn device_key() -> Result<DeviceKey, DeviceKeyError> {
     const MAGIC_BYTES: [u8; 2] = *b"HK";
     const KEY_VERSION: u8 = 1;
 
-    const _: () = assert!(
-        1 + DeviceKey::SIZE / 4 <= 32,
-        "record must fit UICR.CUSTOMER"
-    );
+    const _: () = assert!(DeviceKey::SIZE / 4 < 32, "record must fit UICR.CUSTOMER");
 
     let header = UICR.customer(0).read();
 

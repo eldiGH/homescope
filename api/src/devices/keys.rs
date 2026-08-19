@@ -73,7 +73,7 @@ impl SealedDeviceKey {
             .expect("sealed size will match")
     }
 
-    pub fn seal(keyring: &KekRing, dek: DeviceKey, device_addr: DeviceAddr) -> Self {
+    pub fn seal(keyring: &KekRing, dek: &DeviceKey, device_addr: DeviceAddr) -> Self {
         Self::seal_with_nonce(keyring, dek, device_addr, XNonce::generate())
     }
 
@@ -87,7 +87,7 @@ impl SealedDeviceKey {
     /// Never call this with a nonce that is not freshly random.
     fn seal_with_nonce(
         keyring: &KekRing,
-        dek: DeviceKey,
+        dek: &DeviceKey,
         device_addr: DeviceAddr,
         nonce: XNonce,
     ) -> Self {
@@ -143,6 +143,10 @@ impl SealedDeviceKey {
     fn associated_data(ver: u8, kek_ver: u8, device_addr: DeviceAddr) -> [u8; 8] {
         let [a0, a1, a2, a3, a4, a5] = device_addr.0;
         [ver, kek_ver, a0, a1, a2, a3, a4, a5]
+    }
+
+    pub fn as_bytes(&self) -> &[u8; Self::SIZE] {
+        &self.0
     }
 }
 
@@ -338,7 +342,7 @@ mod test {
     }
 
     fn seal(keyring: &KekRing) -> SealedDeviceKey {
-        SealedDeviceKey::seal_with_nonce(keyring, DEK, ADDR, XNonce::from(NONCE))
+        SealedDeviceKey::seal_with_nonce(keyring, &DEK, ADDR, XNonce::from(NONCE))
     }
 
     // ---- format ----------------------------------------------------------
@@ -401,8 +405,8 @@ mod test {
         let ring = ring();
 
         assert_ne!(
-            SealedDeviceKey::seal(&ring, DEK, ADDR).0,
-            SealedDeviceKey::seal(&ring, DEK, ADDR).0,
+            SealedDeviceKey::seal(&ring, &DEK, ADDR).0,
+            SealedDeviceKey::seal(&ring, &DEK, ADDR).0,
             "a repeated nonce under one KEK would be catastrophic"
         );
     }

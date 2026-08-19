@@ -288,7 +288,7 @@ mod test {
     ];
 
     fn cipher() -> PacketCipher {
-        PacketCipher::new(KEY, ADDR)
+        PacketCipher::new(&KEY, ADDR)
     }
 
     fn encoded(cipher: &PacketCipher, seq: u32, measurements: &[Measurement]) -> Vec<u8> {

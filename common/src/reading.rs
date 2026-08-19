@@ -80,7 +80,7 @@ mod test {
     ]);
 
     fn cipher() -> PacketCipher {
-        PacketCipher::new(KEY, ADDR)
+        PacketCipher::new(&KEY, ADDR)
     }
 
     fn envelope(packet: Vec<u8>) -> ObservationEnvelope {
@@ -185,7 +185,7 @@ mod test {
     fn another_devices_cipher_cannot_open_the_envelope() {
         let envelope = envelope(packet_bytes(&cipher(), 42, &[Measurement::battery(2950)]));
 
-        let other = PacketCipher::new(KEY, DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]));
+        let other = PacketCipher::new(&KEY, DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]));
 
         assert_eq!(
             SensorReading::open_envelope(&envelope, &other),

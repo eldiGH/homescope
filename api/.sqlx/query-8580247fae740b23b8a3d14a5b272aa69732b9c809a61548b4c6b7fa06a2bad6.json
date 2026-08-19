@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\nSELECT\n    id, device_addr, name, key, key_updated_at\nFROM devices\n",
+  "query": "\nUPDATE devices SET key=$1, key_valid_from=NOW() WHERE device_addr=$2\nRETURNING id, device_addr, name, key, key_valid_from\n        ",
   "describe": {
     "columns": [
       {
@@ -49,18 +49,21 @@
       },
       {
         "ordinal": 4,
-        "name": "key_updated_at",
+        "name": "key_valid_from",
         "type_info": "Timestamptz",
         "origin": {
           "Table": {
             "table": "devices",
-            "name": "key_updated_at"
+            "name": "key_valid_from"
           }
         }
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Bytea",
+        "Int8"
+      ]
     },
     "nullable": [
       false,
@@ -70,5 +73,5 @@
       false
     ]
   },
-  "hash": "c680d11e7d2e7c91cf271c16413eba5e23f069a77fcc494bc6ddd1fe15c9fdcd"
+  "hash": "8580247fae740b23b8a3d14a5b272aa69732b9c809a61548b4c6b7fa06a2bad6"
 }

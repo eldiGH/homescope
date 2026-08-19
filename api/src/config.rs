@@ -1,7 +1,6 @@
-use std::{env::var, path::PathBuf};
+use std::path::PathBuf;
 
-use anyhow::Context;
-use homescope_host_util::env::env_var_or;
+use homescope_host_util::env::{env_var, env_var_or};
 
 pub struct ApiConfig {
     pub db_user: String,
@@ -14,21 +13,25 @@ pub struct ApiConfig {
     pub mqtt_host: String,
     pub mqtt_port: u16,
     pub kek_path: PathBuf,
+    pub http_bind: String,
+    pub admin_token_path: PathBuf,
 }
 
 impl ApiConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            db_user: var("DB_USER").context("DB_USER must be set")?,
-            db_password: var("DB_PASSWORD").context("DB_PASSWORD must be set")?,
-            db_database: var("DB_DATABASE").context("DB_DATABASE must be set")?,
-            db_host: var("DB_HOST").context("DB_HOST must be set")?,
+            db_user: env_var("DB_USER")?,
+            db_password: env_var("DB_PASSWORD")?,
+            db_database: env_var("DB_DATABASE")?,
+            db_host: env_var("DB_HOST")?,
             db_port: env_var_or("DB_PORT", 5432)?,
             db_pool_max_connections: env_var_or("DB_POOL_MAX_CONNECTIONS", 10)?,
             run_migrations: env_var_or("RUN_MIGRATIONS", false)?,
-            mqtt_host: var("MQTT_HOST").context("MQTT_HOST must be set")?,
+            mqtt_host: env_var("MQTT_HOST")?,
             mqtt_port: env_var_or("MQTT_PORT", 1883)?,
-            kek_path: var("KEK_PATH").context("KEK_PATH must be set")?.into(),
+            kek_path: env_var("KEK_PATH")?,
+            http_bind: env_var("HTTP_BIND")?,
+            admin_token_path: env_var("ADMIN_TOKEN_PATH")?,
         })
     }
 }

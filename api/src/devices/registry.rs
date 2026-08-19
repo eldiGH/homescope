@@ -77,6 +77,21 @@ impl DeviceRegistry {
         })
     }
 
+    /// An empty registry over a pool that is never used.
+    ///
+    /// [`load`](Self::load) is the only production constructor and it needs a
+    /// live database, so HTTP tests that only care about routing, extraction
+    /// and middleware would otherwise need one too. Handlers reached in those
+    /// tests are rejected before they touch the pool.
+    #[cfg(test)]
+    pub fn for_test(pool: PgPool) -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            keyring: Arc::new(KekRing::for_test()),
+            pool,
+        }
+    }
+
     pub fn get(&self, device_addr: DeviceAddr) -> Option<Arc<RegisteredDevice>> {
         self.cache
             .read()

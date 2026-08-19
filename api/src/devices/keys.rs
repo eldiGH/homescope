@@ -313,6 +313,22 @@ impl KekRing {
                 .expect("validated in KekRing::load"),
         )
     }
+
+    /// A one-generation ring for tests elsewhere in `devices`, which need *a*
+    /// ring to build a registry but do not care what is in it.
+    ///
+    /// `parse` is private to this module, so a sibling module cannot build one
+    /// itself. This is the seam rather than widening `parse`'s visibility,
+    /// because production code has exactly one legitimate source of KEKs and
+    /// that is the file named by `KEK_PATH`.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        Self::parse(
+            "current = 1\n\
+             1 = 1F2E3D4C5B6A79889796A5B4C3D2E1F00F1E2D3C4B5A69788796A5B4C3D2E1F0\n",
+        )
+        .expect("valid kek ring")
+    }
 }
 
 #[cfg(test)]

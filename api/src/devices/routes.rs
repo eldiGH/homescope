@@ -244,3 +244,36 @@ pub fn router() -> AppRouter {
         .route("/{device_addr}", get(get_device))
         .route("/{device_addr}/rotate-key", post(rotate_device_key))
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Fixed input, fixed output. The rendering is a contract with
+    /// homescope-provision, which decodes this string back into the 32 bytes
+    /// it writes to `UICR.CUSTOMER` — a change of case or byte order here is a
+    /// device whose packets fail their AEAD tag with no other symptom.
+    #[test]
+    fn key_renders_as_uppercase_hex_in_order() {
+        let mut bytes = [0u8; DeviceKey::SIZE];
+        bytes[0] = 0x00;
+        bytes[1] = 0x0F;
+        bytes[2] = 0xA5;
+        bytes[DeviceKey::SIZE - 1] = 0xFF;
+
+        assert_eq!(
+            key_to_hex(DeviceKey::from_bytes(bytes)),
+            format!("000FA5{}FF", "00".repeat(DeviceKey::SIZE - 4)),
+        );
+    }
+
+    /// Length is what a client validates before decoding, so pin it
+    /// separately from the byte order above.
+    #[test]
+    fn key_renders_to_two_chars_per_byte() {
+        let hex = key_to_hex(DeviceKey::from_bytes([0xAB; DeviceKey::SIZE]));
+
+        assert_eq!(hex.len(), DeviceKey::SIZE * 2);
+        assert_eq!(hex, "AB".repeat(DeviceKey::SIZE));
+    }
+}

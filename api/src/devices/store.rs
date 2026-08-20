@@ -3,7 +3,7 @@ use homescope_common::device_addr::DeviceAddr;
 use sqlx::{PgPool, query_as};
 use thiserror::Error;
 
-use crate::devices::keys::{self, SealedDeviceKey};
+use crate::devices::keys::SealedDeviceKey;
 
 /// Named in migration 20260716201805. Nothing type-checks this against the
 /// schema — a rename there silently downgrades 409 to 500 here.
@@ -17,61 +17,33 @@ struct DeviceRow {
     key_valid_from: DateTime<Utc>,
 }
 
-#[derive(Clone)]
-pub struct Device {
+pub struct DeviceRecord {
     pub id: i32,
     pub device_addr: DeviceAddr,
     pub name: String,
-    pub key: SealedDeviceKey,
+    pub key: Option<Vec<u8>>,
     pub key_valid_from: DateTime<Utc>,
 }
 
-impl TryFrom<DeviceRow> for Device {
-    type Error = DeviceRowError;
-
-    fn try_from(value: DeviceRow) -> Result<Self, Self::Error> {
-        let device_addr = DeviceAddr::try_from(value.device_addr as u64)
-            .expect("devices.device_addr_is_48_bits CHECK guarantees 48 bits");
-
-        let key = value
-            .key
-            .ok_or(DeviceParseError::KeyMissing)
-            .and_then(|bytes| bytes[..].try_into().map_err(Into::into))
-            .map_err(|source| DeviceRowError {
-                device_addr,
-                source,
-            })?;
-
-        Ok(Self {
+impl From<DeviceRow> for DeviceRecord {
+    fn from(value: DeviceRow) -> Self {
+        Self {
             id: value.id,
+            device_addr: device_addr_of(value.device_addr),
             name: value.name,
-            device_addr,
+            key: value.key,
             key_valid_from: value.key_valid_from,
-            key,
-        })
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum DeviceParseError {
-    #[error("device has invalid key: {0}")]
-    Key(#[from] keys::ParseError),
-
-    #[error("device key is missing")]
-    KeyMissing,
+fn device_addr_of(raw: i64) -> DeviceAddr {
+    DeviceAddr::try_from(raw as u64)
+        .expect("devices.device_addr_is_48_bits CHECK guarantees 48 bits")
 }
 
-#[derive(Debug, Error)]
-#[error("device {device_addr}: {source}")]
-pub struct DeviceRowError {
-    pub device_addr: DeviceAddr,
-    pub source: DeviceParseError,
-}
-
-pub async fn get_devices(
-    pool: &PgPool,
-) -> Result<Vec<Result<Device, DeviceRowError>>, sqlx::Error> {
-    Ok(query_as!(
+pub async fn all_records(pool: &PgPool) -> Result<Vec<DeviceRecord>, sqlx::Error> {
+    let records = query_as!(
         DeviceRow,
         "
 SELECT
@@ -82,15 +54,17 @@ FROM devices
     .fetch_all(pool)
     .await?
     .into_iter()
-    .map(Device::try_from)
-    .collect())
+    .map(DeviceRecord::from)
+    .collect::<Vec<_>>();
+
+    Ok(records)
 }
 
-pub async fn get_device(
+pub async fn record_by_addr(
     pool: &PgPool,
     addr: DeviceAddr,
-) -> Result<Option<Result<Device, DeviceRowError>>, sqlx::Error> {
-    let Some(row) = query_as!(
+) -> Result<Option<DeviceRecord>, sqlx::Error> {
+    let record = query_as!(
         DeviceRow,
         r#"
 SELECT
@@ -102,12 +76,9 @@ WHERE device_addr = $1
     )
     .fetch_optional(pool)
     .await?
-    else {
-        return Ok(None);
-    };
+    .map(DeviceRecord::from);
 
-    let device = Device::try_from(row);
-    Ok(Some(device))
+    Ok(record)
 }
 
 pub struct InsertDevice<'a> {
@@ -116,8 +87,11 @@ pub struct InsertDevice<'a> {
     pub key: SealedDeviceKey,
 }
 
-pub async fn insert_device(pool: &PgPool, device: InsertDevice<'_>) -> Result<Device, StoreError> {
-    Ok(query_as!(
+pub async fn insert_device(
+    pool: &PgPool,
+    device: InsertDevice<'_>,
+) -> Result<DeviceRecord, InsertDeviceError> {
+    query_as!(
         DeviceRow,
         r#"
 INSERT INTO devices (name, device_addr, key)
@@ -132,20 +106,20 @@ RETURNING id, device_addr, name, key, key_valid_from
     .await
     .map_err(|err| {
         if err.as_database_error().and_then(|d| d.constraint()) == Some(DEVICE_ADDR_UNIQUE) {
-            StoreError::DuplicateDeviceAddr
+            InsertDeviceError::DuplicateDeviceAddr
         } else {
-            StoreError::Db(err)
+            InsertDeviceError::Db(err)
         }
-    })?
-    .try_into()?)
+    })
+    .map(DeviceRecord::from)
 }
 
 pub async fn update_key(
     pool: &PgPool,
     device_addr: DeviceAddr,
     key: SealedDeviceKey,
-) -> Result<Option<Device>, StoreError> {
-    Ok(query_as!(
+) -> Result<Option<DeviceRecord>, sqlx::Error> {
+    query_as!(
         DeviceRow,
         r#"
 UPDATE devices SET key=$1, key_valid_from=NOW() WHERE device_addr=$2
@@ -155,100 +129,82 @@ RETURNING id, device_addr, name, key, key_valid_from
         device_addr.as_i64()
     )
     .fetch_optional(pool)
-    .await?
-    .map(Device::try_from)
-    .transpose()?)
+    .await
+    .map(|row| row.map(DeviceRecord::from))
 }
 
 #[derive(Debug, Error)]
-pub enum StoreError {
+pub enum InsertDeviceError {
     #[error("device_addr already exists")]
     DuplicateDeviceAddr,
 
     #[error(transparent)]
     Db(#[from] sqlx::Error),
-
-    #[error(transparent)]
-    Row(#[from] DeviceRowError),
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    /// A structurally valid sealed key: `TryFrom` checks length and version
-    /// only — opening it is the registry's job and needs a KEK.
-    fn sealed_key_bytes() -> Vec<u8> {
-        let mut bytes = vec![0u8; SealedDeviceKey::SIZE];
-        bytes[0] = SealedDeviceKey::VERSION;
-        bytes[1] = 1;
-        bytes
-    }
-
-    fn row() -> DeviceRow {
-        DeviceRow {
+    /// The only judgment this module makes. Postgres has no unsigned integers,
+    /// so `device_addr` is stored as a signed 64-bit column and read back
+    /// through a cast that would truncate a value wider than 48 bits — the
+    /// `device_addr_is_48_bits` CHECK is what makes that `expect` sound, and it
+    /// lives in a migration the compiler cannot see. Everything else on the way
+    /// from `DeviceRow` to `DeviceRecord` is a move.
+    #[test]
+    fn record_decodes_the_address_and_moves_the_rest() {
+        let record = DeviceRecord::from(DeviceRow {
             id: 1,
             device_addr: 0x0605_0403_0201,
             name: "kitchen".into(),
-            key: Some(sealed_key_bytes()),
+            key: Some(vec![0xAB; 4]),
             key_valid_from: DateTime::from_timestamp(1_753_000_000, 0).expect("valid timestamp"),
-        }
-    }
-
-    #[test]
-    fn valid_row_converts() {
-        let device = Device::try_from(row()).expect("valid row");
-
-        assert_eq!(device.id, 1);
-        assert_eq!(
-            device.device_addr,
-            DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
-        );
-        assert_eq!(device.name, "kitchen");
-        assert_eq!(device.key.ver(), SealedDeviceKey::VERSION);
-    }
-
-    /// Phase 1 of the key migration leaves the column nullable, so an
-    /// unprovisioned device is representable in the database but must not be
-    /// representable as a `Device` — that is what keeps `Device.key`
-    /// non-optional and makes phase 3 a two-line deletion.
-    #[test]
-    fn null_key_is_rejected() {
-        assert_eq!(
-            Device::try_from(DeviceRow { key: None, ..row() })
-                .err()
-                .expect("should have been rejected")
-                .source,
-            DeviceParseError::KeyMissing
-        );
-    }
-
-    #[test]
-    fn malformed_key_is_rejected() {
-        assert_eq!(
-            Device::try_from(DeviceRow {
-                key: Some(vec![0u8; 10]),
-                ..row()
-            })
-            .err()
-            .expect("should have been rejected")
-            .source,
-            DeviceParseError::Key(keys::ParseError::InvalidLen { len: 10 })
-        );
-    }
-
-    /// The row id lives on the wrapper, not the parse error, so the log line
-    /// can name which row to go and look at.
-    #[test]
-    fn row_error_renders_the_id() {
-        let err = DeviceRowError {
-            device_addr: DeviceAddr([0x12, 0x34, 0x56, 0x78, 0x90, 0xAB]),
-            source: DeviceParseError::KeyMissing,
-        };
+        });
 
         assert_eq!(
-            err.to_string(),
-            "device AB9078563412: device key is missing"
+            record.device_addr,
+            DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]),
+            "the column is little-endian: least significant byte first"
         );
+        assert_eq!(record.id, 1);
+        assert_eq!(record.name, "kitchen");
+        assert_eq!(record.key.as_deref(), Some(&[0xAB, 0xAB, 0xAB, 0xAB][..]));
+    }
+
+    /// The boundary the CHECK constraint permits. A 49th bit would make the
+    /// conversion panic, which is the intended behaviour — a row that violates
+    /// the constraint means the schema and this code disagree, and serving a
+    /// silently truncated address would be worse than failing.
+    #[test]
+    fn record_accepts_the_widest_permitted_address() {
+        let record = DeviceRecord::from(DeviceRow {
+            device_addr: 0xFFFF_FFFF_FFFF,
+            ..DeviceRow {
+                id: 1,
+                device_addr: 0,
+                name: String::new(),
+                key: None,
+                key_valid_from: DateTime::from_timestamp(0, 0).expect("valid timestamp"),
+            }
+        });
+
+        assert_eq!(record.device_addr, DeviceAddr([0xFF; 6]));
+    }
+
+    /// A null key is not this module's problem — it travels as-is and is
+    /// classified by `keys::open_key_column`, which is what keeps the store
+    /// free of anything needing a KEK.
+    #[test]
+    fn record_carries_a_null_key_through() {
+        let record = DeviceRecord::from(DeviceRow {
+            id: 1,
+            device_addr: 0x0605_0403_0201,
+            name: "kitchen".into(),
+            key: None,
+            key_valid_from: DateTime::from_timestamp(1_753_000_000, 0).expect("valid timestamp"),
+        });
+
+        assert!(record.key.is_none());
     }
 }

@@ -4,7 +4,6 @@ use anyhow::Context;
 use axum::{
     Router, extract::FromRef, http::StatusCode, middleware::from_fn_with_state, routing::get,
 };
-use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 
 use crate::{
@@ -21,7 +20,6 @@ mod health;
 #[derive(Clone, FromRef)]
 pub struct AppState {
     devices_registry: DeviceRegistry,
-    pool: PgPool,
 }
 
 pub type AppRouter = Router<AppState>;
@@ -42,7 +40,7 @@ async fn method_not_allowed() -> ApiError {
     )
 }
 
-fn router(devices_registry: DeviceRegistry, admin_token: AdminToken, pool: PgPool) -> Router {
+fn router(devices_registry: DeviceRegistry, admin_token: AdminToken) -> Router {
     let protected = Router::new()
         .nest("/devices", devices::router())
         .route_layer(from_fn_with_state(Arc::new(admin_token), require_bearer));
@@ -54,17 +52,13 @@ fn router(devices_registry: DeviceRegistry, admin_token: AdminToken, pool: PgPoo
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState {
-            devices_registry,
-            pool,
-        })
+        .with_state(AppState { devices_registry })
 }
 
 pub async fn serve(
     devices_registry: DeviceRegistry,
     http_bind: &str,
     admin_token: AdminToken,
-    pool: PgPool,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(http_bind)
         .await
@@ -72,8 +66,7 @@ pub async fn serve(
 
     axum::serve(
         listener,
-        router(devices_registry, admin_token, pool)
-            .into_make_service_with_connect_info::<SocketAddr>(),
+        router(devices_registry, admin_token).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
 
@@ -115,7 +108,6 @@ mod test {
         router(
             DeviceRegistry::for_test(pool.clone()),
             AdminToken::for_test(),
-            pool,
         )
     }
 

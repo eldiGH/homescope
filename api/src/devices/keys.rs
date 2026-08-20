@@ -331,6 +331,36 @@ impl KekRing {
     }
 }
 
+pub fn open_key_column(
+    column: Option<Vec<u8>>,
+    device_addr: DeviceAddr,
+    kek_ring: &KekRing,
+) -> Result<DeviceKey, KeyFault> {
+    let raw_key = column.ok_or(KeyFault::Missing)?;
+
+    let sealed = SealedDeviceKey::try_from(&raw_key[..]).map_err(KeyFault::Invalid)?;
+
+    sealed.open(kek_ring, device_addr).map_err(|err| match err {
+        OpenError::KekNotLoaded(ver) => KeyFault::KekUnavailable(ver),
+        OpenError::Authentication => KeyFault::Unopenable(OpenError::Authentication),
+    })
+}
+
+#[derive(Debug, Error)]
+pub enum KeyFault {
+    #[error("key is missing")]
+    Missing,
+
+    #[error("key has invalid format: {0}")]
+    Invalid(#[from] ParseError),
+
+    #[error("kek generation {0} is not loaded")]
+    KekUnavailable(u8),
+
+    #[error("key couldn't be opened: {0}")]
+    Unopenable(OpenError),
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -590,6 +620,115 @@ mod test {
         assert_eq!(
             SealedDeviceKey::try_from(&bytes[..]).unwrap_err(),
             ParseError::UnsupportedVersion(2)
+        );
+    }
+
+    // ---- the key column --------------------------------------------------
+
+    /// `open_key_column` is the single ladder from a nullable `bytea` to a
+    /// usable key, and each caller depends on a different half of it: the
+    /// registry needs the `Ok` arm to build a cipher at startup, the summary
+    /// endpoint needs each `Err` arm to tell an operator which of four
+    /// different things to go and do. The rungs are checked in order, so a row
+    /// failing an early one never reaches the later ones.
+    #[test]
+    fn key_column_opens_a_stored_key() {
+        let ring = ring();
+        let column = seal(&ring).0.to_vec();
+
+        assert_eq!(
+            open_key_column(Some(column), ADDR, &ring)
+                .expect("should have opened")
+                .as_bytes(),
+            DEK.as_bytes()
+        );
+    }
+
+    /// Phase 1 of the key migration leaves the column nullable, so an
+    /// unprovisioned device is representable in the database. Distinct from a
+    /// corrupt one: the remedy is to provision the device, not to go looking
+    /// for what damaged the row.
+    #[test]
+    fn key_column_reports_a_null_column() {
+        assert!(matches!(
+            open_key_column(None, ADDR, &ring()),
+            Err(KeyFault::Missing)
+        ));
+    }
+
+    #[test]
+    fn key_column_reports_a_malformed_blob() {
+        assert!(matches!(
+            open_key_column(Some(vec![0u8; 10]), ADDR, &ring()),
+            Err(KeyFault::Invalid(ParseError::InvalidLen { len: 10 }))
+        ));
+    }
+
+    /// The generation number must survive the flattening. It is the whole
+    /// actionable content of this fault — it names the line missing from the
+    /// KEK file — and it is what separates *restore the KEK* from *rotate the
+    /// key*, where rotating would destroy the sealed DEK permanently along
+    /// with every other row under the same generation.
+    #[test]
+    fn key_column_names_the_missing_generation() {
+        let column = seal(
+            &KekRing::parse(&format!("current = 2\n2 = {KEK_2_HEX}\n")).expect("valid kek file"),
+        )
+        .0
+        .to_vec();
+
+        assert!(matches!(
+            open_key_column(Some(column), ADDR, &ring()),
+            Err(KeyFault::KekUnavailable(2))
+        ));
+    }
+
+    /// A blob that parses and names a loaded generation but fails its tag —
+    /// here because the KEK bytes differ. Unlike the case above, this row
+    /// really is unrecoverable, which is why the two must not collapse into
+    /// one status.
+    #[test]
+    fn key_column_reports_a_failed_tag() {
+        let impostor =
+            KekRing::parse(&format!("current = 1\n1 = {KEK_2_HEX}\n")).expect("valid kek file");
+        let column = seal(&ring()).0.to_vec();
+
+        assert!(matches!(
+            open_key_column(Some(column), ADDR, &impostor),
+            Err(KeyFault::Unopenable(OpenError::Authentication))
+        ));
+    }
+
+    /// The AAD binding seen from the caller that relies on it: a blob moved
+    /// onto another device's row is a failed tag, not a silently wrong key.
+    #[test]
+    fn key_column_rejects_a_blob_from_another_row() {
+        let ring = ring();
+        let column = seal(&ring).0.to_vec();
+
+        assert!(matches!(
+            open_key_column(Some(column), OTHER_ADDR, &ring),
+            Err(KeyFault::Unopenable(OpenError::Authentication))
+        ));
+    }
+
+    /// Every fault reaches an operator as a log line, so each has to carry
+    /// enough to act on. `Missing` is the only one whose name is the whole
+    /// story; the other three flatten a richer error and must not lose it on
+    /// the way up.
+    #[test]
+    fn faults_render_their_cause() {
+        assert_eq!(
+            KeyFault::Invalid(ParseError::InvalidLen { len: 10 }).to_string(),
+            "key has invalid format: invalid length, should be 74: 10"
+        );
+        assert_eq!(
+            KeyFault::KekUnavailable(7).to_string(),
+            "kek generation 7 is not loaded"
+        );
+        assert_eq!(
+            KeyFault::Unopenable(OpenError::Authentication).to_string(),
+            "key couldn't be opened: authentication failed"
         );
     }
 

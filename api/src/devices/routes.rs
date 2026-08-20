@@ -9,15 +9,10 @@ use axum::{
 use chrono::{DateTime, Utc};
 use homescope_common::{device_addr::DeviceAddr, device_key::DeviceKey};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use tracing::{error, info, instrument};
 
 use crate::{
-    devices::{
-        DeviceRegistry,
-        registry::DeviceError,
-        store::{self, Device, DeviceRowError},
-    },
+    devices::{DeviceRegistry, registry::DeviceError, summary::DeviceSummary},
     http::{
         AppRouter, AppState,
         error::ApiError,
@@ -35,60 +30,10 @@ struct ProvisionDevicePayload {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeviceKeyResponse {
-    #[serde(flatten)]
-    device: DeviceResponse,
-    key: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DeviceResponse {
     device_addr: DeviceAddr,
     name: String,
     key_valid_from: DateTime<Utc>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DeviceErrorResponse {
-    device_addr: DeviceAddr,
-    error: String,
-}
-
-impl From<&DeviceRowError> for DeviceErrorResponse {
-    fn from(value: &DeviceRowError) -> Self {
-        Self {
-            device_addr: value.device_addr,
-            error: value.source.to_string(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase", tag = "status")]
-enum DeviceOrErrorResponse {
-    Ok(DeviceResponse),
-    Error(DeviceErrorResponse),
-}
-
-impl From<&Device> for DeviceResponse {
-    fn from(value: &Device) -> Self {
-        Self {
-            name: value.name.clone(),
-            key_valid_from: value.key_valid_from,
-            device_addr: value.device_addr,
-        }
-    }
-}
-
-impl From<Device> for DeviceResponse {
-    fn from(value: Device) -> Self {
-        Self {
-            name: value.name,
-            key_valid_from: value.key_valid_from,
-            device_addr: value.device_addr,
-        }
-    }
+    key: String,
 }
 
 impl From<DeviceError> for ApiError {
@@ -106,8 +51,8 @@ impl From<DeviceError> for ApiError {
                 "device not found",
             ),
 
-            DeviceError::Store(err) => {
-                error!(%err, "device store operation failed");
+            DeviceError::Db(err) => {
+                error!(%err, "device db operation failed");
                 ApiError::internal()
             }
 
@@ -172,7 +117,9 @@ async fn provision_device(
         StatusCode::CREATED,
         Json(DeviceKeyResponse {
             key: key_to_hex(key),
-            device: (&device.device).into(),
+            device_addr: device.device_addr,
+            name: device.name.clone(),
+            key_valid_from: device.key_valid_from,
         }),
     ))
 }
@@ -189,7 +136,9 @@ async fn rotate_device_key(
     Ok((
         StatusCode::OK,
         Json(DeviceKeyResponse {
-            device: (&device.device).into(),
+            device_addr: device.device_addr,
+            name: device.name.clone(),
+            key_valid_from: device.key_valid_from,
             key: key_to_hex(key),
         }),
     ))
@@ -197,45 +146,27 @@ async fn rotate_device_key(
 
 #[instrument(skip_all, fields(%device_addr))]
 async fn get_device(
-    State(pool): State<PgPool>,
+    State(device_registry): State<DeviceRegistry>,
     Path(device_addr): Path<DeviceAddr>,
-) -> Result<(StatusCode, Json<DeviceOrErrorResponse>), ApiError> {
-    let device = store::get_device(&pool, device_addr)
-        .await?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "device_not_found",
-                "device was not found",
-            )
-        })?;
+) -> Result<(StatusCode, Json<DeviceSummary>), ApiError> {
+    let device = device_registry.summary(device_addr).await?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "device_not_found",
+            "device was not found",
+        )
+    })?;
 
-    let response = match device {
-        Ok(device) => DeviceOrErrorResponse::Ok(DeviceResponse::from(device)),
-        Err(err) => DeviceOrErrorResponse::Error((&err).into()),
-    };
-
-    Ok((StatusCode::OK, Json(response)))
+    Ok((StatusCode::OK, Json(device)))
 }
 
 #[instrument(skip_all)]
 async fn get_devices(
-    State(pool): State<PgPool>,
-) -> Result<(StatusCode, Json<Vec<DeviceOrErrorResponse>>), ApiError> {
-    let devices = store::get_devices(&pool).await?;
+    State(device_registry): State<DeviceRegistry>,
+) -> Result<(StatusCode, Json<Vec<DeviceSummary>>), ApiError> {
+    let devices = device_registry.summaries().await?;
 
-    Ok((
-        StatusCode::OK,
-        Json(
-            devices
-                .into_iter()
-                .map(|r| match r {
-                    Ok(dev) => DeviceOrErrorResponse::Ok(DeviceResponse::from(dev)),
-                    Err(err) => DeviceOrErrorResponse::Error(DeviceErrorResponse::from(&err)),
-                })
-                .collect(),
-        ),
-    ))
+    Ok((StatusCode::OK, Json(devices)))
 }
 
 pub fn router() -> AppRouter {

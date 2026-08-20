@@ -67,7 +67,7 @@ async fn handle_envelope(
         }
     };
 
-    if let Err(err) = db::insert_reading(pool, &reading, device.device.id).await {
+    if let Err(err) = db::insert_reading(pool, &reading, device.id).await {
         error!(%err, "db error");
     }
 }

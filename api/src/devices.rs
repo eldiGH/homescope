@@ -4,3 +4,4 @@ mod store;
 pub use registry::DeviceRegistry;
 mod routes;
 pub use routes::router;
+mod summary;

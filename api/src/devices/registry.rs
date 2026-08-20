@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use chrono::{DateTime, Utc};
 use homescope_common::{
     device_addr::DeviceAddr,
     device_key::{DeviceKey, KeyGenError},
@@ -14,13 +15,14 @@ use thiserror::Error;
 use tracing::{error, info};
 
 use crate::devices::{
-    keys::{KekRing, SealedDeviceKey},
-    store::{self, Device, StoreError},
+    keys::{KekRing, SealedDeviceKey, open_key_column},
+    store::{self, InsertDeviceError},
+    summary::DeviceSummary,
 };
 
 #[derive(Clone)]
 pub struct DeviceRegistry {
-    cache: Arc<RwLock<HashMap<DeviceAddr, Arc<RegisteredDevice>>>>,
+    cache: Arc<RwLock<HashMap<DeviceAddr, Arc<Device>>>>,
     pool: PgPool,
     keyring: Arc<KekRing>,
 }
@@ -30,43 +32,33 @@ impl DeviceRegistry {
         let keyring = KekRing::load(kek_path)?;
 
         let mut key_failures = 0;
-        let mut invalid_rows = 0;
 
-        let map: HashMap<DeviceAddr, Arc<RegisteredDevice>> = store::get_devices(&pool)
+        let map: HashMap<DeviceAddr, Arc<Device>> = store::all_records(&pool)
             .await?
             .into_iter()
             .filter_map(|device| {
-                let device = device
+                let key = open_key_column(device.key, device.device_addr, &keyring)
                     .inspect_err(|err| {
-                        invalid_rows += 1;
-                        error!(%err);
+                        key_failures += 1;
+                        error!("device {}: can't open key: {err}", device.device_addr);
                     })
                     .ok()?;
 
-                let device_addr = device.device_addr;
-
                 Some((
-                    device_addr,
-                    Arc::new(RegisteredDevice {
-                        cipher: PacketCipher::new(
-                            &device
-                                .key
-                                .open(&keyring, device_addr)
-                                .inspect_err(|err| {
-                                    key_failures += 1;
-                                    error!("device row id={}; can't open key: {err}", device.id);
-                                })
-                                .ok()?,
-                            device_addr,
-                        ),
-                        device,
+                    device.device_addr,
+                    Arc::new(Device {
+                        id: device.id,
+                        name: device.name,
+                        device_addr: device.device_addr,
+                        key_valid_from: device.key_valid_from,
+                        cipher: PacketCipher::new(&key, device.device_addr),
                     }),
                 ))
             })
             .collect();
 
         info!(
-            "device registry loaded: {} devices ({invalid_rows} invalid rows, {key_failures} keys could not be opened)",
+            "device registry loaded: {} devices ({key_failures} keys could not be opened)",
             map.len()
         );
 
@@ -92,7 +84,7 @@ impl DeviceRegistry {
         }
     }
 
-    pub fn get(&self, device_addr: DeviceAddr) -> Option<Arc<RegisteredDevice>> {
+    pub fn get(&self, device_addr: DeviceAddr) -> Option<Arc<Device>> {
         self.cache
             .read()
             .expect("devices cache lock poisoned")
@@ -100,11 +92,32 @@ impl DeviceRegistry {
             .cloned()
     }
 
+    pub async fn summary(
+        &self,
+        device_addr: DeviceAddr,
+    ) -> Result<Option<DeviceSummary>, sqlx::Error> {
+        let summary = store::record_by_addr(&self.pool, device_addr)
+            .await?
+            .map(|record| DeviceSummary::classify(record, &self.keyring));
+
+        Ok(summary)
+    }
+
+    pub async fn summaries(&self) -> Result<Vec<DeviceSummary>, sqlx::Error> {
+        let summaries = store::all_records(&self.pool)
+            .await?
+            .into_iter()
+            .map(|record| DeviceSummary::classify(record, &self.keyring))
+            .collect();
+
+        Ok(summaries)
+    }
+
     pub async fn provision(
         &self,
         addr: DeviceAddr,
         name: &str,
-    ) -> Result<(Arc<RegisteredDevice>, DeviceKey), DeviceError> {
+    ) -> Result<(Arc<Device>, DeviceKey), DeviceError> {
         let key = DeviceKey::generate()?;
         let sealed_key = SealedDeviceKey::seal(&self.keyring, &key, addr);
 
@@ -118,8 +131,12 @@ impl DeviceRegistry {
         )
         .await?;
 
-        let registered_device = Arc::new(RegisteredDevice {
-            device,
+        let registered_device = Arc::new(Device {
+            id: device.id,
+            device_addr: device.device_addr,
+            name: device.name,
+            key_valid_from: device.key_valid_from,
+
             cipher: PacketCipher::new(&key, addr),
         });
 
@@ -134,7 +151,7 @@ impl DeviceRegistry {
     pub async fn rotate_key(
         &self,
         addr: DeviceAddr,
-    ) -> Result<(Arc<RegisteredDevice>, DeviceKey), DeviceError> {
+    ) -> Result<(Arc<Device>, DeviceKey), DeviceError> {
         let key = DeviceKey::generate()?;
         let sealed_key = SealedDeviceKey::seal(&self.keyring, &key, addr);
 
@@ -142,8 +159,11 @@ impl DeviceRegistry {
             .await?
             .ok_or(DeviceError::NotFound)?;
 
-        let new_device = Arc::new(RegisteredDevice {
-            device,
+        let new_device = Arc::new(Device {
+            id: device.id,
+            device_addr: device.device_addr,
+            name: device.name,
+            key_valid_from: device.key_valid_from,
             cipher: PacketCipher::new(&key, addr),
         });
 
@@ -156,8 +176,11 @@ impl DeviceRegistry {
     }
 }
 
-pub struct RegisteredDevice {
-    pub device: Device,
+pub struct Device {
+    pub id: i32,
+    pub device_addr: DeviceAddr,
+    pub name: String,
+    pub key_valid_from: DateTime<Utc>,
     pub cipher: PacketCipher,
 }
 
@@ -170,14 +193,14 @@ pub enum DeviceError {
     #[error("key generation failed: {0}")]
     KeyGen(#[from] KeyGenError),
     #[error(transparent)]
-    Store(StoreError),
+    Db(#[from] sqlx::Error),
 }
 
-impl From<StoreError> for DeviceError {
-    fn from(value: StoreError) -> Self {
+impl From<InsertDeviceError> for DeviceError {
+    fn from(value: InsertDeviceError) -> Self {
         match value {
-            StoreError::DuplicateDeviceAddr => DeviceError::AlreadyExists,
-            err => DeviceError::Store(err),
+            InsertDeviceError::DuplicateDeviceAddr => DeviceError::AlreadyExists,
+            InsertDeviceError::Db(err) => DeviceError::Db(err),
         }
     }
 }

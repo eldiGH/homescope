@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let admin_token = AdminToken::load(&config.admin_token_path).await?;
 
     tokio::select! {
-        r = ingest::run(&config, pool.clone(), devices.clone()) => r.map(|never| match never {}),
-        r = http::serve(devices, &config.http_bind, admin_token, pool) => r
+        r = ingest::run(&config, pool, devices.clone()) => r.map(|never| match never {}),
+        r = http::serve(devices, &config.http_bind, admin_token) => r
     }
 }

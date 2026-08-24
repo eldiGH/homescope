@@ -15,6 +15,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use homescope_board::board;
 use homescope_common::packet::cipher::PacketCipher;
+use homescope_common::uicr_record::UicrRecord;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
@@ -82,7 +83,19 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "wait-for-rtt")]
     while !defmt_rtt::in_blocking_mode() {}
 
-    let device_key = unwrap!(homescope_board::chip::device_key());
+    let device_key = match homescope_board::chip::device_key() {
+        UicrRecord::Blank => {
+            defmt::error!("device is empty - not provisioned");
+            return;
+        }
+
+        UicrRecord::Malformed(err) => {
+            defmt::error!("device is not correctly provisioned: {}", err);
+            return;
+        }
+
+        UicrRecord::Provisioned(key) => key,
+    };
 
     let mut config = embassy_nrf::config::Config::default();
     config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P2;

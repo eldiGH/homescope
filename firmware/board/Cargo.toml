@@ -14,7 +14,7 @@ bench=false
 test=false
 
 [dependencies]
-homescope-common = { workspace = true }
+homescope-common = { workspace = true, features = ["crypto"] }
 
 embassy-nrf = { version = "0.10.0", features = ["nrf52840", "unstable-pac"] }
 defmt = { version = "1.1.1", optional = true }

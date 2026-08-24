@@ -59,3 +59,6 @@ pub mod reading;
 
 #[cfg(feature = "crypto")]
 pub mod device_key;
+
+#[cfg(feature = "crypto")]
+pub mod uicr_record;

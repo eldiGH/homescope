@@ -24,6 +24,31 @@ impl DeviceAddr {
 
         i64::from_le_bytes([a0, a1, a2, a3, a4, a5, 0, 0])
     }
+
+    /// Builds an address from the two `FICR.DEVICEADDR` words.
+    ///
+    /// `DEVICEADDR[0]` holds the low 32 bits and `DEVICEADDR[1]` the high 16;
+    /// the upper half of the second word is not part of the address and is
+    /// discarded.
+    ///
+    /// The top two bits of the most significant byte are forced to `1`. Nordic
+    /// programs `DEVICEADDR` with a random value that is not a registered
+    /// public address, so it may only be advertised as a *static random*
+    /// address, and the Bluetooth spec marks those by that bit pattern. Doing
+    /// it here rather than at the advertiser keeps one definition of "this
+    /// device's address" — the same bytes reach the air, the database and the
+    /// label on the enclosure.
+    ///
+    /// This is the only place the address is derived, and both the sensor
+    /// firmware and `homescope-provision` call it: a provisioning tool that
+    /// computed the address differently would register a device under a name
+    /// its own packets never use.
+    pub fn from_ficr(addr0: u32, addr1: u32) -> Self {
+        let [a0, a1, a2, a3] = addr0.to_le_bytes();
+        let [a4, a5, _, _] = addr1.to_le_bytes();
+
+        Self([a0, a1, a2, a3, a4, a5 | 0xC0])
+    }
 }
 
 impl core::fmt::Display for DeviceAddr {

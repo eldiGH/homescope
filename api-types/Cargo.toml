@@ -1,0 +1,18 @@
+[package]
+name = "homescope-api-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+homescope-common = { workspace = true, features = ["serde"] }
+
+chrono = { version = "0.4.45", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+strum = { version = "0.28.0", features = ["derive"] }
+
+[dev-dependencies]
+# This crate's whole job is being a wire contract, and a contract is only
+# pinned by tests that state the JSON as literals. Nothing here needs a
+# serializer at runtime — the consumers bring their own.
+serde_json = "1.0.150"
+

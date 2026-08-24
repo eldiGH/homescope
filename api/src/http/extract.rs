@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use homescope_api_types::error::ApiErrorCode;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::http::error::ApiError;
@@ -20,7 +21,13 @@ where
         axum::extract::Json::<T>::from_request(req, state)
             .await
             .map(|axum::extract::Json(v)| Self(v))
-            .map_err(|r| ApiError::new(StatusCode::BAD_REQUEST, "invalid_body", r.body_text()))
+            .map_err(|r| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    ApiErrorCode::InvalidBody,
+                    r.body_text(),
+                )
+            })
     }
 }
 
@@ -49,6 +56,12 @@ where
         axum::extract::Path::<T>::from_request_parts(parts, state)
             .await
             .map(|axum::extract::Path(v)| Self(v))
-            .map_err(|r| ApiError::new(StatusCode::BAD_REQUEST, "invalid_params", r.body_text()))
+            .map_err(|r| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    ApiErrorCode::InvalidParams,
+                    r.body_text(),
+                )
+            })
     }
 }

@@ -3,27 +3,18 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use homescope_api_types::error::{ApiErrorBody, ApiErrorCode};
 use tracing::error;
 
 pub struct ApiError {
     status: StatusCode,
-    code: &'static str,
+    code: ApiErrorCode,
     message: String,
     headers: Vec<(HeaderName, HeaderValue)>,
 }
 
-/// The wire shape. Separate from `ApiError` because `StatusCode` isn't
-/// `Serialize` and because the body is a contract — it should change only
-/// deliberately, not as a side effect of adding a field to the struct.
-#[derive(Serialize)]
-struct ApiErrorBody<'a> {
-    code: &'a str,
-    message: &'a str,
-}
-
 impl ApiError {
-    pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(status: StatusCode, code: ApiErrorCode, message: impl Into<String>) -> Self {
         Self {
             status,
             code,
@@ -40,7 +31,7 @@ impl ApiError {
     pub fn internal() -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            ApiErrorCode::InternalError,
             "internal server error",
         )
     }
@@ -53,7 +44,7 @@ impl IntoResponse for ApiError {
             self.headers.into_iter().collect::<HeaderMap>(),
             Json(ApiErrorBody {
                 code: self.code,
-                message: &self.message,
+                message: self.message,
             }),
         )
             .into_response()
@@ -82,9 +73,20 @@ mod test {
 
     /// `code` is the contract — homescope-provision branches on it, so it is
     /// asserted literally rather than through a helper.
+    ///
+    /// The literal matters more now that `code` is an `ApiErrorCode` shared
+    /// with the client: asserting the variant against itself would prove
+    /// nothing about the JSON, and `rename_all` on that enum can rewrite
+    /// every code in one edit. `homescope_api_types` pins the full set;
+    /// this pins that a response body really is `{code, message}` with the
+    /// code rendered into it, which is the part axum owns.
     #[tokio::test]
     async fn renders_code_and_message() {
-        let err = ApiError::new(StatusCode::CONFLICT, "device_already_exists", "and so on");
+        let err = ApiError::new(
+            StatusCode::CONFLICT,
+            ApiErrorCode::DeviceAlreadyExists,
+            "and so on",
+        );
 
         assert_eq!(
             body_of(err).await,
@@ -94,7 +96,8 @@ mod test {
 
     #[test]
     fn keeps_its_status() {
-        let response = ApiError::new(StatusCode::NOT_FOUND, "nope", "nope").into_response();
+        let response =
+            ApiError::new(StatusCode::NOT_FOUND, ApiErrorCode::NotFound, "nope").into_response();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }

@@ -4,6 +4,7 @@ use anyhow::Context;
 use axum::{
     Router, extract::FromRef, http::StatusCode, middleware::from_fn_with_state, routing::get,
 };
+use homescope_api_types::error::ApiErrorCode;
 use tower_http::trace::TraceLayer;
 
 use crate::{
@@ -27,7 +28,7 @@ pub type AppRouter = Router<AppState>;
 async fn not_found() -> ApiError {
     ApiError::new(
         StatusCode::NOT_FOUND,
-        "not_found",
+        ApiErrorCode::NotFound,
         "provided path not found",
     )
 }
@@ -35,7 +36,7 @@ async fn not_found() -> ApiError {
 async fn method_not_allowed() -> ApiError {
     ApiError::new(
         StatusCode::METHOD_NOT_ALLOWED,
-        "method_not_allowed",
+        ApiErrorCode::MethodNotAllowed,
         "http method is not available for that path",
     )
 }

@@ -7,6 +7,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse as _, Response},
 };
+use homescope_api_types::error::ApiErrorCode;
 use subtle::ConstantTimeEq as _;
 use tokio::fs;
 use tracing::{instrument, warn};
@@ -65,7 +66,7 @@ impl std::fmt::Debug for AdminToken {
 fn unauthorized() -> ApiError {
     ApiError::new(
         StatusCode::UNAUTHORIZED,
-        "unauthorized",
+        ApiErrorCode::Unauthorized,
         "you are not authorized to perform that operation",
     )
     .add_header(

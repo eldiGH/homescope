@@ -1,0 +1,17 @@
+[package]
+name = "homescope-provision"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+homescope-common = { workspace = true, features = ["crypto"] }
+homescope-api-types = { workspace = true }
+
+clap = { version = "4.6.6", features = ["derive"] }
+probe-rs = "0.32.0"
+anyhow = "1.0.104"
+thiserror = "2.0.20"
+ureq = { version = "3.4.0", features = ["json"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+

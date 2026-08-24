@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["gateway", "common", "api", "host-util"]
+members = ["gateway", "common", "api", "host-util", "api-types", "provision"]
 
 [workspace.dependencies]
 homescope-common = { path = "common" }
 homescope-host-util = { path = "host-util" }
+homescope-api-types = { path = "api-types" }

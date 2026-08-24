@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 homescope-common = { workspace = true, features = ["serde", "codec", "crypto", "keygen"]}
 homescope-host-util = { workspace = true }
+homescope-api-types = { workspace = true }
 
 anyhow = "1.0.103"
 axum = { version = "0.8.9", features = ["macros"] }

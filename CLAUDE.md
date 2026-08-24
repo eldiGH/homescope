@@ -28,7 +28,8 @@ homescope/
 │   └── src/
 │       ├── lib.rs          # crate-level feature docs; unconditional #![no_std]
 │       ├── device_addr.rs  # DeviceAddr([u8; 6]) — BLE advertising address (AdvA, FICR-derived), 12-hex Display/serde
-│       ├── device_key.rs   # DeviceKey([u8; 32]) plaintext AEAD key — no Clone/Copy/Display, redacted Debug, ZeroizeOnDrop (crypto)
+│       ├── device_key.rs   # DeviceKey([u8; 32]) plaintext AEAD key — no Clone/Copy/Display, redacted Debug, ZeroizeOnDrop; to_hex/from_hex are the only text form (crypto)
+│       ├── uicr_record.rs  # UICR.CUSTOMER provisioning record — [magic HK][ver][pad][key 32] as [u32; 9]; encode/decode shared by firmware + provision (crypto)
 │       ├── wire.rs         # Wire trait (fixed-size LE codec) + wire_units! macro — one declaration per unit emits Wire + Display + defmt::Format + as_f64 (Millivolts, CentiCelsius, CentiPercent, Dbm) + Truncated/BufferTooSmall
 │       ├── measurement.rs  # TV measurement-ID registry — Measurement enum (id ⇒ semantics+repr+scale), macro-generated encode/decode
 │       ├── packet.rs       # SensorPacket (borrowed view) — [ver: u8][seq: u32][body]; parse = prefix only (version-blind), decode = dispatch on ver → Metrics; encode/encode_air/strip_air_magic; MAX_WIRE_LEN=252

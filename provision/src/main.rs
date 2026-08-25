@@ -15,7 +15,11 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Info => commands::info()?,
-        Commands::Provision { name, token, unlock } => {
+        Commands::Provision {
+            name,
+            token,
+            unlock,
+        } => {
             let api_client = ApiClient::new(token, cli.url);
             commands::provision(&api_client, unlock, name)?
         }

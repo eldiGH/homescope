@@ -1,18 +1,26 @@
+use std::time::Duration;
+
 use homescope_common::{
     device_addr::DeviceAddr,
+    device_key::DeviceKey,
     uicr_record::{self, RecordHeader},
 };
 use probe_rs::{
-    Core, MemoryInterface as _, Permissions, Session,
+    Core, MemoryInterface, Permissions, Session,
     architecture::arm::ArmError,
     probe::{DebugProbeInfo, list::Lister},
 };
 use thiserror::Error;
 
+use crate::chip::memory::{MemoryExt, Mismatch};
+
+mod memory;
+mod nvmc;
+
 const TARGET: &str = "nRF52840_xxAA";
 
 const FICR_DEVICE_ADDR: u64 = 0x1000_00A4;
-const UICR_CUSTOMER_DATA: u64 = 0x1000_1080;
+const UICR_CUSTOMER: u64 = 0x1000_1080;
 
 pub enum Connection {
     Attached(Box<Chip>),
@@ -69,26 +77,78 @@ impl Chip {
     }
 
     fn read_uicr_header(core: &mut Core) -> Result<RecordHeader, probe_rs::Error> {
-        let header_word = core.read_word_32(UICR_CUSTOMER_DATA)?;
+        let header_word = core.read_word_32(UICR_CUSTOMER)?;
 
         Ok(uicr_record::decode_header(header_word))
     }
 
     fn read_device_addr(core: &mut Core) -> Result<DeviceAddr, probe_rs::Error> {
-        let mut buf = [0u32; 2];
-        core.read_32(FICR_DEVICE_ADDR, &mut buf)?;
+        let buf: [u32; DeviceAddr::WORDS_NEEDED] = core.read_words(FICR_DEVICE_ADDR)?;
 
         Ok(DeviceAddr::from_ficr(buf[0], buf[1]))
     }
 
     pub fn read_state(&mut self) -> Result<ChipState, probe_rs::Error> {
-        let mut core = self.session.core(0).unwrap();
+        let mut core = self.session.core(0)?;
 
         Ok(ChipState {
             record: Self::read_uicr_header(&mut core)?,
             device_addr: Self::read_device_addr(&mut core)?,
         })
     }
+
+    pub fn erase_uicr_record(&mut self) -> Result<(), WriteRecordError> {
+        let mut core = self.session.core(0)?;
+
+        nvmc::with_erase_enabled(&mut core, |e| e.erase_uicr())?;
+        if let Some(mismatch) =
+            core.find_mismatch(UICR_CUSTOMER, &[u32::MAX; uicr_record::UICR_RECORD_WORDS])?
+        {
+            return Err(WriteRecordError::VerificationFailed(mismatch));
+        }
+
+        Ok(())
+    }
+
+    pub fn write_uicr_record(&mut self, key: DeviceKey) -> Result<(), WriteRecordError> {
+        let record = uicr_record::encode(&key);
+
+        let mut core = self.session.core(0)?;
+
+        nvmc::with_write_enabled(&mut core, |w| {
+            w.write_words(UICR_CUSTOMER + 4, &record[1..])?;
+            w.write_word(UICR_CUSTOMER, record[0])?;
+
+            Ok(())
+        })?;
+
+        if let Some(mismatch) = core.find_mismatch(UICR_CUSTOMER, &record[..])? {
+            return Err(WriteRecordError::VerificationFailed(mismatch));
+        }
+
+        Ok(())
+    }
+
+    pub fn halt(&mut self) -> Result<(), probe_rs::Error> {
+        self.session.core(0)?.halt(Duration::from_secs(1))?;
+        Ok(())
+    }
+
+    pub fn reset(&mut self) -> Result<(), probe_rs::Error> {
+        self.session.core(0)?.reset()?;
+        Ok(())
+    }
+}
+
+fn format_probe_info(probe: &DebugProbeInfo) -> String {
+    match &probe.serial_number {
+        Some(serial_number) => format!("{} ({})", probe.identifier, serial_number),
+        None => format!("{} (no serial)", probe.identifier),
+    }
+}
+
+fn format_probe_infos(probes: &[DebugProbeInfo]) -> Vec<String> {
+    probes.iter().map(format_probe_info).collect()
 }
 
 #[derive(Debug, Error)]
@@ -109,13 +169,14 @@ impl From<probe_rs::probe::DebugProbeError> for ConnectError {
     }
 }
 
-fn format_probe_info(probe: &DebugProbeInfo) -> String {
-    match &probe.serial_number {
-        Some(serial_number) => format!("{} ({})", probe.identifier, serial_number),
-        None => format!("{} (no serial)", probe.identifier),
-    }
-}
+#[derive(Debug, Error)]
+pub enum WriteRecordError {
+    #[error(transparent)]
+    Probe(#[from] probe_rs::Error),
 
-fn format_probe_infos(probes: &[DebugProbeInfo]) -> Vec<String> {
-    probes.iter().map(format_probe_info).collect()
+    #[error(transparent)]
+    Nvmc(#[from] nvmc::Error),
+
+    #[error("verification failed at address 0x{:08X}: expected 0x{:08X}, found 0x{:08X}", .0.address, .0.expected, .0.actual)]
+    VerificationFailed(Mismatch),
 }

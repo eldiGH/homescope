@@ -80,6 +80,7 @@
 //! copies, not as a question that has been settled.
 
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::device_key::DeviceKey;
 
@@ -133,7 +134,7 @@ mod layout {
 /// The caller writes the **key words first and word 0 last**, so that an
 /// interrupted run leaves a record that [`decode`] reports as
 /// [`UicrRecord::Blank`] rather than as corrupt. See the module docs.
-pub fn encode(key: &DeviceKey) -> [u32; UICR_RECORD_WORDS] {
+pub fn encode(key: &DeviceKey) -> Zeroizing<[u32; UICR_RECORD_WORDS]> {
     let mut buf = [0u8; UICR_RECORD_LEN];
 
     buf[layout::MAGIC].copy_from_slice(&UICR_MAGIC);
@@ -142,7 +143,7 @@ pub fn encode(key: &DeviceKey) -> [u32; UICR_RECORD_WORDS] {
 
     buf[layout::KEY].copy_from_slice(key.as_bytes());
 
-    let mut words = [0u32; UICR_RECORD_WORDS];
+    let mut words = Zeroizing::new([0u32; UICR_RECORD_WORDS]);
     let (chunks, _) = buf.as_chunks::<4>();
     for (word, bytes) in words.iter_mut().zip(chunks) {
         *word = u32::from_le_bytes(*bytes);
@@ -226,6 +227,12 @@ pub enum RecordHeader {
     /// A well-formed header of the current version. Because the header is
     /// written last, the key words behind it are complete.
     Present,
+}
+
+impl RecordHeader {
+    pub fn is_blank(&self) -> bool {
+        matches!(self, RecordHeader::Blank)
+    }
 }
 
 /// Why a non-erased `CUSTOMER` block is not a record this version can read.
@@ -333,7 +340,7 @@ mod test {
     /// expected words are therefore literals, computed by hand.
     #[test]
     fn encodes_to_the_documented_words() {
-        assert_eq!(encode(&DeviceKey::from_bytes(KEY_BYTES)), ENCODED);
+        assert_eq!(encode(&DeviceKey::from_bytes(KEY_BYTES))[..], ENCODED[..]);
     }
 
     /// The claim the module docs make about a hex dump: key byte `i` sits at

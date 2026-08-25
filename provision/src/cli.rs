@@ -23,6 +23,6 @@ pub enum Commands {
         #[arg(long)]
         token: String,
         #[arg(long)]
-        unlock: bool
+        unlock: bool,
     },
 }

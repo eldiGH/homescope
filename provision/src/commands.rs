@@ -1,6 +1,6 @@
 use anyhow::bail;
 use homescope_api_types::devices::ProvisionDevicePayload;
-use homescope_common::uicr_record::RecordHeader;
+use homescope_common::{device_key::DeviceKey, uicr_record::RecordHeader};
 
 use crate::{
     api_client::ApiClient,
@@ -42,35 +42,56 @@ pub fn info() -> anyhow::Result<()> {
 
 pub fn provision(api_client: &ApiClient, unlock: bool, name: String) -> anyhow::Result<()> {
     let mut chip = connect(unlock)?;
-    let record = chip.read_state()?;
+    chip.halt()?;
+
+    let chip_state = chip.read_state()?;
 
     let send_body = ProvisionDevicePayload {
         name,
-        device_addr: record.device_addr,
+        device_addr: chip_state.device_addr,
     };
 
     #[allow(unused_variables)]
     let response = api_client.provision(&send_body)?;
 
-    // println!(
-    //     "Device {} ({}) successfully provisioned",
-    //     response.name, response.device_addr
-    // );
+    let key = DeviceKey::from_hex(&response.key)?;
+
+    if !chip_state.record.is_blank() {
+        chip.erase_uicr_record()?;
+    }
+
+    chip.write_uicr_record(key)?;
+    chip.reset()?;
+
+    println!(
+        "Device {} ({}) successfully provisioned",
+        response.name, response.device_addr
+    );
 
     Ok(())
 }
 
 pub fn rotate_key(api_client: &ApiClient, unlock: bool) -> anyhow::Result<()> {
     let mut chip = connect(unlock)?;
-    let record = chip.read_state()?;
+    chip.halt()?;
+
+    let chip_state = chip.read_state()?;
 
     #[allow(unused_variables)]
-    let response = api_client.rotate_key(record.device_addr)?;
+    let response = api_client.rotate_key(chip_state.device_addr)?;
 
-    // println!(
-    //     "Key for device `{}` ({}) successfully rotated",
-    //     response.name, response.device_addr
-    // );
+    let key = DeviceKey::from_hex(&response.key)?;
+    if !chip_state.record.is_blank() {
+        chip.erase_uicr_record()?;
+    }
+
+    chip.write_uicr_record(key)?;
+    chip.reset()?;
+
+    println!(
+        "Key for device `{}` ({}) successfully rotated",
+        response.name, response.device_addr
+    );
 
     Ok(())
 }

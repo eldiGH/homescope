@@ -6,6 +6,7 @@ type Inner = [u8; 6];
 
 impl DeviceAddr {
     pub const SIZE: usize = size_of::<Inner>();
+    pub const WORDS_NEEDED: usize = Self::SIZE.div_ceil(4);
 
     pub fn encode_hex<'a>(&self, buf: &'a mut [u8; 12]) -> &'a str {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";

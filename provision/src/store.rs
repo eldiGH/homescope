@@ -98,11 +98,10 @@ pub struct Credentials {
 /// `[credentials.dev]`) while keeping the named type to hang load/save off.
 ///
 /// This does *not* forfeit room to grow: serde matches declared fields first
-/// and the flattened map takes only the remainder, so a future top-level key
-/// is just a new field — declared **before** `profiles`, because TOML cannot
-/// express a bare key after a table. A file written without it still loads,
-/// and a stray scalar at the root fails loudly (`expected struct Credentials`)
-/// rather than being absorbed as a profile.
+/// and the flattened map takes only the remainder, so a future top-level key is
+/// just a new field. A file written without it still loads, and a stray scalar
+/// at the root fails loudly (`expected struct Credentials`) rather than being
+/// absorbed as a profile.
 ///
 /// ⚠️ The one real constraint: a profile may not share a name with a declared
 /// field. That also fails loudly, so it costs an error message, not silence.
@@ -125,8 +124,11 @@ pub struct Profile {
 /// key. See that type for why a top-level field is still available here.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ConfigFile {
-    /// ⚠️ Must stay declared *before* `profiles`: TOML cannot express a bare
-    /// key after a table, and the serializer rejects the attempt.
+    /// Declared before `profiles` to match the emitted order. A bare key after
+    /// a table header would belong to that table, so settings have to come
+    /// first in the file — but `toml` 1.x sorts scalars ahead of tables for
+    /// you, so this is house style rather than a correctness requirement.
+    /// Verified: swapping these two fields still emits valid TOML.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
 
@@ -875,10 +877,12 @@ mod test {
         assert!(!creds.contains("[credentials"), "{creds}");
     }
 
-    /// ⚠️ TOML cannot express a bare key after a table, so `default_profile`
-    /// must serialize before the flattened profiles. Reordering the struct
-    /// fields breaks this at runtime with no compile warning — this is the
-    /// guard.
+    /// A bare key after a table header would belong to that table, so settings
+    /// have to reach the file before the profiles do.
+    ///
+    /// This pins the emitted shape, not the field order: `toml` 1.x sorts
+    /// scalars ahead of tables regardless of declaration order (verified by
+    /// swapping them). It would catch a serializer swap that stopped doing so.
     #[test]
     fn settings_serialize_before_the_profile_tables() {
         let dir = TempDir::new().unwrap();

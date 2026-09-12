@@ -10,28 +10,53 @@ use ureq::{
     http::{Response, StatusCode},
 };
 
+use crate::store::ApiTarget;
+
 pub struct ApiClient {
     agent: Agent,
-    base_url: String,
-    auth_token: String,
+    target: ApiTarget,
 }
 
 impl ApiClient {
-    pub fn new(auth_token: String, base_url: String) -> Self {
+    pub fn new(target: ApiTarget) -> Self {
         let config = Agent::config_builder().http_status_as_error(false).build();
         Self {
             agent: Agent::new_with_config(config),
-            base_url,
-            auth_token,
+            target,
         }
     }
 
+    /// What a confirmation prompt should name — the profile, not the URL.
+    pub fn label(&self) -> &str {
+        &self.target.label
+    }
+
+    pub fn url(&self) -> &str {
+        &self.target.url
+    }
+
     fn format_url(&self, url: &str) -> String {
-        format!("{}{}", self.base_url, url)
+        format!("{}{}", self.target.url, url)
     }
 
     fn add_auth_header<T>(&self, req: RequestBuilder<T>) -> RequestBuilder<T> {
-        req.header("Authorization", format!("Bearer {}", self.auth_token))
+        req.header(
+            "Authorization",
+            format!("Bearer {}", self.target.token.expose()),
+        )
+    }
+
+    /// Pre-flight: does the API answer, and does it accept this token?
+    ///
+    /// ⚠️ Worth running before anything destructive. On the `--unlock` path the
+    /// chip erase happens *before* the tool has ever spoken to the API, so an
+    /// unverified token costs a board.
+    pub fn check_auth(&self) -> Result<(), ApiClientError> {
+        let response = self
+            .add_auth_header(self.agent.get(self.format_url("/devices")))
+            .call()?;
+
+        reject_on_error_status(response).map(drop)
     }
 
     fn post<R, T>(&self, path: &str, send_body: &R) -> Result<T, ApiClientError>
@@ -96,9 +121,11 @@ pub enum ApiClientError {
     },
 }
 
-fn handle_response<T: for<'de> Deserialize<'de>>(
-    mut response: Response<Body>,
-) -> Result<T, ApiClientError> {
+/// Turns a non-2xx into [`ApiClientError::Rejected`], carrying the API's own
+/// `message` — which the API already redacts. Split out of [`handle_response`]
+/// so [`ApiClient::check_auth`] can reuse the rejection path without needing a
+/// body type to deserialize into.
+fn reject_on_error_status(mut response: Response<Body>) -> Result<Response<Body>, ApiClientError> {
     let status = response.status();
 
     if !status.is_success() {
@@ -112,6 +139,15 @@ fn handle_response<T: for<'de> Deserialize<'de>>(
             body: error_body,
         });
     }
+
+    Ok(response)
+}
+
+fn handle_response<T: for<'de> Deserialize<'de>>(
+    response: Response<Body>,
+) -> Result<T, ApiClientError> {
+    let mut response = reject_on_error_status(response)?;
+    let status = response.status();
 
     let parsed_body = response
         .body_mut()

@@ -1207,6 +1207,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml",
  "ureq",

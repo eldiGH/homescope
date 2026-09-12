@@ -22,7 +22,9 @@
 
 use std::{
     collections::BTreeMap,
-    env, fmt,
+    env,
+    ffi::OsStr,
+    fmt,
     fs::{self, DirBuilder, OpenOptions},
     io::{self, Write as _},
     os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
@@ -154,8 +156,13 @@ impl Store {
     /// ⚠️ Neither file being absent is an error — a fresh machine must still be
     /// able to run `info`, which needs no network and no credentials.
     pub fn load() -> Result<Self, StoreError> {
-        let dir = config_dir()?;
+        Self::at(config_dir()?)
+    }
 
+    /// Loads from an explicit directory. Splitting this from [`load`](Self::load)
+    /// keeps the tests off the process environment, which they could not mutate
+    /// safely anyway — they run in parallel threads of one process.
+    fn at(dir: PathBuf) -> Result<Self, StoreError> {
         Ok(Self {
             config: read_toml(&dir.join(CONFIG_FILE), false)?.unwrap_or_default(),
             credentials: read_toml(&dir.join(CREDENTIALS_FILE), true)?.unwrap_or_default(),
@@ -176,19 +183,11 @@ impl Store {
         api_url: Option<&str>,
     ) -> Result<ApiTarget, StoreError> {
         if let Some(url) = api_url {
-            // ⚠️ Never falls back to a stored token. Sending prod's credentials
-            // to a URL typed by hand is the failure this whole scheme exists to
-            // prevent, and "helpfully" reusing one is how you would cause it.
-            let token = env::var(TOKEN_ENV)
-                .ok()
-                .filter(|token| !token.is_empty())
-                .ok_or(StoreError::NoEnvToken)?;
-
-            return Ok(ApiTarget {
-                label: url.to_owned(),
-                url: normalize_url(url),
-                token: Token::new(token),
-            });
+            // ⚠️ Returns here without ever consulting `self`. That is the
+            // no-fallback guarantee: sending prod's stored credentials to a URL
+            // typed by hand is the failure this whole scheme exists to prevent,
+            // and "helpfully" reusing one is how you would cause it.
+            return direct_target(url, env::var(TOKEN_ENV).ok());
         }
 
         let name = profile
@@ -300,11 +299,35 @@ fn normalize_url(url: &str) -> String {
     url.trim_end_matches('/').to_owned()
 }
 
+/// The `--api-url` branch of [`Store::resolve`], with the environment lookup
+/// lifted out so the no-fallback rule is testable.
+fn direct_target(url: &str, env_token: Option<String>) -> Result<ApiTarget, StoreError> {
+    let token = env_token
+        .filter(|token| !token.is_empty())
+        .ok_or(StoreError::NoEnvToken)?;
+
+    Ok(ApiTarget {
+        label: url.to_owned(),
+        url: normalize_url(url),
+        token: Token::new(token),
+    })
+}
+
 /// XDG only — this is a Linux workstation CLI. If macOS or Windows ever
 /// matter, swap in `etcetera`'s base strategy rather than growing this.
 fn config_dir() -> Result<PathBuf, StoreError> {
-    if let Some(dir) = env::var_os("XDG_CONFIG_HOME") {
-        let path = PathBuf::from(dir);
+    config_dir_from(
+        env::var_os("XDG_CONFIG_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+}
+
+fn config_dir_from(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Result<PathBuf, StoreError> {
+    if let Some(dir) = xdg_config_home {
+        let path = Path::new(dir);
 
         // The spec says to ignore the variable unless it holds an absolute
         // path — which covers the empty-string case too.
@@ -313,11 +336,18 @@ fn config_dir() -> Result<PathBuf, StoreError> {
         }
     }
 
-    let home = env::var_os("HOME").ok_or(StoreError::NoHome)?;
+    let home = home.ok_or(StoreError::NoHome)?;
 
-    Ok(PathBuf::from(home).join(".config").join(APP_DIR))
+    Ok(Path::new(home).join(".config").join(APP_DIR))
 }
 
+/// Creates the config directory at 0700.
+///
+/// ⚠️ An *existing* directory keeps whatever mode it has — `DirBuilder` only
+/// applies the mode to directories it creates. That is deliberate: the
+/// credentials file is 0600 either way, so a loose directory leaks filenames
+/// and nothing else, and silently chmod'ing a path the user already owns is a
+/// bigger surprise than the leak is a risk.
 fn ensure_dir(dir: &Path) -> Result<(), StoreError> {
     DirBuilder::new()
         .recursive(true)
@@ -476,4 +506,403 @@ pub enum StoreError {
         "--api-url requires the token in {TOKEN_ENV}\n\nstored profile credentials are never reused for a URL passed on the command line"
     )]
     NoEnvToken,
+}
+
+#[cfg(test)]
+mod test {
+    use std::ffi::OsString;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn credentials(token: &str) -> Credentials {
+        Credentials {
+            token: Token::new(token.to_owned()),
+            subject: None,
+            expires_at: None,
+        }
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// `unwrap_err` requires `T: Debug`, and neither `Store` nor `ApiTarget`
+    /// has one — deliberately, since both carry a bearer token. So the tests
+    /// get the same treatment as everything else that handles one.
+    fn expect_err<T>(result: Result<T, StoreError>) -> StoreError {
+        match result {
+            Ok(_) => panic!("expected an error"),
+            Err(err) => err,
+        }
+    }
+
+    /// Mirrors production: `~/.config` already exists, `~/.config/homescope` is
+    /// ours to create. Several tests care about the mode the tool picks for it,
+    /// which it only gets to pick when it does the creating.
+    fn config_dir(tmp: &TempDir) -> PathBuf {
+        tmp.path().join(APP_DIR)
+    }
+
+    fn store_at(tmp: &TempDir) -> Result<Store, StoreError> {
+        Store::at(config_dir(tmp))
+    }
+
+    /// Writes a file into the config directory as if an earlier run had.
+    fn seed(tmp: &TempDir, file: &str, contents: &str) -> PathBuf {
+        let dir = config_dir(tmp);
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join(file);
+        fs::write(&path, contents).unwrap();
+
+        path
+    }
+
+    /// A store with one logged-in profile, ready to act on.
+    fn logged_in(tmp: &TempDir) -> Store {
+        let mut store = store_at(tmp).unwrap();
+
+        store
+            .login("dev", Some("http://localhost:8080"), credentials("tok-dev"))
+            .unwrap();
+
+        store
+    }
+
+    // ---- URL normalisation ------------------------------------------------
+
+    #[test]
+    fn a_trailing_slash_is_stripped_from_a_stored_url() {
+        // Paths are joined as `{url}{/path}`, so a stored slash means `//devices`.
+        assert_eq!(normalize_url("http://host:8080/"), "http://host:8080");
+        assert_eq!(normalize_url("http://host:8080///"), "http://host:8080");
+        assert_eq!(normalize_url("http://host:8080"), "http://host:8080");
+    }
+
+    // ---- XDG resolution ---------------------------------------------------
+
+    #[test]
+    fn an_absolute_xdg_config_home_wins() {
+        let dir = config_dir_from(Some(OsStr::new("/xdg")), Some(OsStr::new("/home/e"))).unwrap();
+
+        assert_eq!(dir, Path::new("/xdg/homescope"));
+    }
+
+    /// The spec says to ignore the variable unless it is an absolute path, and
+    /// an empty string is the case that actually shows up in the wild.
+    #[test]
+    fn an_empty_or_relative_xdg_config_home_is_ignored() {
+        for ignored in ["", "relative/path", "./here"] {
+            let dir =
+                config_dir_from(Some(OsStr::new(ignored)), Some(OsStr::new("/home/e"))).unwrap();
+
+            assert_eq!(dir, Path::new("/home/e/.config/homescope"), "{ignored:?}");
+        }
+    }
+
+    #[test]
+    fn with_neither_variable_there_is_nowhere_to_look() {
+        assert!(matches!(
+            config_dir_from(None, None),
+            Err(StoreError::NoHome)
+        ));
+    }
+
+    // ---- reading ----------------------------------------------------------
+
+    /// ⚠️ A fresh machine must still run `info`, which needs no credentials.
+    #[test]
+    fn absent_files_load_as_defaults_rather_than_failing() {
+        let dir = TempDir::new().unwrap();
+        let store = store_at(&dir).unwrap();
+
+        assert!(store.config().default_profile.is_none());
+        assert!(store.config().profiles.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_file_is_an_error_that_names_it() {
+        let dir = TempDir::new().unwrap();
+        seed(&dir, CONFIG_FILE, "this is not = = toml");
+
+        let err = expect_err(store_at(&dir));
+
+        assert!(matches!(&err, StoreError::Parse { .. }));
+        assert!(err.to_string().contains(CONFIG_FILE));
+    }
+
+    /// What `ssh` does with private keys, and for the same reason: a warning
+    /// scrolls away, a refusal gets fixed.
+    #[test]
+    fn group_or_world_readable_credentials_are_refused() {
+        let dir = TempDir::new().unwrap();
+        let path = seed(&dir, CREDENTIALS_FILE, "[dev]\ntoken = \"t\"\n");
+
+        for loosened in [0o640, 0o644, 0o604, 0o666] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(loosened)).unwrap();
+
+            let err = expect_err(store_at(&dir));
+
+            assert!(
+                matches!(&err, StoreError::Permissions { .. }),
+                "mode {loosened:o} should be refused"
+            );
+            assert!(err.to_string().contains("chmod 600"));
+        }
+    }
+
+    /// Only the credentials file is checked — 0644 is correct for config.
+    #[test]
+    fn a_world_readable_config_file_is_fine() {
+        let dir = TempDir::new().unwrap();
+        let path = seed(&dir, CONFIG_FILE, "default_profile = \"dev\"\n");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let store = store_at(&dir).unwrap();
+
+        assert_eq!(store.config().default_profile.as_deref(), Some("dev"));
+    }
+
+    // ---- writing ----------------------------------------------------------
+
+    #[test]
+    fn each_file_is_written_with_its_own_mode() {
+        let dir = TempDir::new().unwrap();
+        logged_in(&dir);
+
+        assert_eq!(
+            mode_of(&config_dir(&dir).join(CREDENTIALS_FILE)),
+            CREDENTIALS_MODE
+        );
+        assert_eq!(mode_of(&config_dir(&dir).join(CONFIG_FILE)), CONFIG_MODE);
+        assert_eq!(mode_of(&config_dir(&dir)), DIR_MODE);
+    }
+
+    /// ⚠️ The bug that motivated the temp-and-rename: `OpenOptions::mode` is
+    /// applied only when `open` actually creates the file, so writing in place
+    /// over a loosened file would silently leave it loosened.
+    #[test]
+    fn writing_over_a_loosened_file_restores_its_mode() {
+        let dir = TempDir::new().unwrap();
+        let mut store = logged_in(&dir);
+        let path = config_dir(&dir).join(CREDENTIALS_FILE);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        store.login("dev", None, credentials("tok-2")).unwrap();
+
+        assert_eq!(mode_of(&path), CREDENTIALS_MODE);
+    }
+
+    #[test]
+    fn no_temp_file_survives_a_write() {
+        let dir = TempDir::new().unwrap();
+        logged_in(&dir);
+
+        let leftovers: Vec<_> = fs::read_dir(config_dir(&dir))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp"))
+            .collect();
+
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    }
+
+    /// ⚠️ A run killed between create and rename leaves a temp behind, and
+    /// `create_new` would then fail forever on a name nobody knows about.
+    #[test]
+    fn a_stale_temp_file_does_not_wedge_the_next_write() {
+        let dir = TempDir::new().unwrap();
+        let target = config_dir(&dir).join(CONFIG_FILE);
+
+        let mut stale = OsString::from(CONFIG_FILE);
+        stale.push(format!(".tmp.{}", std::process::id()));
+        seed(&dir, stale.to_str().unwrap(), "junk from a killed run");
+
+        write_atomic(&target, "default_profile = \"dev\"\n", CONFIG_MODE).unwrap();
+
+        assert!(fs::read_to_string(&target).unwrap().contains("dev"));
+        assert!(!config_dir(&dir).join(&stale).exists());
+    }
+
+    // ---- load-modify-save -------------------------------------------------
+
+    /// ⚠️ `save` serializes the whole file, so writing one profile's entry
+    /// without re-reading the rest would delete every other profile.
+    #[test]
+    fn logging_in_again_preserves_the_other_profiles() {
+        let dir = TempDir::new().unwrap();
+        let mut store = logged_in(&dir);
+
+        store
+            .login("prod", Some("https://pi.local"), credentials("tok-prod"))
+            .unwrap();
+
+        // A fresh process, reading what was actually written to disk.
+        let mut reopened = store_at(&dir).unwrap();
+        reopened
+            .login("dev", None, credentials("tok-dev-rotated"))
+            .unwrap();
+
+        let reopened = store_at(&dir).unwrap();
+
+        assert_eq!(
+            reopened.resolve(Some("prod"), None).unwrap().token.expose(),
+            "tok-prod"
+        );
+        assert_eq!(
+            reopened.resolve(Some("dev"), None).unwrap().token.expose(),
+            "tok-dev-rotated"
+        );
+    }
+
+    #[test]
+    fn the_first_profile_saved_becomes_the_default() {
+        let dir = TempDir::new().unwrap();
+        let mut store = logged_in(&dir);
+
+        store
+            .login("prod", Some("https://pi.local"), credentials("tok-prod"))
+            .unwrap();
+
+        assert_eq!(store.config().default_profile.as_deref(), Some("dev"));
+    }
+
+    /// The profile survives so logging back in does not need the URL again.
+    #[test]
+    fn logout_drops_the_token_and_keeps_the_profile() {
+        let dir = TempDir::new().unwrap();
+        let mut store = logged_in(&dir);
+
+        assert!(store.logout("dev").unwrap());
+
+        let reopened = store_at(&dir).unwrap();
+
+        assert!(reopened.config().profiles.contains_key("dev"));
+        assert!(matches!(
+            reopened.resolve(Some("dev"), None),
+            Err(StoreError::NoCredentials(_))
+        ));
+    }
+
+    #[test]
+    fn logout_reports_when_there_was_nothing_to_remove() {
+        let dir = TempDir::new().unwrap();
+        let mut store = logged_in(&dir);
+
+        assert!(!store.logout("never-logged-in").unwrap());
+    }
+
+    // ---- resolution -------------------------------------------------------
+
+    #[test]
+    fn resolve_falls_back_to_the_default_profile() {
+        let dir = TempDir::new().unwrap();
+        let store = logged_in(&dir);
+
+        let target = store.resolve(None, None).unwrap();
+
+        assert_eq!(target.label, "dev");
+        assert_eq!(target.url, "http://localhost:8080");
+        assert_eq!(target.token.expose(), "tok-dev");
+    }
+
+    #[test]
+    fn resolve_names_the_fix_for_each_way_it_can_fail() {
+        let dir = TempDir::new().unwrap();
+        let mut store = logged_in(&dir);
+
+        let unknown = expect_err(store.resolve(Some("nope"), None));
+        assert!(matches!(&unknown, StoreError::UnknownProfile(_)));
+        assert!(unknown.to_string().contains("--api-url"));
+
+        store.logout("dev").unwrap();
+        let no_credentials = expect_err(store.resolve(Some("dev"), None));
+        assert!(matches!(&no_credentials, StoreError::NoCredentials(_)));
+        assert!(no_credentials.to_string().contains("login"));
+
+        let empty = store_at(&TempDir::new().unwrap()).unwrap();
+        assert!(matches!(
+            empty.resolve(None, None),
+            Err(StoreError::NoProfile)
+        ));
+    }
+
+    /// ⚠️ The whole point of `--api-url`: an explicit URL must never pick up a
+    /// stored token. `resolve` returns before it can consult the store, so a
+    /// missing `HOMESCOPE_TOKEN` is a refusal, not a fallback.
+    #[test]
+    fn an_explicit_url_without_an_env_token_is_refused_not_substituted() {
+        let err = expect_err(direct_target("http://typed-by-hand", None));
+
+        assert!(matches!(&err, StoreError::NoEnvToken));
+        assert!(err.to_string().contains(TOKEN_ENV));
+    }
+
+    #[test]
+    fn an_empty_env_token_counts_as_unset() {
+        assert!(matches!(
+            direct_target("http://host", Some(String::new())),
+            Err(StoreError::NoEnvToken)
+        ));
+    }
+
+    #[test]
+    fn an_explicit_url_is_labelled_by_itself_and_normalised() {
+        let target = direct_target("http://host:8080/", Some("env-token".to_owned())).unwrap();
+
+        assert_eq!(target.label, "http://host:8080/");
+        assert_eq!(target.url, "http://host:8080");
+        assert_eq!(target.token.expose(), "env-token");
+    }
+
+    // ---- on-disk shape ----------------------------------------------------
+
+    /// Both files read alike: a profile is a `[name]` table, never nested under
+    /// the field that holds it.
+    #[test]
+    fn profiles_are_not_prefixed_in_either_file() {
+        let dir = TempDir::new().unwrap();
+        logged_in(&dir);
+
+        let config = fs::read_to_string(config_dir(&dir).join(CONFIG_FILE)).unwrap();
+        let creds = fs::read_to_string(config_dir(&dir).join(CREDENTIALS_FILE)).unwrap();
+
+        assert!(config.contains("[dev]"), "{config}");
+        assert!(!config.contains("[profiles"), "{config}");
+        assert!(creds.contains("[dev]"), "{creds}");
+        assert!(!creds.contains("[credentials"), "{creds}");
+    }
+
+    /// ⚠️ TOML cannot express a bare key after a table, so `default_profile`
+    /// must serialize before the flattened profiles. Reordering the struct
+    /// fields breaks this at runtime with no compile warning — this is the
+    /// guard.
+    #[test]
+    fn settings_serialize_before_the_profile_tables() {
+        let dir = TempDir::new().unwrap();
+        logged_in(&dir);
+
+        let config = fs::read_to_string(config_dir(&dir).join(CONFIG_FILE)).unwrap();
+
+        let setting = config.find("default_profile").expect("no default_profile");
+        let table = config.find("[dev]").expect("no [dev] table");
+
+        assert!(setting < table, "settings must come first:\n{config}");
+    }
+
+    /// The one real cost of flattening, recorded so it is a known constraint
+    /// rather than a surprise: the failure is loud, not silent.
+    #[test]
+    fn a_profile_colliding_with_a_settings_key_is_rejected_loudly() {
+        let dir = TempDir::new().unwrap();
+        seed(
+            &dir,
+            CONFIG_FILE,
+            "[default_profile]\napi_url = \"http://host\"\n",
+        );
+
+        assert!(matches!(store_at(&dir), Err(StoreError::Parse { .. })));
+    }
 }

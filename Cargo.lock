@@ -1210,6 +1210,7 @@ dependencies = [
  "thiserror",
  "toml",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]

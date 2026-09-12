@@ -22,6 +22,20 @@ pub struct ApiArgs {
     pub api_url: Option<String>,
 }
 
+/// Consent handling for the commands that destroy something.
+///
+/// Flattened rather than made a global flag: `info` and `login` destroy
+/// nothing and should not offer to skip a prompt they never ask.
+#[derive(Args)]
+pub struct ConfirmArgs {
+    /// Answer every confirmation with yes
+    ///
+    /// ⚠️ Required when stdin is not a terminal — the prompts fail closed
+    /// rather than assuming consent.
+    #[arg(long)]
+    pub yes: bool,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Save an API token for a profile
@@ -61,6 +75,9 @@ pub enum Commands {
         #[command(flatten)]
         api: ApiArgs,
 
+        #[command(flatten)]
+        confirm: ConfirmArgs,
+
         /// Recover an APPROTECT-locked chip by erasing it first
         #[arg(long)]
         unlock: bool,
@@ -70,6 +87,9 @@ pub enum Commands {
     Rotate {
         #[command(flatten)]
         api: ApiArgs,
+
+        #[command(flatten)]
+        confirm: ConfirmArgs,
 
         #[arg(long)]
         unlock: bool,

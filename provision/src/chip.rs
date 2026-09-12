@@ -17,7 +17,7 @@ use crate::chip::memory::{MemoryExt, Mismatch};
 mod memory;
 mod nvmc;
 
-const TARGET: &str = "nRF52840_xxAA";
+pub const TARGET: &str = "nRF52840_xxAA";
 
 const FICR_DEVICE_ADDR: u64 = 0x1000_00A4;
 const UICR_CUSTOMER: u64 = 0x1000_1080;
@@ -32,12 +32,21 @@ pub struct LockedChip {
 }
 
 impl LockedChip {
+    /// Names the probe for the identity block. A locked chip has nothing else
+    /// to identify it — the address is behind APPROTECT.
+    pub fn probe_description(&self) -> String {
+        format_probe_info(&self.probe)
+    }
+
     pub fn erase_to_unlock(self) -> Result<Box<Chip>, ConnectError> {
+        let session = self
+            .probe
+            .open()?
+            .attach(TARGET, Permissions::new().allow_erase_all())?;
+
         Ok(Box::new(Chip {
-            session: self
-                .probe
-                .open()?
-                .attach(TARGET, Permissions::new().allow_erase_all())?,
+            session,
+            probe: self.probe,
         }))
     }
 }
@@ -49,9 +58,15 @@ pub struct ChipState {
 
 pub struct Chip {
     session: Session,
+    probe: DebugProbeInfo,
 }
 
 impl Chip {
+    /// Names the probe for the identity block.
+    pub fn probe_description(&self) -> String {
+        format_probe_info(&self.probe)
+    }
+
     pub fn connect() -> Result<Connection, ConnectError> {
         let lister = Lister::new();
 
@@ -64,7 +79,10 @@ impl Chip {
         };
 
         let connection = match probe.open()?.attach(TARGET, Permissions::new()) {
-            Ok(session) => Connection::Attached(Box::new(Self { session })),
+            Ok(session) => Connection::Attached(Box::new(Self {
+                session,
+                probe: probe.clone(),
+            })),
             Err(probe_rs::Error::Arm(ArmError::MissingPermissions(_))) => {
                 Connection::Locked(Box::new(LockedChip {
                     probe: probe.clone(),

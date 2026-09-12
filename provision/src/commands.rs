@@ -1,13 +1,16 @@
 use std::io::{IsTerminal as _, Write as _, stderr, stdin};
 
 use anyhow::{Context as _, bail};
-use homescope_api_types::devices::ProvisionDevicePayload;
+use homescope_api_types::devices::{DeviceKeyResponse, ProvisionDevicePayload};
 use homescope_common::{device_key::DeviceKey, uicr_record::RecordHeader};
+use zeroize::Zeroize as _;
 
 use crate::{
     api_client::ApiClient,
-    chip::{Chip, Connection},
-    cli::ApiArgs,
+    chip::{self, Chip, Connection},
+    cli::{ApiArgs, ConfirmArgs},
+    confirm::{self, ConfirmError},
+    output,
     store::{ApiTarget, Credentials, Store, Token},
 };
 
@@ -157,94 +160,193 @@ pub fn whoami(api: &ApiArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// ⚠️ Never prompts and never refuses. A locked chip is a *state* to report,
+/// not a failure — and the old message told the reader to pass `--unlock`, a
+/// flag `info` does not have.
 pub fn info() -> anyhow::Result<()> {
-    let mut chip = match Chip::connect()? {
-        Connection::Locked(_) => {
-            bail!(messages::device_locked_warning());
+    match Chip::connect()? {
+        Connection::Locked(locked) => {
+            output::identity_locked(&locked.probe_description(), chip::TARGET);
         }
 
-        Connection::Attached(chip) => chip,
-    };
+        Connection::Attached(mut chip) => {
+            let state = chip.read_state()?;
+            output::identity(&chip.probe_description(), chip::TARGET, &state);
 
-    let state = chip.read_state()?;
-
-    let key_status = match state.record {
-        RecordHeader::Blank => "Blank - ready to provision",
-        RecordHeader::Malformed(err) => &format!("Malformed - {err}"),
-        RecordHeader::Present => "UICR header provisioned correclty, ready for reprovision",
-    };
-
-    println!("Device address: {}", state.device_addr);
-    println!("Status: {key_status}");
+            println!("{}", state.device_addr);
+        }
+    }
 
     Ok(())
 }
 
-pub fn provision(api: &ApiArgs, unlock: bool, name: String) -> anyhow::Result<()> {
+pub fn provision(
+    api: &ApiArgs,
+    confirm_args: &ConfirmArgs,
+    unlock: bool,
+    name: String,
+) -> anyhow::Result<()> {
     let api_client = resolve_client(api)?;
 
     // ⚠️ Before `connect`, because --unlock erases the chip to make it
     // readable. A token that turns out to be wrong afterwards costs a board.
-    api_client.check_auth()?;
+    output::step("Checking credentials", || api_client.check_auth())?;
 
-    let mut chip = connect(unlock)?;
+    let mut chip = connect(unlock, confirm_args.yes)?;
     chip.halt()?;
 
-    let chip_state = chip.read_state()?;
+    let state = chip.read_state()?;
+    output::identity(&chip.probe_description(), chip::TARGET, &state);
+
+    confirm_record(&state.record, Action::Provision, confirm_args.yes)?;
 
     let send_body = ProvisionDevicePayload {
         name,
-        device_addr: chip_state.device_addr,
+        device_addr: state.device_addr,
     };
 
-    let response = api_client.provision(&send_body)?;
+    // ⚠️ Confirm *before* the mint, not before the erase. The mint is
+    // destructive to the registry — it invalidates the running sensor's key the
+    // moment it returns — so confirming after it asks a question whose answer
+    // can no longer change anything.
+    let mut response = output::step(&format!("Registering {:?}", send_body.name), || {
+        api_client.provision(&send_body)
+    })?;
 
-    let key = DeviceKey::from_hex(&response.key)?;
+    install_key(&mut chip, &state.record, &mut response, "provision")?;
 
-    if !chip_state.record.is_blank() {
-        chip.erase_uicr_record()?;
-    }
-
-    chip.write_uicr_record(key)?;
-    chip.reset()?;
-
-    println!(
-        "Device {} ({}) successfully provisioned",
+    println!("{}\t{}", response.device_addr, response.name);
+    output::outcome(&format!(
+        "Provisioned {:?} as {}",
         response.name, response.device_addr
-    );
+    ));
 
     Ok(())
 }
 
-pub fn rotate_key(api: &ApiArgs, unlock: bool) -> anyhow::Result<()> {
+pub fn rotate_key(api: &ApiArgs, confirm_args: &ConfirmArgs, unlock: bool) -> anyhow::Result<()> {
     let api_client = resolve_client(api)?;
 
-    api_client.check_auth()?;
+    output::step("Checking credentials", || api_client.check_auth())?;
 
-    let mut chip = connect(unlock)?;
+    let mut chip = connect(unlock, confirm_args.yes)?;
     chip.halt()?;
 
-    let chip_state = chip.read_state()?;
+    let state = chip.read_state()?;
+    output::identity(&chip.probe_description(), chip::TARGET, &state);
 
-    let response = api_client.rotate_key(chip_state.device_addr)?;
+    confirm_record(&state.record, Action::Rotate, confirm_args.yes)?;
 
-    let key = DeviceKey::from_hex(&response.key)?;
-    if !chip_state.record.is_blank() {
-        chip.erase_uicr_record()?;
-    }
+    let mut response = output::step("Requesting a new key", || {
+        api_client.rotate_key(state.device_addr)
+    })?;
 
-    chip.write_uicr_record(key)?;
-    chip.reset()?;
+    install_key(&mut chip, &state.record, &mut response, "rotate")?;
 
-    println!(
-        "Key for device `{}` ({}) successfully rotated",
+    println!("{}\t{}", response.device_addr, response.name);
+    output::outcome(&format!(
+        "Rotated the key for {:?} ({})",
         response.name, response.device_addr
-    );
+    ));
 
     Ok(())
 }
 
-fn connect(unlock: bool) -> anyhow::Result<Box<Chip>> {
+enum Action {
+    Provision,
+    Rotate,
+}
+
+/// The chip half of the preconditions.
+///
+/// ⚠️ The chip record and the registry row are **different facts**, and they
+/// come apart in exactly the cases a precondition exists for — a chip-erased
+/// deployed sensor reads `Blank` while its row is present, a board from another
+/// deployment reads `Present` with no row at all. So the API owns the
+/// *refusals* (it already raises 409 and 404 before storing anything) and the
+/// chip owns only the *confirmations*. Guessing at fleet membership from the
+/// record header would be wrong in two of the five cases.
+///
+/// ⚠️ In particular `rotate` must **not** refuse on `Blank`: that is the
+/// post-chip-erase recovery path. The row exists, the device needs a new key,
+/// and there is nothing on the chip to see. Refuse here and that board becomes
+/// unprovisionable, because `provision` will 409 on the row.
+fn confirm_record(
+    record: &RecordHeader,
+    action: Action,
+    assume_yes: bool,
+) -> Result<(), ConfirmError> {
+    let question = match (action, record) {
+        // Nothing to destroy. The happy path stays prompt-free.
+        (_, RecordHeader::Blank) => return Ok(()),
+
+        (_, RecordHeader::Malformed(err)) => format!(
+            "This board holds a record this tool cannot read ({err}).\n\
+             It may be someone else's data, or a newer tool's record. Overwrite it?"
+        ),
+
+        (Action::Provision, RecordHeader::Present) => {
+            "This board already holds a key, which provisioning destroys.".to_owned()
+        }
+
+        (Action::Rotate, RecordHeader::Present) => {
+            "This board is reporting under its current key.\n\
+             It goes dark from the moment the new key is issued until the write lands."
+                .to_owned()
+        }
+    };
+
+    confirm::yes_no(&question, assume_yes)
+}
+
+/// Everything after the mint.
+///
+/// ⚠️ A failure anywhere in here leaves the device **dark**, and the issued key
+/// is not recoverable — there is no resume, only a fresh mint. That is why it
+/// gets its own message rather than surfacing as a generic error.
+fn install_key(
+    chip: &mut Chip,
+    record: &RecordHeader,
+    response: &mut DeviceKeyResponse,
+    retry_command: &str,
+) -> anyhow::Result<()> {
+    // Decode, then wipe the hex before anything else can fail — §2 asks that
+    // the plaintext key cross an interface exactly once. Note the zeroize runs
+    // before the `?`, so the error path does not skip it.
+    let key = DeviceKey::from_hex(&response.key);
+    response.key.zeroize();
+    let key = key?;
+
+    let installed = (|| -> anyhow::Result<()> {
+        if !record.is_blank() {
+            output::step("Erasing UICR record", || chip.erase_uicr_record())?;
+        }
+
+        // `write_uicr_record` reads the record back and compares, so this step
+        // covers §0's verify. ⚠️ It must happen before any flashing: a bad key
+        // under good firmware fails silently, where good firmware with no key
+        // announces itself over RTT.
+        output::step("Writing and verifying UICR record", || {
+            chip.write_uicr_record(key)
+        })?;
+
+        output::step("Resetting", || chip.reset())?;
+
+        Ok(())
+    })();
+
+    installed.with_context(|| {
+        format!(
+            "the UICR write failed after the API issued a new key\n\n  \
+             {} ({:?}) will not report until it is re-keyed.\n  \
+             Re-run `homescope-provision {retry_command}` — the issued key is\n  \
+             not recoverable and a new one will be minted.",
+            response.device_addr, response.name,
+        )
+    })
+}
+
+fn connect(unlock: bool, assume_yes: bool) -> anyhow::Result<Box<Chip>> {
     let chip = match Chip::connect()? {
         Connection::Attached(chip) => {
             if unlock {
@@ -257,7 +359,24 @@ fn connect(unlock: bool) -> anyhow::Result<Box<Chip>> {
             if !unlock {
                 bail!(messages::device_locked_warning());
             }
-            locked_chip.erase_to_unlock()?
+
+            // ⚠️ This is the one confirmation that cannot name what it destroys:
+            // APPROTECT means the address is unreadable until *after* the erase.
+            // Blind consent gets a typed word rather than a keystroke.
+            //
+            // It also runs before the tool has any device-specific knowledge,
+            // which is why `check_auth` already ran — otherwise a wrong token
+            // would be discovered with the board already blank.
+            output::identity_locked(&locked_chip.probe_description(), chip::TARGET);
+
+            confirm::typed(
+                "Unlocking erases the entire chip — firmware, key and seq counter.\n\
+                 This board cannot be identified until after the erase.",
+                "ERASE",
+                assume_yes,
+            )?;
+
+            output::step("Erasing chip to unlock", || locked_chip.erase_to_unlock())?
         }
     };
 

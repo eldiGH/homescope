@@ -1,8 +1,12 @@
-use std::io::{IsTerminal as _, Write as _, stderr, stdin};
+use std::{
+    io::{IsTerminal as _, Write as _, stderr, stdin, stdout},
+    time::Duration,
+};
 
-use anyhow::{Context as _, bail};
+use anyhow::{Context as _, anyhow, bail};
+use chrono::{SecondsFormat, Utc};
 use homescope_api_types::devices::{DeviceKeyResponse, ProvisionDevicePayload};
-use homescope_common::{device_key::DeviceKey, uicr_record::RecordHeader};
+use homescope_common::{device_addr::DeviceAddr, device_key::DeviceKey, uicr_record::RecordHeader};
 use zeroize::Zeroize as _;
 
 use crate::{
@@ -12,6 +16,7 @@ use crate::{
     confirm::{self, ConfirmError},
     output,
     store::{ApiTarget, Credentials, Store, Token},
+    verify::{self, Progress, WaitError},
 };
 
 /// Profile name used when nothing else names one, so a first run is just
@@ -160,6 +165,36 @@ pub fn whoami(api: &ApiArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The fleet as the API sees it: a table on a terminal, bare tab-separated rows
+/// into a pipe. The count and the API it came from go to stderr, so they never
+/// become a row a script has to skip.
+pub fn list(api: &ApiArgs) -> anyhow::Result<()> {
+    let client = resolve_client(api)?;
+    let devices = client.devices()?;
+    let for_terminal = stdout().is_terminal();
+
+    if for_terminal {
+        let plural = if devices.len() == 1 { "" } else { "s" };
+        writeln!(
+            stderr(),
+            "{} device{plural} on {}\n",
+            devices.len(),
+            client.label()
+        )?;
+
+        if devices.is_empty() {
+            return Ok(());
+        }
+    }
+
+    print!(
+        "{}",
+        output::fleet_listing(&devices, Utc::now(), for_terminal)
+    );
+
+    Ok(())
+}
+
 /// ⚠️ Never prompts and never refuses. A locked chip is a *state* to report,
 /// not a failure — and the old message told the reader to pass `--unlock`, a
 /// flag `info` does not have.
@@ -187,18 +222,30 @@ pub fn provision(
     name: String,
 ) -> anyhow::Result<()> {
     let api_client = resolve_client(api)?;
-
-    // ⚠️ Before `connect`, because --unlock erases the chip to make it
-    // readable. A token that turns out to be wrong afterwards costs a board.
-    output::step("Checking credentials", || api_client.check_auth())?;
+    check_auth_before_unlock(&api_client, unlock)?;
 
     let mut chip = connect(unlock, confirm_args.yes)?;
-    chip.halt()?;
 
     let state = chip.read_state()?;
     output::identity(&chip.probe_description(), chip::TARGET, &state);
 
+    let registered = api_client.device(state.device_addr)?;
+    output::fleet(api_client.label(), registered.as_ref(), Utc::now());
+
+    // The API would refuse this with a 409. Asking first means refusing before
+    // a prompt, a halt or a mint — but the POST stays the authority: the
+    // registry can change between the two requests, and it still 409s.
+    if let Some(existing) = registered {
+        bail!(
+            "{} is already registered as {:?} — rotate its key instead: \
+             `homescope-provision rotate`",
+            state.device_addr,
+            existing.name
+        );
+    }
+
     confirm_record(&state.record, Action::Provision, confirm_args.yes)?;
+    chip.halt()?;
 
     let send_body = ProvisionDevicePayload {
         name,
@@ -226,16 +273,35 @@ pub fn provision(
 
 pub fn rotate_key(api: &ApiArgs, confirm_args: &ConfirmArgs, unlock: bool) -> anyhow::Result<()> {
     let api_client = resolve_client(api)?;
-
-    output::step("Checking credentials", || api_client.check_auth())?;
+    check_auth_before_unlock(&api_client, unlock)?;
 
     let mut chip = connect(unlock, confirm_args.yes)?;
-    chip.halt()?;
 
     let state = chip.read_state()?;
     output::identity(&chip.probe_description(), chip::TARGET, &state);
 
-    confirm_record(&state.record, Action::Rotate, confirm_args.yes)?;
+    let registered = api_client.device(state.device_addr)?;
+    output::fleet(api_client.label(), registered.as_ref(), Utc::now());
+
+    // Same reasoning as `provision`, inverted: the API would 404 this. ⚠️ Note
+    // what is *not* refused — a `Blank` record on a registered device is the
+    // post-chip-erase recovery path, and must go through.
+    let Some(existing) = registered else {
+        bail!(
+            "{} is not registered — provision it instead: \
+             `homescope-provision provision <NAME>`",
+            state.device_addr
+        );
+    };
+
+    confirm_record(
+        &state.record,
+        Action::Rotate {
+            name: &existing.name,
+        },
+        confirm_args.yes,
+    )?;
+    chip.halt()?;
 
     let mut response = output::step("Requesting a new key", || {
         api_client.rotate_key(state.device_addr)
@@ -252,9 +318,32 @@ pub fn rotate_key(api: &ApiArgs, confirm_args: &ConfirmArgs, unlock: bool) -> an
     Ok(())
 }
 
-enum Action {
+/// Proves the token before anything is erased, on the one path where that has
+/// to happen before the device can be looked up.
+///
+/// ⚠️ `--unlock` erases the chip to make its address readable at all, so the
+/// usual proof — the device lookup, which fails on a bad token like any other
+/// request — would arrive with the board already blank. Every other path gets
+/// that proof from the lookup, before anything is halted or written, and skips
+/// this round trip.
+fn check_auth_before_unlock(api_client: &ApiClient, unlock: bool) -> anyhow::Result<()> {
+    if unlock {
+        output::step("Checking credentials", || api_client.check_auth())?;
+    }
+
+    Ok(())
+}
+
+// ⚠️ Why `chip.halt()` comes *after* `confirm_record` in both commands above:
+// everything before the prompt is a plain memory read that leaves a running
+// sensor running. Halting first would stop it for as long as the question
+// stayed unanswered. probe-rs does release the halt when the session drops
+// (clearing DHCSR.C_DEBUGEN), so a declined prompt never left a board stopped
+// for good — but declining should cost the board nothing at all.
+
+enum Action<'a> {
     Provision,
-    Rotate,
+    Rotate { name: &'a str },
 }
 
 /// The chip half of the preconditions.
@@ -289,11 +378,10 @@ fn confirm_record(
             "This board already holds a key, which provisioning destroys.".to_owned()
         }
 
-        (Action::Rotate, RecordHeader::Present) => {
-            "This board is reporting under its current key.\n\
+        (Action::Rotate { name }, RecordHeader::Present) => format!(
+            "{name:?} holds its current key on this board.\n\
              It goes dark from the moment the new key is issued until the write lands."
-                .to_owned()
-        }
+        ),
     };
 
     confirm::yes_no(&question, assume_yes)
@@ -344,6 +432,99 @@ fn install_key(
             response.device_addr, response.name,
         )
     })
+}
+
+/// Waits for the API to hear from a device under its current key — level 2 of
+/// the verification ladder, and the one that proves the whole chain.
+///
+/// ⚠️ Never halts or resets the board. Reading its address over the probe is a
+/// plain memory read, and the session is dropped before the wait: `verify` must
+/// not stop the sensor it is waiting to hear from.
+pub fn verify(api: &ApiArgs, address: Option<DeviceAddr>, timeout: Duration) -> anyhow::Result<()> {
+    let client = resolve_client(api)?;
+
+    let device_addr = match address {
+        Some(device_addr) => {
+            output::address(device_addr);
+            device_addr
+        }
+        None => address_from_probe()?,
+    };
+
+    let summary = client.device(device_addr)?.ok_or_else(|| {
+        anyhow!(
+            "{device_addr} is not registered with {} — provision it first",
+            client.label()
+        )
+    })?;
+
+    output::fleet(client.label(), Some(&summary), Utc::now());
+
+    if let Progress::Undecryptable(status) = verify::assess(None, &summary) {
+        return Err(wait_failure(
+            WaitError::Undecryptable(status),
+            &summary.name,
+            device_addr,
+        ));
+    }
+
+    let reported_at = output::step(
+        &format!(
+            "Waiting for a new reading from {:?} (up to {}s)",
+            summary.name,
+            timeout.as_secs()
+        ),
+        || verify::wait_for_reading(&client, device_addr, summary.last_seen, timeout),
+    )
+    .map_err(|err| wait_failure(err, &summary.name, device_addr))?;
+
+    println!(
+        "{device_addr}\t{}",
+        reported_at.to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+    output::outcome(&format!(
+        "{:?} ({device_addr}) reported under its current key at {}",
+        summary.name,
+        output::timestamp(reported_at)
+    ));
+
+    Ok(())
+}
+
+/// Reads the attached board's address and releases the probe.
+fn address_from_probe() -> anyhow::Result<DeviceAddr> {
+    match Chip::connect()? {
+        Connection::Attached(mut chip) => {
+            let state = chip.read_state()?;
+            output::identity(&chip.probe_description(), chip::TARGET, &state);
+
+            Ok(state.device_addr)
+        }
+
+        Connection::Locked(locked) => {
+            output::identity_locked(&locked.probe_description(), chip::TARGET);
+
+            bail!(
+                "the attached board is locked, so its address cannot be read — pass it \
+                 explicitly: `homescope-provision verify <ADDRESS>`"
+            )
+        }
+    }
+}
+
+/// Words a failed wait for the terminal. A timeout gets a checklist, because it
+/// is the one failure that does not say where the break is.
+fn wait_failure(err: WaitError, name: &str, device_addr: DeviceAddr) -> anyhow::Error {
+    match err {
+        WaitError::TimedOut(secs) => anyhow!(
+            "no new reading from {name:?} ({device_addr}) within {secs}s\n\n  \
+             The API reports no problem with its key, so the break is between the board\n  \
+             and the API. Check that the board is powered and running firmware, that a\n  \
+             receiver is in range, and that the receiver, gateway and broker are up.\n  \
+             A board that reports less often than every {secs}s needs a longer --timeout."
+        ),
+        other => anyhow!("{name:?} ({device_addr}): {other}"),
+    }
 }
 
 fn connect(unlock: bool, assume_yes: bool) -> anyhow::Result<Box<Chip>> {

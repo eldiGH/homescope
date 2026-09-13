@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use clap::Parser as _;
 
 use crate::cli::{Cli, Commands};
@@ -9,6 +11,7 @@ mod commands;
 mod confirm;
 mod output;
 mod store;
+mod verify;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -17,6 +20,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Login { profile, api_url } => commands::login(profile, api_url)?,
         Commands::Logout { profile } => commands::logout(profile)?,
         Commands::Whoami { api } => commands::whoami(&api)?,
+        Commands::List { api } => commands::list(&api)?,
         Commands::Info => commands::info()?,
         Commands::Provision {
             name,
@@ -29,6 +33,11 @@ fn main() -> anyhow::Result<()> {
             confirm,
             unlock,
         } => commands::rotate_key(&api, &confirm, unlock)?,
+        Commands::Verify {
+            address,
+            api,
+            timeout,
+        } => commands::verify(&api, address, Duration::from_secs(timeout))?,
     };
 
     Ok(())

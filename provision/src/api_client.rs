@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use homescope_api_types::{
-    devices::{DeviceKeyResponse, ProvisionDevicePayload},
-    error::ApiErrorBody,
+    devices::{DeviceKeyResponse, DeviceSummary, ProvisionDevicePayload},
+    error::{ApiErrorBody, ApiErrorCode},
 };
 use homescope_common::device_addr::DeviceAddr;
 use serde::{Deserialize, Serialize};
@@ -12,6 +14,13 @@ use ureq::{
 
 use crate::store::ApiTarget;
 
+/// End to end for one request — DNS, connect, send, and reading the body.
+///
+/// ureq sets no timeout by default. That is survivable for a single interactive
+/// call and not for `verify`, which makes dozens: one stalled connection would
+/// hang it past its own deadline with nothing on screen.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct ApiClient {
     agent: Agent,
     target: ApiTarget,
@@ -19,7 +28,10 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(target: ApiTarget) -> Self {
-        let config = Agent::config_builder().http_status_as_error(false).build();
+        let config = Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            .build();
         Self {
             agent: Agent::new_with_config(config),
             target,
@@ -48,9 +60,9 @@ impl ApiClient {
 
     /// Pre-flight: does the API answer, and does it accept this token?
     ///
-    /// ⚠️ Worth running before anything destructive. On the `--unlock` path the
-    /// chip erase happens *before* the tool has ever spoken to the API, so an
-    /// unverified token costs a board.
+    /// ⚠️ Worth running before anything destructive that happens before a device
+    /// can be named. On the `--unlock` path the chip erase happens *before* the
+    /// tool has ever spoken to the API, so an unverified token costs a board.
     pub fn check_auth(&self) -> Result<(), ApiClientError> {
         let response = self
             .add_auth_header(self.agent.get(self.format_url("/devices")))
@@ -80,7 +92,6 @@ impl ApiClient {
         )
     }
 
-    #[allow(dead_code)]
     fn get<T>(&self, path: &str) -> Result<T, ApiClientError>
     where
         T: for<'de> Deserialize<'de>,
@@ -100,6 +111,34 @@ impl ApiClient {
 
     pub fn rotate_key(&self, device_addr: DeviceAddr) -> Result<DeviceKeyResponse, ApiClientError> {
         self.post_empty(&format!("/devices/{device_addr}/rotate-key"))
+    }
+
+    /// The registry's view of one device, or `None` if it is not registered.
+    pub fn device(&self, device_addr: DeviceAddr) -> Result<Option<DeviceSummary>, ApiClientError> {
+        absent_if_not_registered(self.get(&format!("/devices/{device_addr}")))
+    }
+
+    /// Every registered device, in whatever order the API returns them.
+    pub fn devices(&self) -> Result<Vec<DeviceSummary>, ApiClientError> {
+        self.get("/devices")
+    }
+}
+
+/// Maps the API's "no such device" to `None`.
+///
+/// ⚠️ Only `device_not_found` does. A 404 carrying any other code — `not_found`
+/// from a route this API does not have — stays an error, so "this API cannot
+/// answer" never reads as "this device is not registered", which `provision`
+/// treats as leave to go ahead.
+fn absent_if_not_registered<T>(
+    result: Result<T, ApiClientError>,
+) -> Result<Option<T>, ApiClientError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(ApiClientError::Rejected { body, .. }) if body.code == ApiErrorCode::DeviceNotFound => {
+            Ok(None)
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -155,4 +194,57 @@ fn handle_response<T: for<'de> Deserialize<'de>>(
         .map_err(|error| ApiClientError::ResponseDeserializationError { status, error })?;
 
     Ok(parsed_body)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn rejected(status: StatusCode, code: ApiErrorCode) -> ApiClientError {
+        ApiClientError::Rejected {
+            status,
+            body: ApiErrorBody::new(code, "m"),
+        }
+    }
+
+    #[test]
+    fn a_device_the_api_returns_is_some() {
+        assert!(matches!(absent_if_not_registered::<u8>(Ok(7)), Ok(Some(7))));
+    }
+
+    #[test]
+    fn device_not_found_is_none() {
+        assert!(matches!(
+            absent_if_not_registered::<u8>(Err(rejected(
+                StatusCode::NOT_FOUND,
+                ApiErrorCode::DeviceNotFound
+            ))),
+            Ok(None)
+        ));
+    }
+
+    /// ⚠️ The case that must not collapse into `None`: a 404 for a route the
+    /// API does not have. Read as "not registered", `provision` would take it as
+    /// leave to go ahead.
+    #[test]
+    fn a_404_for_a_missing_route_stays_an_error() {
+        assert!(matches!(
+            absent_if_not_registered::<u8>(Err(rejected(
+                StatusCode::NOT_FOUND,
+                ApiErrorCode::NotFound
+            ))),
+            Err(ApiClientError::Rejected { .. })
+        ));
+    }
+
+    #[test]
+    fn other_rejections_stay_errors() {
+        assert!(matches!(
+            absent_if_not_registered::<u8>(Err(rejected(
+                StatusCode::UNAUTHORIZED,
+                ApiErrorCode::Unauthorized
+            ))),
+            Err(ApiClientError::Rejected { .. })
+        ));
+    }
 }

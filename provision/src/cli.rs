@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use homescope_common::device_addr::DeviceAddr;
 
 #[derive(Parser)]
 #[command(about = "Give a board an identity in the Homescope fleet")]
@@ -65,6 +66,12 @@ pub enum Commands {
         api: ApiArgs,
     },
 
+    /// List every registered device with its key status and last reading
+    List {
+        #[command(flatten)]
+        api: ApiArgs,
+    },
+
     /// Report what is on the attached probe right now
     Info,
 
@@ -93,5 +100,23 @@ pub enum Commands {
 
         #[arg(long)]
         unlock: bool,
+    },
+
+    /// Wait until the API hears from a device under its current key
+    ///
+    /// Proves the whole chain at once — radio, receiver, gateway, broker and the
+    /// API's decrypt. Only a reading newer than the one on file when waiting
+    /// starts counts, so on a deployed board this answers "is it reporting now",
+    /// not "did it ever". Never halts or resets the board.
+    Verify {
+        /// Device to wait for (default: the board on the attached probe)
+        address: Option<DeviceAddr>,
+
+        #[command(flatten)]
+        api: ApiArgs,
+
+        /// Give up after this long without a new reading
+        #[arg(long, value_name = "SECONDS", default_value_t = 180)]
+        timeout: u64,
     },
 }

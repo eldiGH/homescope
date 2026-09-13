@@ -50,6 +50,8 @@ homescope/
 ├── host-util/              # homescope-host-util — shared init() (dotenv+tracing) + env_var_or
 ├── provision/              # homescope-provision — workstation CLI (probe-rs): read FICR/UICR, write the key record, flash
 │   └── src/                # main.rs, cli.rs (clap), commands.rs, api_client.rs (ureq),
+│                           #   store.rs (profiles + 0600 credentials), confirm.rs (fail-closed gates),
+│                           #   output.rs (identity block, fleet listing), verify.rs (L2: wait for lastSeen),
 │                           #   chip.rs (Chip owns the probe Session) + chip/{nvmc,memory}.rs
 ├── firmware/
 │   ├── Cargo.toml          # firmware workspace: sensor, receiver, board

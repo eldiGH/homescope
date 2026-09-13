@@ -180,7 +180,7 @@ encoding** — *type–value*: each field is a measurement ID followed directly
 by its value, with the length implied by the ID. (The length-implied member
 of the TLV family; 3GPP TS 24.007 calls this format "TV". There is
 deliberately no per-field length byte — see below.) This is the BTHome
-model — see `NOTES-packet-tv-aead.md` for the full worked-out plan. Guiding principle: **extensible, not generic** — adding
+model — see `docs/design/packet-tv-aead.md` for the full worked-out plan. Guiding principle: **extensible, not generic** — adding
 sensor type N+1 is a small local change at each layer; ingesting *unimagined*
 sensor types with zero code changes is an explicit non-goal (that's a generic
 telemetry platform, a crowded space; Homescope's unique value is the
@@ -249,7 +249,7 @@ Each sensor has a **unique 32-byte ChaCha20-Poly1305 key**, held in the chip's U
 
 **Keyless intermediaries are enforced, not just intended.** The cipher sits behind a `crypto` cargo feature that the receiver and gateway do not enable, so in their builds `SensorPacket` exposes only `parse` and `strip_air_magic` — there is no `decode` method to call and no key type to hold. The architectural decision is checked by the compiler.
 
-### Payload layout *(revised 2026-07-16 with the TV redesign — see `NOTES-packet-tv-aead.md`)*
+### Payload layout *(revised 2026-07-16 with the TV redesign — see `docs/design/packet-tv-aead.md`)*
 
 ```
 +---------+---------+--------------+--------------------------+---------------+
@@ -274,13 +274,13 @@ Because the nonce is derived from `seq` with no random component, this counter i
 
 ### Key provisioning
 
-The device **identity** needs no provisioning — the advertising address comes from the nRF52840's FICR at runtime. The per-device **key** (planned) is written once into the chip's **UICR** by a workstation CLI. *(Settled 2026-07-20 — supersedes an earlier build-time `DEVICE_KEY` env + `link_section` sketch, rejected because it makes the firmware image per-device. Full plan: `NOTES-provisioning.md`.)*
+The device **identity** needs no provisioning — the advertising address comes from the nRF52840's FICR at runtime. The per-device **key** (planned) is written once into the chip's **UICR** by a workstation CLI. *(Settled 2026-07-20 — supersedes an earlier build-time `DEVICE_KEY` env + `link_section` sketch, rejected because it makes the firmware image per-device. Full plan: `docs/design/provisioning.md`.)*
 
 ```
 homescope-provision --name "kitchen" --site home --room kitchen
   1. probe-rs reads FICR DEVICEADDR from the blank chip (no firmware needed)
   2. POST /devices to the API → it generates the 32-byte key, returns it once
-  3. write the key to UICR.CUSTOMER[0..7] (+ REGOUT0 = 3.0 V on the custom PCB)
+  3. write the key to UICR.CUSTOMER[0..9] (+ REGOUT0 = 3.0 V on the custom PCB)
   4. read UICR back and verify, then flash the generic firmware image
 ```
 
@@ -498,11 +498,11 @@ Rationale:
 15. ⏳ **Receiver/gateway plumbing tightening** — real VID/PID (pid.codes) instead of embassy's `0xc0de:0xcafe` placeholder, udev match on FICR serial, `TAG+="systemd"` device unit + `BindsTo=` so the gateway container's lifecycle follows the dongle (replug-safe), `ID_MM_DEVICE_IGNORE`.
 16. ⏳ **Sensor drivers** — ✅ SHT45 over async TWIM (`sht4x` crate); ⏳ BMP581 (`bmp5` async crate) on the designated indoor barometer node; optional LTR390 on the outdoor node.
 17. ⏳ **Watchdog + XIAO alkaline soak test** — watchdog first (probe-less panic = silent HardFault spin that drains the pack), then the unattended reliability/longevity baseline on 2× AA alkaline.
-18. 🔶 **Packet redesign + crypto** *(plan settled 2026-07-16 — see `NOTES-packet-tv-aead.md`; owner's order)*: ① ✅ **DeviceAddr refactor** (identity = AdvA, protocol v0.4); ② ✅ **TV measurement encoding** (protocol v0.5) — measurement-ID registry in `common`, sensor TV encode, receiver variable-length frames + opaque forwarding (2026-07-25), gateway `frame::parse` decoder + opaque MQTT envelope (2026-07-26), API TV decode + nullable metric columns + `UNIQUE (device_id, seq, time)` (2026-07-28); ③ ✅ **seq persistence** on the sensor (flash checkpoint with jump-ahead — `seq_counter.rs`; retained-RAM part joins with sleep optimization); ④ ✅ **v0.6 air-packet header** (2026-07-29) — `[magic b"HP"][ver: u8]` in front of `seq`; receiver checks + strips the magic and stays version-blind, API dispatches on `ver`; ⑤ ✅ **ChaCha20-Poly1305 AEAD** (2026-07-31, protocol v0.7) — the sensor seals the TV section, `device_addr`+`ver`+`seq` as AAD, nonce derived from the persisted `seq`; receiver and gateway forward it opaquely and needed **no code changes**, the API decrypts. `ver` deliberately stayed at 1 (nothing deployed, no dual-accept window). The cipher sits behind a `crypto` cargo feature the keyless components don't enable, so they have no `decode` method to call. Fits extended advertising's 254 B budget (never fit legacy's 31 B). ⚠️ Shared hardcoded key until ⑳ provisioning lands.
+18. 🔶 **Packet redesign + crypto** *(plan settled 2026-07-16 — see `docs/design/packet-tv-aead.md`; owner's order)*: ① ✅ **DeviceAddr refactor** (identity = AdvA, protocol v0.4); ② ✅ **TV measurement encoding** (protocol v0.5) — measurement-ID registry in `common`, sensor TV encode, receiver variable-length frames + opaque forwarding (2026-07-25), gateway `frame::parse` decoder + opaque MQTT envelope (2026-07-26), API TV decode + nullable metric columns + `UNIQUE (device_id, seq, time)` (2026-07-28); ③ ✅ **seq persistence** on the sensor (flash checkpoint with jump-ahead — `seq_counter.rs`; retained-RAM part joins with sleep optimization); ④ ✅ **v0.6 air-packet header** (2026-07-29) — `[magic b"HP"][ver: u8]` in front of `seq`; receiver checks + strips the magic and stays version-blind, API dispatches on `ver`; ⑤ ✅ **ChaCha20-Poly1305 AEAD** (2026-07-31, protocol v0.7) — the sensor seals the TV section, `device_addr`+`ver`+`seq` as AAD, nonce derived from the persisted `seq`; receiver and gateway forward it opaquely and needed **no code changes**, the API decrypts. `ver` deliberately stayed at 1 (nothing deployed, no dual-accept window). The cipher sits behind a `crypto` cargo feature the keyless components don't enable, so they have no `decode` method to call. Fits extended advertising's 254 B budget (never fit legacy's 31 B). ⚠️ Shared hardcoded key until ⑳ provisioning lands.
 
     ④ landed before ⑤ deliberately: one node in the field is the cheapest the fleet will ever be to migrate, and AEAD is easier against a header that is already final. The three bytes cost ~192 µs of extra airtime per advertising event — about 1 % of the ~400 ms the radio is already on per burst.
 19. ⏳ **Sleep & power optimization** — System OFF + RTC wakeup between bursts. Gate sensor rail power during sleep. Measure with PPK2.
-20. 🔶 **Provisioning** *(plan settled 2026-07-20 — see `NOTES-provisioning.md`)* — ✅ **envelope-encrypted device keys at rest** (2026-08-06: `devices.key` sealed under a KEK loaded from `KEK_PATH`; column landed nullable as phase 1 of expand/migrate/contract, backfill and `SET NOT NULL` still pending). ⏳ Remaining: `homescope-provision` workstation CLI (probe-rs: FICR read → API registration → UICR key write → verify → flash) and admin-authenticated `POST /devices` key issuance. Device identity needs no provisioning — the advertising address is FICR-sourced.
+20. 🔶 **Provisioning** *(plan settled 2026-07-20 — see `docs/design/provisioning.md`)* — ✅ **envelope-encrypted device keys at rest** (2026-08-06: `devices.key` sealed under a KEK loaded from `KEK_PATH`; column landed nullable as phase 1 of expand/migrate/contract, backfill and `SET NOT NULL` still pending). ⏳ Remaining: `homescope-provision` workstation CLI (probe-rs: FICR read → API registration → UICR key write → verify → flash) and admin-authenticated `POST /devices` key issuance. Device identity needs no provisioning — the advertising address is FICR-sourced.
 21. ⏳ **Decoded-readings republish** — API republishes verified+deduped readings as plain JSON (or HA MQTT discovery) for external consumers; the integration surface. Optional, after AEAD.
 22. ⏳ **(Future, optional) Air-quality node** — BME68x + BSEC on a USB/mains-powered node; persist BSEC calibration state across reboots. Separate from the battery fleet.
 

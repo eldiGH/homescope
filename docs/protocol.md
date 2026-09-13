@@ -560,7 +560,7 @@ per-packet unique value and is the natural key if the change is ever made.
 
 ## AEAD (ChaCha20-Poly1305, decrypt in the API)
 
-Settled 2026-07-16 (see `NOTES-packet-tv-aead.md`), implemented in `common` on
+Settled 2026-07-16 (see `docs/design/packet-tv-aead.md`), implemented in `common` on
 2026-07-31 ([common/src/packet/cipher.rs](../common/src/packet/cipher.rs)).
 The TV section is the ciphertext; the `ver` + `seq` header stays cleartext.
 
@@ -634,7 +634,7 @@ cheapest to migrate.
 ## Planned: key provisioning
 
 Per-device keys are generated once by the API and burned into the sensor's
-UICR (`CUSTOMER[0..7]`) by a workstation CLI — see `NOTES-provisioning.md`.
+UICR (`CUSTOMER[0..9]`) by a workstation CLI — see `docs/design/provisioning.md`.
 Until that exists, bring-up uses **one hardcoded key** on both ends (a const
 in the sensor, a row inserted by hand) so the crypto path can be proven
 end to end without the provisioning tool. That shortcut must not reach a
@@ -663,7 +663,7 @@ requiring a probe and an open enclosure per node.
   *forging* a packet, but a captured one can still be re-transmitted verbatim
   — the tag is valid and the AAD matches, because nothing about it was
   altered. Replay is defeated by the per-device monotonic `seq` check in the
-  API, which does not exist yet (see `NOTES-ingest-db-error-handling.md`; the
+  API, which does not exist yet (see `docs/design/ingest-db-error-handling.md`; the
   `UNIQUE (device_id, seq, time)` constraint added 2026-07-28 covers MQTT
   redelivery but not a deliberate replay at a later timestamp). Until that
   lands, treat authenticity as "this came from the device at some point",

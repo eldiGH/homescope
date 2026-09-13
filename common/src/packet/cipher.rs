@@ -19,7 +19,7 @@
 //! bytes it never receives.
 //!
 //! Encryption happens on the sensor; decryption happens in the API. Nothing in
-//! between holds a key — see `NOTES-packet-tv-aead.md` for why gateways stay
+//! between holds a key — see `docs/design/packet-tv-aead.md` for why gateways stay
 //! keyless.
 
 use super::AEAD_TAG_SIZE;

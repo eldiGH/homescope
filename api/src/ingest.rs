@@ -67,6 +67,9 @@ async fn handle_envelope(
         }
     };
 
+    // TODO: log-and-continue loses every reading for the length of a database
+    // outage, because rumqttc has already acked them. Restore `bail!`, then move
+    // to manual acks. See docs/design/ingest-db-error-handling.md.
     if let Err(err) = db::insert_reading(pool, &reading, device.id).await {
         error!(%err, "db error");
     }

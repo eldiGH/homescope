@@ -115,6 +115,8 @@ pub enum Commands {
         #[command(flatten)]
         api: ApiArgs,
 
+        // TODO: 180 s assumes today's 60 s cadence; raise it when production moves
+        // to 1–5 min between bursts.
         /// Give up after this long without a new reading
         #[arg(long, value_name = "SECONDS", default_value_t = 180)]
         timeout: u64,

@@ -83,6 +83,8 @@ impl fmt::Debug for Token {
 pub struct Credentials {
     pub token: Token,
 
+    // TODO: nothing fills `subject` or `expires_at` yet — the API has one shared
+    // admin token and no identity. See docs/design/provisioning.md § Postponed.
     /// Who the API said we are, cached for display only — never authorization.
     /// The API decides that, every time.
     #[serde(skip_serializing_if = "Option::is_none")]

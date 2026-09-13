@@ -97,6 +97,10 @@ async fn main(spawner: Spawner) {
         UicrRecord::Provisioned(key) => key,
     };
 
+    // TODO: the default `Debug::Allowed` rewrites UICR.APPROTECT and
+    // APPROTECT.DISABLE at every boot, so a board cannot stay locked. Set
+    // `config.debug` before `homescope-provision lock` exists. See
+    // docs/design/provisioning.md §6.
     let mut config = embassy_nrf::config::Config::default();
     config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
 

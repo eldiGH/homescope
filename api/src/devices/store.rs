@@ -281,6 +281,8 @@ pub enum InsertDeviceError {
     Db(#[from] sqlx::Error),
 }
 
+// TODO: the SQL itself is untested — the activity join and the name-lookup race
+// need #[sqlx::test] database tests. See docs/design/provisioning.md § Postponed.
 #[cfg(test)]
 mod test {
     use super::*;

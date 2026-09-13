@@ -256,6 +256,9 @@ pub fn provision(
     // destructive to the registry — it invalidates the running sensor's key the
     // moment it returns — so confirming after it asks a question whose answer
     // can no longer change anything.
+    // TODO: a transport error here is ambiguous — the API may have committed the
+    // key. Re-query the device and report "dark, rotate again" if
+    // key_valid_from moved. See docs/design/provisioning.md § Postponed.
     let mut response = output::step(&format!("Registering {:?}", send_body.name), || {
         api_client.provision(&send_body)
     })?;
@@ -294,6 +297,8 @@ pub fn rotate_key(api: &ApiArgs, confirm_args: &ConfirmArgs, unlock: bool) -> an
         );
     };
 
+    // TODO: warn before rotating a device whose key status is KEK_UNAVAILABLE —
+    // loading the KEK is the fix. See docs/design/provisioning.md § Postponed.
     confirm_record(
         &state.record,
         Action::Rotate {
@@ -303,6 +308,7 @@ pub fn rotate_key(api: &ApiArgs, confirm_args: &ConfirmArgs, unlock: bool) -> an
     )?;
     chip.halt()?;
 
+    // TODO: same ambiguity as `provision` if the connection drops mid-mint.
     let mut response = output::step("Requesting a new key", || {
         api_client.rotate_key(state.device_addr)
     })?;

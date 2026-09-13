@@ -42,6 +42,8 @@ async fn method_not_allowed() -> ApiError {
 }
 
 fn router(devices_registry: DeviceRegistry, admin_token: AdminToken) -> Router {
+    // TODO: the admin routes share the one HTTP_BIND listener, with no rate
+    // limiting and no ADMIN_API gate. See docs/design/provisioning.md § Securing it.
     let protected = Router::new()
         .nest("/devices", devices::router())
         .route_layer(from_fn_with_state(Arc::new(admin_token), require_bearer));

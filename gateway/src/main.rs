@@ -36,6 +36,8 @@ async fn mqtt_envelope_sender(
             Ok(bytes) => {
                 if let Err(err) = mqtt_client
                     .publish(
+                        // TODO: prefix with this gateway's SITE — see
+                        // docs/design/site-room-topology.md.
                         format!("homescope/sensors/{}/envelope", envelope.device_addr),
                         QoS::AtLeastOnce,
                         false,

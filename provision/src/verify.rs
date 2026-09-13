@@ -1,6 +1,6 @@
 //! Level-2 verification: has the fleet heard from a device under its current key?
 //!
-//! The strongest of the three levels in `NOTES-provisioning.md` §0, and the
+//! The strongest of the three levels in `docs/design/provisioning.md` §0, and the
 //! cheapest to build. A reading only reaches `lastSeen` after crossing the
 //! radio, the receiver, the gateway and the broker, and after the API has
 //! decrypted it with the key `provision` or `rotate` installed — so a new
@@ -106,6 +106,8 @@ pub fn wait_for_reading(
     loop {
         thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
 
+        // TODO: one transport error ends the whole wait; retry transient
+        // failures until the deadline. See docs/design/provisioning.md § Postponed.
         let summary = client.device(device_addr)?.ok_or(WaitError::Unregistered)?;
 
         match assess(baseline, &summary) {

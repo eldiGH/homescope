@@ -174,6 +174,8 @@ pub enum ConnectError {
     #[error("no probe found")]
     NoProbe,
 
+    // TODO: `--probe <serial>` is named below but not implemented yet. See
+    // docs/design/provisioning.md § Postponed.
     #[error("{} probes connected:\n  {}\n\npass --probe <serial> to select one", .0.len(), format_probe_infos(.0).join("\n  "))]
     AmbiguousProbe(Vec<DebugProbeInfo>),
 

@@ -21,6 +21,8 @@ async fn main() -> anyhow::Result<()> {
     let devices = DeviceRegistry::load(pool.clone(), &config.kek_path).await?;
     let admin_token = AdminToken::load(&config.admin_token_path).await?;
 
+    // TODO: graceful shutdown. Nothing handles SIGTERM, and cancelling either
+    // branch drops ingest's writer mid-backlog. See docs/design/api-graceful-shutdown.md.
     tokio::select! {
         r = ingest::run(&config, pool, devices.clone()) => r.map(|never| match never {}),
         r = http::serve(devices, &config.http_bind, admin_token) => r

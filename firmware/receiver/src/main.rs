@@ -146,6 +146,8 @@ async fn main(spawner: Spawner) {
     let device_addr = homescope_board::chip::device_addr();
 
     // Create embassy-usb Config
+    // TODO: 0xc0de/0xcafe is embassy's example placeholder — get a real PID
+    // (pid.codes) and match udev on the serial. See docs/design/receiver-usb-link.md.
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Homescope");
     config.product = Some("Homescope Receiver");

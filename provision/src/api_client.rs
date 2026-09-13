@@ -27,6 +27,8 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
+    // TODO: refuse plain http:// unless the host is loopback, and support
+    // HOMESCOPE_CA_CERT pinning. See docs/design/provisioning.md § Postponed.
     pub fn new(target: ApiTarget) -> Self {
         let config = Agent::config_builder()
             .http_status_as_error(false)
@@ -58,6 +60,8 @@ impl ApiClient {
         )
     }
 
+    // TODO: GET /devices stands in for an identity endpoint. Add one once the API
+    // has users to report. See docs/design/provisioning.md § Postponed.
     /// Pre-flight: does the API answer, and does it accept this token?
     ///
     /// ⚠️ Worth running before anything destructive that happens before a device

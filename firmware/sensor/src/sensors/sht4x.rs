@@ -16,6 +16,10 @@ impl<I2C: i2c::I2c> Sht4x<I2C> {
     }
 
     pub async fn measure(&mut self) -> Result<Readings, Sht4xError<I2C::Error>> {
+        // TODO: not cancel-safe. A timeout here abandons a live EasyDMA transfer
+        // that keeps writing into a dropped stack frame. Use
+        // blocking_transaction_timeout, or drop the timeout and let the watchdog
+        // catch a hung bus. See docs/design/twim-cancel-safety.md.
         let measurement = with_timeout(
             Duration::from_millis(100),
             self.driver.measure(sht4x::Precision::High, &mut Delay),

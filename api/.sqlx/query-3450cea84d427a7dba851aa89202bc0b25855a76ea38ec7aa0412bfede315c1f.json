@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\nSELECT\n    id, device_addr, name, key, key_valid_from\nFROM devices\nWHERE device_addr = $1\n    ",
+  "query": "\nSELECT\n  d.id,\n  d.device_addr,\n  d.name,\n  d.key,\n  d.key_valid_from,\n  r.last_seen AS \"last_seen?\"\nFROM\n  devices AS d\n  LEFT JOIN LATERAL (\n    SELECT\n      time AS last_seen\n    FROM\n      readings\n    WHERE\n      device_id = d.id\n      AND time > d.key_valid_from\n    ORDER BY\n      time DESC\n    LIMIT\n      1\n  ) r ON true\n",
   "describe": {
     "columns": [
       {
@@ -57,20 +57,30 @@
             "name": "key_valid_from"
           }
         }
+      },
+      {
+        "ordinal": 5,
+        "name": "last_seen?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "readings",
+            "name": "time"
+          }
+        }
       }
     ],
     "parameters": {
-      "Left": [
-        "Int8"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
       false,
       false,
       true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "1905f116007c4818643370cb7f38bbc6fa70dd342ff1d5fa7c76ecd8da935131"
+  "hash": "3450cea84d427a7dba851aa89202bc0b25855a76ea38ec7aa0412bfede315c1f"
 }

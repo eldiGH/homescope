@@ -3,13 +3,12 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use homescope_api_types::error::{ApiErrorBody, ApiErrorCode};
+use homescope_api_types::error::{ApiErrorBody, ApiErrorCode, ApiErrorDetails};
 use tracing::error;
 
 pub struct ApiError {
     status: StatusCode,
-    code: ApiErrorCode,
-    message: String,
+    body: ApiErrorBody,
     headers: Vec<(HeaderName, HeaderValue)>,
 }
 
@@ -17,8 +16,22 @@ impl ApiError {
     pub fn new(status: StatusCode, code: ApiErrorCode, message: impl Into<String>) -> Self {
         Self {
             status,
-            code,
-            message: message.into(),
+            body: ApiErrorBody::new(code, message),
+            headers: Default::default(),
+        }
+    }
+
+    /// An error carrying typed details. There is no `code` parameter: it comes
+    /// from the details type, so a response cannot be labelled with one code
+    /// while carrying another code's payload.
+    pub fn with_details<D: ApiErrorDetails>(
+        status: StatusCode,
+        message: impl Into<String>,
+        details: D,
+    ) -> Self {
+        Self {
+            status,
+            body: ApiErrorBody::with_details(message, details),
             headers: Default::default(),
         }
     }
@@ -42,10 +55,7 @@ impl IntoResponse for ApiError {
         (
             self.status,
             self.headers.into_iter().collect::<HeaderMap>(),
-            Json(ApiErrorBody {
-                code: self.code,
-                message: self.message,
-            }),
+            Json(self.body),
         )
             .into_response()
     }
@@ -61,6 +71,8 @@ impl From<sqlx::Error> for ApiError {
 #[cfg(test)]
 mod test {
     use axum::body::to_bytes;
+    use homescope_api_types::error::DeviceAlreadyExistsDetails;
+    use homescope_common::device_addr::DeviceAddr;
 
     use super::*;
 
@@ -132,6 +144,36 @@ mod test {
         assert_eq!(
             body_of(err).await,
             serde_json::json!({ "code": "internal_error", "message": "internal server error" })
+        );
+    }
+
+    /// The populated half of the body, as axum renders it. `renders_code_and_message`
+    /// above pins the other half — its literal has no `details` key, so it
+    /// already fails if every error starts carrying `"details": null`.
+    ///
+    /// No code is passed to `with_details`; `device_already_exists` appearing
+    /// here is the details type supplying it.
+    #[tokio::test]
+    async fn renders_details_when_present() {
+        let err = ApiError::with_details(
+            StatusCode::CONFLICT,
+            "device already exists",
+            DeviceAlreadyExistsDetails {
+                device_addr: DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]),
+                name: "kitchen".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            body_of(err).await,
+            serde_json::json!({
+                "code": "device_already_exists",
+                "message": "device already exists",
+                "details": {
+                    "deviceAddr": "060504030201",
+                    "name": "kitchen",
+                },
+            })
         );
     }
 }

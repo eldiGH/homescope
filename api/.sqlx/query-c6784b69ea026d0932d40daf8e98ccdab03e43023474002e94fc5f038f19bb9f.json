@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\nSELECT\n  d.id,\n  d.device_addr,\n  d.name,\n  d.key,\n  d.key_valid_from,\n  r.last_seen AS \"last_seen?\"\nFROM\n  devices AS d\n  LEFT JOIN LATERAL (\n    SELECT\n      time AS last_seen\n    FROM\n      readings\n    WHERE\n      device_id = d.id\n      AND time > d.key_valid_from\n    ORDER BY\n      time DESC\n    LIMIT\n      1\n  ) r ON true\nWHERE\n  d.device_addr = $1\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "device_addr",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "device_addr"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "key",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "key"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "key_valid_from",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "key_valid_from"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "last_seen?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "readings",
+            "name": "time"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "c6784b69ea026d0932d40daf8e98ccdab03e43023474002e94fc5f038f19bb9f"
+}

@@ -1,44 +1,24 @@
-use chrono::{DateTime, Utc};
-use homescope_common::device_addr::DeviceAddr;
-use serde::Serialize;
+use homescope_api_types::devices::{DeviceKeyStatus, DeviceSummary};
 
 use crate::devices::{
     keys::{KekRing, KeyFault, open_key_column},
-    store::DeviceRecord,
+    store::DeviceActivity,
 };
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceSummary {
-    pub device_addr: DeviceAddr,
-    pub name: String,
-    pub key_status: DeviceKeyStatus,
-    pub key_valid_from: DateTime<Utc>,
-}
+pub fn classify(activity: DeviceActivity, kek_ring: &KekRing) -> DeviceSummary {
+    let DeviceActivity { record, last_seen } = activity;
 
-#[derive(Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum DeviceKeyStatus {
-    Missing,
-    Invalid,
-    KekUnavailable,
-    Unopenable,
-    Ok,
-}
+    let key_status = match open_key_column(record.key, record.device_addr, kek_ring) {
+        Ok(_) => DeviceKeyStatus::Ok,
+        Err(err) => err.into(),
+    };
 
-impl DeviceSummary {
-    pub fn classify(record: DeviceRecord, kek_ring: &KekRing) -> Self {
-        let key_status = match open_key_column(record.key, record.device_addr, kek_ring) {
-            Ok(_) => DeviceKeyStatus::Ok,
-            Err(err) => err.into(),
-        };
-
-        Self {
-            device_addr: record.device_addr,
-            name: record.name,
-            key_valid_from: record.key_valid_from,
-            key_status,
-        }
+    DeviceSummary {
+        device_addr: record.device_addr,
+        name: record.name,
+        key_status,
+        key_valid_from: record.key_valid_from,
+        last_seen,
     }
 }
 
@@ -55,10 +35,11 @@ impl From<KeyFault> for DeviceKeyStatus {
 
 #[cfg(test)]
 mod test {
-    use homescope_common::device_key::DeviceKey;
+    use chrono::{DateTime, Utc};
+    use homescope_common::{device_addr::DeviceAddr, device_key::DeviceKey};
 
     use super::*;
-    use crate::devices::keys::SealedDeviceKey;
+    use crate::devices::{keys::SealedDeviceKey, store::DeviceRecord};
 
     const ADDR: DeviceAddr = DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
     const OTHER_ADDR: DeviceAddr = DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x07]);
@@ -76,18 +57,25 @@ mod test {
             .to_vec()
     }
 
-    fn record(key: Option<Vec<u8>>) -> DeviceRecord {
-        DeviceRecord {
-            id: 1,
-            device_addr: ADDR,
-            name: "kitchen".into(),
-            key,
-            key_valid_from: DateTime::from_timestamp(1_753_000_000, 0).expect("valid timestamp"),
+    fn key_valid_from() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_753_000_000, 0).expect("valid timestamp")
+    }
+
+    fn activity(key: Option<Vec<u8>>, last_seen: Option<DateTime<Utc>>) -> DeviceActivity {
+        DeviceActivity {
+            record: DeviceRecord {
+                id: 1,
+                device_addr: ADDR,
+                name: "kitchen".into(),
+                key,
+                key_valid_from: key_valid_from(),
+            },
+            last_seen,
         }
     }
 
     fn status_of(key: Option<Vec<u8>>) -> DeviceKeyStatus {
-        DeviceSummary::classify(record(key), &KekRing::for_test()).key_status
+        classify(activity(key, None), &KekRing::for_test()).key_status
     }
 
     /// The four faults and the success, each mapped to the state a client
@@ -126,54 +114,36 @@ mod test {
     /// A summary is built even when the key is unusable — that is the point of
     /// the type. A row whose key is missing must still render its name, or the
     /// endpoint cannot tell you *which* device needs provisioning.
+    ///
+    /// Every field is checked, not just the identifying ones: the JSON golden
+    /// that used to catch a mis-plumbed column moved to `api-types` along with
+    /// the type, and `api-types` cannot see `classify`. So the activity →
+    /// summary copy is pinned here or nowhere.
     #[test]
     fn a_broken_key_still_yields_a_summary() {
-        let summary = DeviceSummary::classify(record(None), &KekRing::for_test());
+        let seen = DateTime::from_timestamp(1_753_003_600, 0).expect("valid timestamp");
+
+        let summary = classify(activity(None, Some(seen)), &KekRing::for_test());
 
         assert_eq!(summary.device_addr, ADDR);
         assert_eq!(summary.name, "kitchen");
+        assert_eq!(summary.key_valid_from, key_valid_from());
+        assert!(matches!(summary.key_status, DeviceKeyStatus::Missing));
+        assert_eq!(summary.last_seen, Some(seen));
     }
 
-    /// `DeviceSummary` is the response body of both device read endpoints, so
-    /// its serialized shape is an API contract that `#[serde(rename_all)]`, a
-    /// renamed field or a newly added column can all break silently. Asserting
-    /// the whole object is the review checkpoint the derive does not have: a
-    /// field added to `DeviceRecord` and plumbed through here fails this test
-    /// before it reaches a client.
+    /// `last_seen` and the key status are independent facts: a key that opens
+    /// says nothing about whether the device has used it yet. A freshly
+    /// provisioned board is exactly this — `OK`, and never heard from — and it
+    /// is the state `verify` waits to see change.
     #[test]
-    fn summary_renders_the_documented_json() {
-        assert_eq!(
-            serde_json::to_value(DeviceSummary::classify(
-                record(Some(sealed_column(ADDR))),
-                &KekRing::for_test()
-            ))
-            .expect("serializable"),
-            serde_json::json!({
-                "deviceAddr": "060504030201",
-                "name": "kitchen",
-                "keyStatus": "OK",
-                "keyValidFrom": "2025-07-20T08:26:40Z",
-            })
+    fn a_working_key_can_still_have_never_reported() {
+        let summary = classify(
+            activity(Some(sealed_column(ADDR)), None),
+            &KekRing::for_test(),
         );
-    }
 
-    /// homescope-provision will branch on these strings, so they are pinned
-    /// literally rather than through the enum. Nothing else fails if
-    /// `rename_all` changes — the code still compiles and every round-trip
-    /// still passes.
-    #[test]
-    fn key_status_renders_as_screaming_snake_case() {
-        for (status, expected) in [
-            (DeviceKeyStatus::Missing, "MISSING"),
-            (DeviceKeyStatus::Invalid, "INVALID"),
-            (DeviceKeyStatus::KekUnavailable, "KEK_UNAVAILABLE"),
-            (DeviceKeyStatus::Unopenable, "UNOPENABLE"),
-            (DeviceKeyStatus::Ok, "OK"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(status).expect("serializable"),
-                serde_json::Value::from(expected)
-            );
-        }
+        assert!(matches!(summary.key_status, DeviceKeyStatus::Ok));
+        assert_eq!(summary.last_seen, None);
     }
 }

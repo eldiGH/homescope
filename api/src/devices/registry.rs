@@ -5,6 +5,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use homescope_api_types::devices::DeviceSummary;
 use homescope_common::{
     device_addr::DeviceAddr,
     device_key::{DeviceKey, KeyGenError},
@@ -17,7 +18,7 @@ use tracing::{error, info};
 use crate::devices::{
     keys::{KekRing, SealedDeviceKey, open_key_column},
     store::{self, InsertDeviceError},
-    summary::DeviceSummary,
+    summary,
 };
 
 #[derive(Clone)]
@@ -96,18 +97,18 @@ impl DeviceRegistry {
         &self,
         device_addr: DeviceAddr,
     ) -> Result<Option<DeviceSummary>, sqlx::Error> {
-        let summary = store::record_by_addr(&self.pool, device_addr)
+        let summary = store::activity_by_addr(&self.pool, device_addr)
             .await?
-            .map(|record| DeviceSummary::classify(record, &self.keyring));
+            .map(|activity| summary::classify(activity, &self.keyring));
 
         Ok(summary)
     }
 
     pub async fn summaries(&self) -> Result<Vec<DeviceSummary>, sqlx::Error> {
-        let summaries = store::all_records(&self.pool)
+        let summaries = store::all_activity(&self.pool)
             .await?
             .into_iter()
-            .map(|record| DeviceSummary::classify(record, &self.keyring))
+            .map(|activity| summary::classify(activity, &self.keyring))
             .collect();
 
         Ok(summaries)
@@ -129,7 +130,14 @@ impl DeviceRegistry {
                 device_addr: addr,
             },
         )
-        .await?;
+        .await
+        .map_err(|err| match err {
+            InsertDeviceError::Db(err) => DeviceError::Db(err),
+            InsertDeviceError::DuplicateDeviceAddr { name } => DeviceError::AlreadyExists {
+                device_addr: addr,
+                name,
+            },
+        })?;
 
         let registered_device = Arc::new(Device {
             id: device.id,
@@ -187,20 +195,14 @@ pub struct Device {
 #[derive(Debug, Error)]
 pub enum DeviceError {
     #[error("device already provisioned")]
-    AlreadyExists,
+    AlreadyExists {
+        device_addr: DeviceAddr,
+        name: String,
+    },
     #[error("device not found")]
     NotFound,
     #[error("key generation failed: {0}")]
     KeyGen(#[from] KeyGenError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
-}
-
-impl From<InsertDeviceError> for DeviceError {
-    fn from(value: InsertDeviceError) -> Self {
-        match value {
-            InsertDeviceError::DuplicateDeviceAddr => DeviceError::AlreadyExists,
-            InsertDeviceError::Db(err) => DeviceError::Db(err),
-        }
-    }
 }

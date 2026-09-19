@@ -529,6 +529,42 @@ caveats worth keeping:
   (`verify.rs`). API side: `DeviceSummary` moved to `api-types` with a
   required-but-nullable `lastSeen`, and the 409 carries typed `details`.
 
+### Exercised on hardware (2026-09-19)
+
+A DB-40 on a CMSIS-DAP probe, against the dev API, broker, receiver and
+gateway. What the bench confirmed that no unit test can:
+
+- **The whole loop closes.** `rotate` → the firmware reads the new key from
+  UICR → radio → receiver → gateway → MQTT → the API opens the packet →
+  `verify` passes. Proof that the key the tool writes is the key the firmware
+  seals with and the key the API opens with.
+- **The commit marker holds.** Across three writes, `CUSTOMER[0]` stayed
+  `0x00014b48` — `"HK"`, version 1, pad 0 — while the eight key words changed
+  each time.
+- ⚠️ **Halting really is after consent.** `DHCSR` (`0xE000EDF0`) read
+  `0x01050001` after every declined or refused run: `S_HALT` clear, `S_SLEEP`
+  set — a running executor idling in WFI. Declining costs the board nothing.
+- **The seq counter survives a re-key.** After a rotate the sensor resumed at
+  seq 24576 — a 1024-reservation boundary — rather than restarting at zero,
+  because `ERASEUICR` leaves application flash alone. Safe in this direction:
+  a surviving counter under a *new* key is unremarkable (§ "Always full-erase").
+- **All four key faults map end to end**, forced by editing `devices.key`:
+  NULL → `MISSING`, a truncated blob → `INVALID`, `kek_ver = 0xFF` →
+  `KEK_UNAVAILABLE`, a flipped ciphertext byte → `UNOPENABLE` — each with its
+  own remedy from `verify`.
+- **The AAD binding is not theoretical.** Changing a row's `device_addr` while
+  leaving its key blob alone made the row read `UNOPENABLE`: the tag is bound to
+  the address, so a blob cannot be moved between rows (§4 § AAD).
+- **`verify` waits for a *newer* reading.** With `lastSeen` already at 14:18 it
+  did not pass on that; it waited for 14:19:08.
+- **Preconditions on live data**: `provision` on a registered board refuses by
+  name; `rotate` and `verify` on an unregistered one point at `provision`; a
+  non-TTY without `--yes` fails closed after printing identity and fleet, before
+  any halt or mint. Aborts exit 1.
+
+Still unexercised: `erase_to_unlock` against a genuinely locked board — see
+§ Locking, which is why locking stays deferred.
+
 ## Superseded
 
 - ⚠️ **§ "Always full-erase" is superseded.** `ERASEUICR` plus (optionally)

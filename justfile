@@ -86,7 +86,7 @@ fmt:
 # reserved the low 128 KB of RAM and the receiver's 512-deep packet channel is
 # ~139 KB. Dropping that bootloader (2026-09-19) gave the XIAO its full 256 KB,
 # so it links — and every board now shares one flash layout.
-firmware_matrix := "sensor:db40 sensor:xiao receiver:db40 receiver:xiao"
+firmware_matrix := "sensor:db40 sensor:xiao-expansion sensor:xiao-breadboard receiver:db40 receiver:xiao-expansion"
 
 # Feature powerset for homescope-common, checked on both targets.
 common_features := "codec crypto serde defmt"

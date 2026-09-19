@@ -6,7 +6,8 @@ edition = "2024"
 [features]
 default = []
 board-db40 = ["homescope-board/db40"]
-board-xiao = ["homescope-board/xiao"]
+board-xiao-expansion = ["homescope-board/xiao-expansion"]
+board-xiao-breadboard = ["homescope-board/xiao-breadboard"]
 wait-for-rtt = []
 
 [dependencies]

@@ -17,10 +17,21 @@ how the provisioning tool decides which image to flash.
 **One sensor firmware per *board*, which probes I²C at boot and reports
 whatever answered.** No per-peripheral Cargo features. No configurator.
 
-Board features (`board-db40` / `board-xiao`, later the custom PCB) stay — they
-select pins, the RAM window and the linker script, none of which can be
-detected at runtime. That is 2 builds today, 3 when the PCB lands. A list you
-pick from, not a matrix you configure.
+Board features stay — they select pins, and (at the time) the RAM window and
+linker script, none of which can be detected at runtime. A list you pick from,
+not a matrix you configure.
+
+⚠️ **Updated 2026-09-19.** Two things moved. The layout stopped varying when the
+XIAO bootloader was dropped, so a board feature now selects *only* pins and the
+battery divider. And the XIAO turned out to be two setups — expansion board and
+breadboard — with the SHT45 on different pins, so the features became
+`board-db40` / `board-xiao-expansion` / `board-xiao-breadboard`: a **wiring**,
+not a part number. That is 3 builds today, 4 when the PCB lands, and it is still
+a list rather than a matrix.
+
+⚠️ It also sharpens the gap this note's second half exists to close: with one
+layout, nothing in an image distinguishes the boards any more, so the artifact
+*name* is the only signal for which wiring a build is for.
 
 ## Why
 

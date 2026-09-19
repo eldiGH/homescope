@@ -52,48 +52,68 @@ struct BoardMemory {
     notes: &'static [&'static str],
 }
 
+/// The layout every board carries since the XIAO's factory bootloader was
+/// dropped (2026-09-19): a bare 1 MB part, application from zero, seq checkpoint
+/// in the top two pages. The custom PCB will be the same — it is a bare module.
+///
+/// Written once and inherited, because three copies of one layout is three
+/// chances to edit two of them. Each board may still override any field: "they
+/// agree today" is an observation, not a guarantee, and it was per-board fields
+/// that made the XIAO's overlapping FLASH length findable when they did differ.
+const BARE_1MB: BoardMemory = BoardMemory {
+    feature_env: "",
+    name: "",
+    app_start: 0x0000_0000,
+    flash_top: 0x0010_0000,
+    flash_top_desc: "top of the 1 MB flash",
+    ram_start: 0x2000_0000,
+    ram_len: 256 * 1024,
+    notes: &[],
+};
+
 /// Every supported board. Adding one is a single entry here — selection and
 /// validation below are board-count agnostic.
 ///
-/// Since the XIAO's factory bootloader was dropped (2026-09-19) every board
-/// carries the same layout, and the custom PCB will too — it is a bare module.
-/// The table stays per-board anyway: "they agree today" is an observation, not
-/// a guarantee, and one entry per board is what made the XIAO's overlapping
-/// FLASH length findable when they did differ.
+/// ⚠️ A board here is a *wiring*, not a part number: the two XIAO entries are
+/// the same silicon with the SHT45 on different pins. Since the layout no
+/// longer varies, that is the only thing a board feature still selects.
 const BOARDS: &[BoardMemory] = &[
     BoardMemory {
         feature_env: "CARGO_FEATURE_DB40",
         name: "Raytac MDBT50Q-DB-40",
-        app_start: 0x0000_0000,
-        flash_top: 0x0010_0000,
-        flash_top_desc: "top of the 1 MB flash",
-        ram_start: 0x2000_0000,
-        ram_len: 256 * 1024,
         notes: &["Bare module: no MBR, no SoftDevice, no bootloader."],
+        ..BARE_1MB
     },
     BoardMemory {
-        feature_env: "CARGO_FEATURE_XIAO",
-        name: "Seeed XIAO nRF52840 Plus",
-        app_start: 0x0000_0000,
-        flash_top: 0x0010_0000,
-        flash_top_desc: "top of the 1 MB flash",
-        ram_start: 0x2000_0000,
-        ram_len: 256 * 1024,
+        feature_env: "CARGO_FEATURE_XIAO_EXPANSION",
+        name: "Seeed XIAO nRF52840 Plus on the expansion board",
         notes: &[
-            "Factory MBR, SoftDevice S140 and Adafruit UF2 bootloader erased",
-            "2026-09-19 — this board is now bare, like the DB-40.",
+            "SHT45 on the expansion board's Grove I2C header, permanently",
+            "powered. The development setup.",
             "",
-            "UF2 cannot write UICR, so it could never finish a provisioning run:",
-            "it produced a board one SWD visit short of working. Keeping it cost",
-            "156 KiB of flash, 128 KiB of RAM reserved for a SoftDevice we never",
-            "start, a second memory map, and a board that came back from an",
-            "ERASEALL recovery looking dead, because nothing was left at 0x0.",
-            "",
-            "A XIAO still carrying the bootloader must be chip-erased and",
-            "re-keyed before running this layout — see docs/flashing.md.",
+            XIAO_BOOTLOADER_NOTE,
         ],
+        ..BARE_1MB
+    },
+    BoardMemory {
+        feature_env: "CARGO_FEATURE_XIAO_BREADBOARD",
+        name: "Seeed XIAO nRF52840 Plus on a breadboard",
+        notes: &[
+            "SHT45 direct-wired with a gated power line. The alkaline soak-test",
+            "node: the sensor rail is switched off between cycles, because",
+            "battery longevity is the thing being measured.",
+            "",
+            XIAO_BOOTLOADER_NOTE,
+        ],
+        ..BARE_1MB
     },
 ];
+
+/// Both XIAO entries carry this: the bootloader is gone from the part itself,
+/// not from one wiring of it.
+const XIAO_BOOTLOADER_NOTE: &str =
+    "Factory MBR, SoftDevice S140 and UF2 bootloader erased 2026-09-19; a XIAO \
+     still carrying them must be chip-erased and re-keyed — see docs/flashing.md.";
 
 /// A validated flash/RAM layout, derived from a [`BoardMemory`]. If one of these
 /// exists, its addresses are self-consistent — [`Layout::derive`] panics

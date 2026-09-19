@@ -439,7 +439,8 @@ homescope/
 │   ├── Cargo.toml         # firmware workspace: sensor, receiver, board
 │   ├── rust-toolchain.toml
 │   ├── .cargo/config.toml # cross-compile target (`thumbv7em-none-eabi`)
-│   ├── board/             # `homescope-board` — Board struct + board!(p) macro (features: db40 / xiao)
+│   ├── board/             # `homescope-board` — Board struct + board!(p) macro
+│   │                      #   (db40 / xiao-expansion / xiao-breadboard: a wiring, not a part)
 │   │   ├── build.rs       # picks memory-*.x by board feature
 │   │   ├── memory-db40.x  # bare board — app at 0x0
 │   │   └── src/lib.rs

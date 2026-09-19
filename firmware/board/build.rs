@@ -17,8 +17,9 @@
 //!
 //! Nothing is ever emitted into the STORAGE region: it holds no output section,
 //! only the `__storage_start` / `__storage_end` symbols marking its bounds. That
-//! keeps it out of the ELF, so `probe-rs` sector-erase and UF2 flashing both
-//! leave the counter intact (a chip-erase still wipes it).
+//! keeps it out of the ELF, so a `probe-rs` sector-erase leaves the counter
+//! intact (a chip-erase still wipes it), and it is what lets
+//! `homescope-provision` locate the pages from the image it is about to flash.
 
 use std::path::PathBuf;
 use std::{env, fs};
@@ -53,6 +54,12 @@ struct BoardMemory {
 
 /// Every supported board. Adding one is a single entry here — selection and
 /// validation below are board-count agnostic.
+///
+/// Since the XIAO's factory bootloader was dropped (2026-09-19) every board
+/// carries the same layout, and the custom PCB will too — it is a bare module.
+/// The table stays per-board anyway: "they agree today" is an observation, not
+/// a guarantee, and one entry per board is what made the XIAO's overlapping
+/// FLASH length findable when they did differ.
 const BOARDS: &[BoardMemory] = &[
     BoardMemory {
         feature_env: "CARGO_FEATURE_DB40",
@@ -67,19 +74,23 @@ const BOARDS: &[BoardMemory] = &[
     BoardMemory {
         feature_env: "CARGO_FEATURE_XIAO",
         name: "Seeed XIAO nRF52840 Plus",
-        app_start: 0x0002_7000,
-        flash_top: 0x000F_4000,
-        flash_top_desc: "start of the Adafruit UF2 bootloader",
-        ram_start: 0x2002_0000,
-        ram_len: 128 * 1024,
+        app_start: 0x0000_0000,
+        flash_top: 0x0010_0000,
+        flash_top_desc: "top of the 1 MB flash",
+        ram_start: 0x2000_0000,
+        ram_len: 256 * 1024,
         notes: &[
-            "Adafruit UF2 bootloader v0.9.2 with SoftDevice S140 7.3.0 pre-installed.",
+            "Factory MBR, SoftDevice S140 and Adafruit UF2 bootloader erased",
+            "2026-09-19 — this board is now bare, like the DB-40.",
             "",
-            "0x00000000 - 0x00000FFF  Nordic MBR",
-            "0x00001000 - 0x00026FFF  SoftDevice S140 7.3.0 (inert — we use nrf-sdc)",
-            "0x000F4000 - 0x000FDFFF  Adafruit UF2 bootloader  \\",
-            "0x000FE000 - 0x000FEFFF  MBR params page           > bootloader-owned",
-            "0x000FF000 - 0x000FFFFF  bootloader settings      /",
+            "UF2 cannot write UICR, so it could never finish a provisioning run:",
+            "it produced a board one SWD visit short of working. Keeping it cost",
+            "156 KiB of flash, 128 KiB of RAM reserved for a SoftDevice we never",
+            "start, a second memory map, and a board that came back from an",
+            "ERASEALL recovery looking dead, because nothing was left at 0x0.",
+            "",
+            "A XIAO still carrying the bootloader must be chip-erased and",
+            "re-keyed before running this layout — see docs/flashing.md.",
         ],
     },
 ];

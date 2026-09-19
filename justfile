@@ -82,11 +82,11 @@ fmt:
 # Neither firmware crate has a default board feature, so every invocation must
 # name exactly one — there is no "just build the workspace" for firmware.
 #
-# receiver:xiao is absent on purpose: the XIAO's pre-flashed SoftDevice reserves
-# the low 128 KB of RAM (memory-xiao.x starts RAM at 0x20020000), and the
-# receiver's 512-deep packet channel is ~139 KB. Only the DB-40's full 256 KB
-# fits it. Add it back here if the channel ever shrinks.
-firmware_matrix := "sensor:db40 sensor:xiao receiver:db40"
+# receiver:xiao used to be absent because the XIAO's pre-flashed SoftDevice
+# reserved the low 128 KB of RAM and the receiver's 512-deep packet channel is
+# ~139 KB. Dropping that bootloader (2026-09-19) gave the XIAO its full 256 KB,
+# so it links — and every board now shares one flash layout.
+firmware_matrix := "sensor:db40 sensor:xiao receiver:db40 receiver:xiao"
 
 # Feature powerset for homescope-common, checked on both targets.
 common_features := "codec crypto serde defmt"

@@ -22,7 +22,7 @@ Plus [`deploy/`](deploy/) — production deployment for the Pi: rootless Podman 
 
 ## Hardware
 
-- **Sensor & receiver MCU**: nRF52840 (Cortex-M4F, BLE 5.x). Currently Raytac **MDBT50Q-DB-40** eval boards (whole-house survey passed 2026-07-03 → the MDBT50Q-1MV2 module is validated for the upcoming custom PCB). The Seeed XIAO nRF52840 **Plus** boards are retired from RF duty (chip antenna measured ~10 dB short) but remain bench mules; they ship with Nordic SoftDevice S140 in flash, so their application offset is `0x27000`. See [docs/flashing.md](docs/flashing.md) and [docs/architecture.md](docs/architecture.md#hardware-platform).
+- **Sensor & receiver MCU**: nRF52840 (Cortex-M4F, BLE 5.x). Currently Raytac **MDBT50Q-DB-40** eval boards (whole-house survey passed 2026-07-03 → the MDBT50Q-1MV2 module is validated for the upcoming custom PCB). The Seeed XIAO nRF52840 **Plus** boards are retired from RF duty (chip antenna measured ~10 dB short) but remain bench mules; their factory bootloader and SoftDevice were erased on 2026-09-19, so every board now links the application at `0x0`. See [docs/flashing.md](docs/flashing.md) and [docs/architecture.md](docs/architecture.md#hardware-platform).
 - **Sensors**: SHT45 (temperature/humidity) on every node; BMP581 (pressure) on one designated indoor node, since pressure is house-wide; optionally LTR390 (light/UV) on the outdoor node. Air quality (BME68x + BSEC) is an optional future, separately-powered node. See [docs/architecture.md](docs/architecture.md#sensors).
 - **Sensor power**: 2× AA Energizer Lithium L91 (Li-FeS₂) → XIAO 3V3 pin direct on dev boards; the custom PCB will use the nRF52840's VDDH input instead. Expected battery life 5–10+ years at 1–5 min reporting cadence.
 - **Receiver power**: USB bus power from the Pi.
@@ -41,18 +41,17 @@ cargo run --release      # flashes via probe-rs + streams defmt logs
 
 Or in VSCode: press F5 with a `Debug nrf52840-*` configuration selected. See `.vscode/launch.json`.
 
-### Firmware (sensor) — UF2 backup flow
+### Deploying a sensor
 
-When the probe isn't available (sealed deployment, field update):
+Every board is flashed over SWD — there is no bootloader on any of them, because
+UF2 cannot write the UICR key record and so could never finish a provisioning
+run. To put a release artifact on a board going into service:
 
 ```bash
-cd firmware/sensor
-./flash_uf2.sh            # builds + converts to UF2 via tools/uf2/uf2conv.py
+homescope-provision provision kitchen --firmware sensor-db40
 ```
 
-Then double-tap RESET on the XIAO to enter the bootloader and copy the produced `firmware.uf2` onto the mounted drive. See [docs/flashing.md](docs/flashing.md) for the mount setup, `0x27000` offset rationale, and troubleshooting.
-
-The `firmware/receiver/flash_uf2.sh` script is the parallel for the receiver, though the receiver normally just uses probe-rs since it lives at the bench.
+See [docs/flashing.md](docs/flashing.md).
 
 ### Host services (gateway + API) — dev workflow
 
@@ -119,7 +118,7 @@ See the **Implementation roadmap** in [docs/architecture.md](docs/architecture.m
 
 - [docs/architecture.md](docs/architecture.md) — design rationale, hardware choices, BLE vs ESB tradeoff, security model
 - [docs/protocol.md](docs/protocol.md) — USB-CDC wire protocol between receiver and gateway
-- [docs/flashing.md](docs/flashing.md) — UF2 build & flash workflow, mount setup, troubleshooting
+- [docs/flashing.md](docs/flashing.md) — SWD flashing, the flash layout, migrating a XIAO off its bootloader
 - [CLAUDE.md](CLAUDE.md) — orientation file for AI-assisted development sessions
 
 ## License
@@ -130,9 +129,6 @@ Licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
-
-Vendored third-party code under [`tools/uf2/`](tools/uf2/) is licensed
-separately under its own MIT license; see [`tools/uf2/LICENSE`](tools/uf2/LICENSE).
 
 ### Contribution
 

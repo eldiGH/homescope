@@ -861,6 +861,15 @@ plus `--yes`.
 
 ### UF2 is retired — and the trap that comes with it
 
+✅ **DONE 2026-09-19.** The second option below was taken: the XIAO relinks at
+`0x0` and its factory MBR, SoftDevice and bootloader are erased, so every board
+shares one layout and `board-*` selects only pins and the ADC. `flash_uf2.sh`
+and `tools/uf2/` are gone. Two things this section did not foresee: the XIAO
+also reserved 128 KiB of RAM for the SoftDevice it never starts — which is why
+the receiver could not be built for it — and migrating a board moves its seq
+counter from `0x000F2000` to `0x000FE000`, so it must be chip-erased and
+**re-keyed**, never merely reflashed. See `docs/flashing.md`.
+
 The bootloader **cannot write UICR**, so it can never be the recovery path for
 the thing that actually matters. The DB-40 and the custom PCB don't have one
 at all, and on the XIAO it costs ~156 KB to an MBR plus an S140 the firmware

@@ -26,11 +26,11 @@ Re-affirmed 2026-07 after a full architecture review: battery life is shelf-life
 
 **Board strategy (revised 2026-07):**
 
-- **Seeed XIAO nRF52840 Plus** — the original dev-and-production board, now **retired from RF duty**: its chip antenna measured ~10 dB below a proper module (−67 dBm @ 1 m @ +8 dBm against a phone referee, identical on two units; ~0 % delivery through 2 concrete walls at 15 m). Still useful as bench mules for non-RF work. USB-C, UF2 bootloader (Adafruit v0.9.2), LiPo charger.
+- **Seeed XIAO nRF52840 Plus** — the original dev-and-production board, now **retired from RF duty**: its chip antenna measured ~10 dB below a proper module (−67 dBm @ 1 m @ +8 dBm against a phone referee, identical on two units; ~0 % delivery through 2 concrete walls at 15 m). Still useful as bench mules for non-RF work. USB-C and a LiPo charger; its factory UF2 bootloader was erased 2026-09-19 (see below).
 - **Raytac MDBT50Q-DB-40 eval boards** — in hand (2×) and **survey-passed 2026-07-03**: whole-house coverage, worst-spot delivery ≥85 % after minor repositioning. Board facts: SWD via 1.27 mm Cortex header (J1), no factory bootloader — app links at `0x0`; LEDs P0.13-15, buttons P0.11/12/24/25; mini-USB = nRF USBD.
 - **Custom PCB with the Raytac MDBT50Q-1MV2** (chip antenna — no external antenna) — the deployment target, validated by the DB-40 survey: we ship exactly what was tested. Pre-certified (FCC/IC/CE/Telec). Follow the datasheet antenna keep-out (no copper, battery, or enclosure ribs in the zone): this ground-plane discipline is precisely what the XIAO physically couldn't provide. Include a 1.27 mm Cortex debug header.
 
-**XIAO flash layout note** (XIAO boards only): the Plus variant ships with Nordic SoftDevice S140 7.3.0 pre-installed (`0x1000–0x26FFF`, 152 KB). Application must start at `0x27000`, not `0x26000`. The SoftDevice is never started by our firmware — we use `nrf-sdc` directly — but it occupies the flash region. See [docs/flashing.md](flashing.md#critical-this-board-ships-with-softdevice-s140-installed). The custom PCB will carry the open-source Adafruit UF2 bootloader (ported board definition) to keep the sealed-enclosure update flow.
+**One flash layout, no bootloaders (revised 2026-09-19):** the XIAO's factory MBR, SoftDevice S140 and Adafruit UF2 bootloader were erased, so every board links the application at `0x0` with the seq checkpoint in the top two pages. ⚠️ **UF2 cannot write UICR**, so the bootloader could never finish a provisioning run; keeping it cost 156 KB of flash, 128 KB of RAM reserved for a SoftDevice we never start, a second memory map, and an `ERASEALL` recovery that left nothing at `0x0`. See [docs/flashing.md](flashing.md).
 
 ### Sensors
 
@@ -396,11 +396,11 @@ All Pi-side services run as **rootless Podman containers under systemd quadlets*
 
 | Stage | Mechanism | When |
 |---|---|---|
-| **v1** | UF2 reflash via physical double-tap-reset | Initial deployment, development iteration |
-| **v2** | BLE DFU via the Adafruit bootloader, triggered by double-tap-reset, updated via nRF Connect mobile app | Once enclosures are sealed and physical USB access is awkward |
-| **v3** (optional) | Always-on OTA: sensor wakes every ~6 h to listen briefly for incoming connection | Only if frequent updates are needed and the ~1 % battery overhead is acceptable |
+| **v1** (current) | SWD reflash through `homescope-provision`, which also guards the image and keeps the key and seq counter straight | Deployment and development |
+| **v2** (optional) | BLE DFU from a bootloader deliberately flashed onto the custom PCB | Only if sealed enclosures make a probe visit impractical |
+| **v3** (optional) | Always-on OTA: sensor wakes every ~6 h to listen briefly for an incoming connection | Only if frequent updates are needed and the ~1 % battery overhead is acceptable |
 
-The Adafruit UF2 bootloader on the XIAO supports BLE DFU out of the box; no extra firmware needed to enable v2. The bootloader is open source, so the custom MDBT50Q PCB will carry the same bootloader (ported board definition), preserving both the UF2 and BLE-DFU flows on our own hardware.
+⚠️ **v2 is no longer inherited.** This roadmap assumed the XIAO's factory bootloader and a ported build of it on the custom PCB. That bootloader is gone (2026-09-19), so a DFU path is now a deliberate choice: someone has to put a bootloader on the board. It would cover firmware *updates* only — DFU cannot write UICR, so provisioning stays an SWD operation either way, and the PCB should carry a 1.27 mm Cortex header regardless.
 
 ---
 
@@ -442,13 +442,10 @@ homescope/
 │   ├── board/             # `homescope-board` — Board struct + board!(p) macro (features: db40 / xiao)
 │   │   ├── build.rs       # picks memory-*.x by board feature
 │   │   ├── memory-db40.x  # bare board — app at 0x0
-│   │   ├── memory-xiao.x  # UF2 bootloader — app at 0x27000
 │   │   └── src/lib.rs
 │   ├── sensor/            # `homescope-sensor` — BLE-advertising sensor firmware
-│   │   ├── flash_uf2.sh   # UF2 backup flow (calls tools/uf2/uf2conv.py)
 │   │   └── src/           # main.rs, ble_advertise.rs, sensors.rs + sensors/ (sht4x, battery), packet_builder.rs, seq_counter.rs (flash-checkpointed seq)
 │   └── receiver/          # `homescope-receiver` — USB-CDC BLE-scanning dongle
-│       ├── flash_uf2.sh
 │       └── src/           # main.rs, ble_scan.rs, scanned_packet.rs (owned channel message), lru_cache.rs
 ├── deploy/                # production deployment (Pi)
 │   ├── deploy.sh          # idempotent converge script (root + homescope-user phases)
@@ -461,7 +458,6 @@ homescope/
 │   └── udev/              # receiver → /dev/homescope-receiver symlink rule
 ├── .github/workflows/     # per-crate ARM container builds → ghcr.io (path-filtered)
 ├── tools/
-│   └── uf2/               # vendored microsoft/uf2 tooling (MIT) — used by both flash_uf2.sh
 └── docs/
     ├── architecture.md
     ├── flashing.md

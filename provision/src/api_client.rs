@@ -128,6 +128,23 @@ impl ApiClient {
     }
 }
 
+impl ApiClientError {
+    /// Whether the API may have carried out the request despite this failure.
+    ///
+    /// ⚠️ The distinction that matters for a mint. A `Rejected` is the API
+    /// speaking: it refused, and nothing was stored. The other two are silence
+    /// — a dropped connection, or a 2xx whose body we could not read — and for
+    /// a request that issues a key exactly once, silence is not the same as
+    /// "nothing happened". The key may exist in the registry and be gone from
+    /// the world.
+    pub fn may_have_committed(&self) -> bool {
+        match self {
+            Self::Rejected { .. } => false,
+            Self::TransportError(_) | Self::ResponseDeserializationError { .. } => true,
+        }
+    }
+}
+
 /// Maps the API's "no such device" to `None`.
 ///
 /// ⚠️ Only `device_not_found` does. A 404 carrying any other code — `not_found`
@@ -239,6 +256,23 @@ mod test {
             ))),
             Err(ApiClientError::Rejected { .. })
         ));
+    }
+
+    /// ⚠️ The distinction the mint recovery turns on: a refusal is the API
+    /// saying it stored nothing, while silence could mean either.
+    #[test]
+    fn only_silence_may_have_committed() {
+        assert!(
+            !rejected(StatusCode::CONFLICT, ApiErrorCode::DeviceAlreadyExists).may_have_committed()
+        );
+        assert!(
+            ApiClientError::ResponseDeserializationError {
+                status: StatusCode::CREATED,
+                error: ureq::Error::HostNotFound,
+            }
+            .may_have_committed(),
+            "a 2xx we could not parse is the worst case: the key was issued and lost"
+        );
     }
 
     #[test]

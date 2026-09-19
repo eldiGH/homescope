@@ -201,6 +201,27 @@ impl Store {
         Ok(artifact)
     }
 
+    /// Forgets a name, deleting its image when nothing else points at it.
+    ///
+    /// Names go stale — a board feature gets renamed, a variant is retired — and
+    /// a stale row is worse than clutter: the picker offers it, and picking the
+    /// wrong image now means wrong pins rather than a refusal, since every image
+    /// links at the same address.
+    pub fn remove(&mut self, name: &str) -> Result<Option<Artifact>, FirmwareError> {
+        let Some(at) = self.manifest.artifacts.iter().position(|a| a.name == name) else {
+            return Ok(None);
+        };
+
+        let removed = self.manifest.artifacts.remove(at);
+        self.save()?;
+
+        if !self.manifest.artifacts.iter().any(|a| a.id == removed.id) {
+            let _ = fs::remove_file(self.image_path(&removed));
+        }
+
+        Ok(Some(removed))
+    }
+
     fn replace(&mut self, artifact: Artifact) -> Option<Artifact> {
         let replaced = match self
             .manifest
@@ -293,10 +314,11 @@ pub fn pick(store: &Store, now: DateTime<Utc>) -> Result<&Artifact, PickError> {
         return Err(PickError::NoTty);
     }
 
+    let width = name_width(artifacts);
     let mut err = stderr();
     let _ = writeln!(err, "Stored firmware:\n");
     for (n, artifact) in artifacts.iter().enumerate() {
-        let _ = writeln!(err, "  {:>2}  {}", n + 1, describe(artifact, now));
+        let _ = writeln!(err, "  {:>2}  {}", n + 1, describe(artifact, now, width));
     }
     let _ = write!(err, "\nWhich firmware? [1-{}] ", artifacts.len());
     let _ = err.flush();
@@ -313,8 +335,17 @@ pub fn pick(store: &Store, now: DateTime<Utc>) -> Result<&Artifact, PickError> {
         .ok_or(PickError::NotAChoice)
 }
 
+/// The name column, sized to the longest name so both listings line up.
+pub fn name_width(artifacts: &[Artifact]) -> usize {
+    artifacts
+        .iter()
+        .map(|artifact| artifact.name.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
 /// One artifact on one line, for the picker and for `firmware list`.
-pub fn describe(artifact: &Artifact, now: DateTime<Utc>) -> String {
+pub fn describe(artifact: &Artifact, now: DateTime<Utc>, name_width: usize) -> String {
     let provenance = match (&artifact.git, artifact.dirty) {
         (Some(commit), true) => format!("{commit}+dirty"),
         (Some(commit), false) => commit.clone(),
@@ -322,7 +353,7 @@ pub fn describe(artifact: &Artifact, now: DateTime<Utc>) -> String {
     };
 
     format!(
-        "{:<16} {:<14} {:<12} built {}",
+        "{:<name_width$} {:<14} {:<12} built {}",
         artifact.name,
         provenance,
         artifact.id,
@@ -474,6 +505,44 @@ mod test {
 
         assert_eq!(store.artifacts().len(), 1);
         assert!(store.image_path(&again).exists());
+    }
+
+    #[test]
+    fn removing_a_name_drops_its_image() {
+        let tmp = TempDir::new().unwrap();
+        let mut store = store_at(&tmp);
+        let artifact = store
+            .add(&write_elf(&tmp, "a.elf", 0, 0xAA), "sensor-xiao")
+            .unwrap();
+
+        let removed = store.remove("sensor-xiao").unwrap().expect("was stored");
+
+        assert_eq!(removed.id, artifact.id);
+        assert!(store.artifacts().is_empty());
+        assert!(!store.image_path(&artifact).exists());
+        assert!(store_at(&tmp).get("sensor-xiao").is_none(), "still on disk");
+    }
+
+    /// Two names can share one image — identical bytes hash identically — so
+    /// removing one must not delete the bytes the other still needs.
+    #[test]
+    fn removing_one_of_two_names_sharing_an_image_keeps_it() {
+        let tmp = TempDir::new().unwrap();
+        let mut store = store_at(&tmp);
+        let path = write_elf(&tmp, "a.elf", 0, 0xAA);
+        store.add(&path, "sensor-xiao").unwrap();
+        let kept = store.add(&path, "sensor-xiao-expansion").unwrap();
+
+        store.remove("sensor-xiao").unwrap();
+
+        assert!(store.image_path(&kept).exists(), "shared image deleted");
+    }
+
+    #[test]
+    fn removing_an_unknown_name_is_not_an_error() {
+        let tmp = TempDir::new().unwrap();
+
+        assert!(store_at(&tmp).remove("never-stored").unwrap().is_none());
     }
 
     #[test]

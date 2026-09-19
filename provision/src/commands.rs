@@ -5,15 +5,15 @@ use std::{
 };
 
 use anyhow::{Context as _, anyhow, bail};
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use homescope_api_types::devices::{DeviceKeyResponse, ProvisionDevicePayload};
 use homescope_common::{device_addr::DeviceAddr, device_key::DeviceKey, uicr_record::RecordHeader};
 use zeroize::Zeroize as _;
 
 use crate::{
-    api_client::ApiClient,
+    api_client::{ApiClient, ApiClientError},
     chip::{self, Chip, Connection},
-    cli::{ApiArgs, ConfirmArgs, FirmwareArgs, FirmwareCommand},
+    cli::{ApiArgs, ConfirmArgs, FirmwareArgs, FirmwareCommand, ProbeArgs},
     confirm::{self, ConfirmError},
     firmware::{self, Artifact},
     output,
@@ -220,6 +220,13 @@ pub fn firmware(command: FirmwareCommand) -> anyhow::Result<()> {
             println!("{}\t{}", artifact.name, artifact.id);
         }
 
+        FirmwareCommand::Remove { name } => match store.remove(&name)? {
+            Some(artifact) => {
+                writeln!(stderr(), "Removed {:?} ({})", artifact.name, artifact.id)?;
+            }
+            None => writeln!(stderr(), "No stored firmware called {name:?}")?,
+        },
+
         FirmwareCommand::List => {
             let now = Utc::now();
             let artifacts = store.artifacts();
@@ -232,8 +239,9 @@ pub fn firmware(command: FirmwareCommand) -> anyhow::Result<()> {
                 return Ok(());
             }
 
+            let width = firmware::name_width(artifacts);
             for artifact in artifacts {
-                println!("{}", firmware::describe(artifact, now));
+                println!("{}", firmware::describe(artifact, now, width));
             }
         }
     }
@@ -278,10 +286,10 @@ fn optional_firmware(args: &FirmwareArgs) -> anyhow::Result<Option<(Artifact, Pa
 /// ⚠️ Does **not** clear the seq counter. No new key is minted here, and
 /// clearing the counter under a live key re-emits nonces the device has already
 /// used — see `Chip::erase_storage`.
-pub fn flash(args: &FirmwareArgs) -> anyhow::Result<()> {
+pub fn flash(args: &FirmwareArgs, probe: &ProbeArgs) -> anyhow::Result<()> {
     let (artifact, image) = choose_firmware(args)?;
 
-    let mut chip = match Chip::connect()? {
+    let mut chip = match Chip::connect(probe.probe.as_deref())? {
         Connection::Locked(_) => bail!(messages::device_locked_warning()),
         Connection::Attached(chip) => chip,
     };
@@ -335,8 +343,8 @@ fn flash_image(chip: &mut Chip, artifact: &Artifact, image: &Path) -> anyhow::Re
 /// ⚠️ Never prompts and never refuses. A locked chip is a *state* to report,
 /// not a failure — and the old message told the reader to pass `--unlock`, a
 /// flag `info` does not have.
-pub fn info() -> anyhow::Result<()> {
-    match Chip::connect()? {
+pub fn info(probe: &ProbeArgs) -> anyhow::Result<()> {
+    match Chip::connect(probe.probe.as_deref())? {
         Connection::Locked(locked) => {
             output::identity_locked(&locked.probe_description(), chip::TARGET);
         }
@@ -355,6 +363,7 @@ pub fn info() -> anyhow::Result<()> {
 pub fn provision(
     api: &ApiArgs,
     firmware_args: &FirmwareArgs,
+    probe: &ProbeArgs,
     confirm_args: &ConfirmArgs,
     unlock: bool,
     name: String,
@@ -366,7 +375,7 @@ pub fn provision(
     let api_client = resolve_client(api)?;
     check_auth_before_unlock(&api_client, unlock)?;
 
-    let mut chip = connect(unlock, confirm_args.yes)?;
+    let mut chip = connect(probe, unlock, confirm_args.yes)?;
 
     let state = chip.read_state()?;
     output::identity(&chip.probe_description(), chip::TARGET, &state);
@@ -402,7 +411,9 @@ pub fn provision(
     // key. Re-query the device and report "dark, rotate again" if
     // key_valid_from moved. See docs/design/provisioning.md § Postponed.
     let mut response = output::step(&format!("Registering {:?}", send_body.name), || {
-        api_client.provision(&send_body)
+        mint_key(&api_client, state.device_addr, None, "provision", || {
+            api_client.provision(&send_body)
+        })
     })?;
 
     install_key(
@@ -425,6 +436,7 @@ pub fn provision(
 pub fn rotate_key(
     api: &ApiArgs,
     firmware_args: &FirmwareArgs,
+    probe: &ProbeArgs,
     confirm_args: &ConfirmArgs,
     unlock: bool,
 ) -> anyhow::Result<()> {
@@ -433,7 +445,7 @@ pub fn rotate_key(
     let api_client = resolve_client(api)?;
     check_auth_before_unlock(&api_client, unlock)?;
 
-    let mut chip = connect(unlock, confirm_args.yes)?;
+    let mut chip = connect(probe, unlock, confirm_args.yes)?;
 
     let state = chip.read_state()?;
     output::identity(&chip.probe_description(), chip::TARGET, &state);
@@ -465,7 +477,13 @@ pub fn rotate_key(
 
     // TODO: same ambiguity as `provision` if the connection drops mid-mint.
     let mut response = output::step("Requesting a new key", || {
-        api_client.rotate_key(state.device_addr)
+        mint_key(
+            &api_client,
+            state.device_addr,
+            Some(existing.key_valid_from),
+            "rotate",
+            || api_client.rotate_key(state.device_addr),
+        )
     })?;
 
     install_key(
@@ -554,6 +572,87 @@ fn confirm_record(
     confirm::yes_no(&question, assume_yes)
 }
 
+/// What the registry says happened, when a mint failed without answering.
+#[derive(Debug, PartialEq, Eq)]
+enum Mint {
+    /// The key was issued. It crossed the wire once and is gone.
+    Committed,
+    /// The registry is untouched; the device is exactly as it was.
+    Untouched,
+    /// The follow-up query failed too, so neither can be ruled out.
+    Unknown,
+}
+
+/// Runs a mint and, when it fails *ambiguously*, asks the registry whether it
+/// landed.
+///
+/// ⚠️ This is the one failure that leaves a device dark while reporting
+/// something that sounds retryable. `POST /devices` and `rotate-key` return the
+/// plaintext key exactly once; if the connection drops after the API commits,
+/// the tool never sees the key, the board never receives it, and the registry
+/// holds a key nothing can use. Without this check the operator is told
+/// "request failed" and has no way to tell that apart from "nothing happened".
+///
+/// The discriminator is `key_valid_from`, which the API sets on every mint:
+/// `provision` starts from an unregistered device, `rotate` from a known epoch,
+/// and either way a changed answer means the key was issued.
+fn mint_key(
+    api_client: &ApiClient,
+    device_addr: DeviceAddr,
+    epoch_before: Option<DateTime<Utc>>,
+    retry_command: &str,
+    request: impl FnOnce() -> Result<DeviceKeyResponse, ApiClientError>,
+) -> anyhow::Result<DeviceKeyResponse> {
+    let err = match request() {
+        Ok(response) => return Ok(response),
+        // The API answered and refused, so nothing was stored — let it speak.
+        Err(err) if !err.may_have_committed() => return Err(err.into()),
+        Err(err) => err,
+    };
+
+    let outcome = match api_client.device(device_addr) {
+        Ok(found) => classify_mint(epoch_before, found.map(|summary| summary.key_valid_from)),
+        Err(_) => Mint::Unknown,
+    };
+
+    Err(match outcome {
+        Mint::Untouched => anyhow!(err)
+            .context("the request failed and the registry is unchanged; nothing was issued"),
+
+        Mint::Committed => anyhow!(
+            "the API issued a new key but the response never arrived\n\n  \
+             {device_addr} is registered with a key it never received, so it will not\n  \
+             report. Re-run `homescope-provision {retry_command}` — the issued key is\n  \
+             not recoverable and a new one will be minted.\n\n  \
+             (caused by: {err})"
+        ),
+
+        Mint::Unknown => anyhow!(
+            "the request failed, and asking the API what happened failed too\n\n  \
+             {device_addr} may or may not have been issued a key. Check with\n  \
+             `homescope-provision list`, then re-run `homescope-provision {retry_command}`\n  \
+             if it holds a key the board never received.\n\n  \
+             (caused by: {err})"
+        ),
+    })
+}
+
+/// Reads the registry's before/after key epochs as a verdict on the mint.
+fn classify_mint(before: Option<DateTime<Utc>>, now: Option<DateTime<Utc>>) -> Mint {
+    match (before, now) {
+        // Registered when it was not, or a newer epoch than we started with:
+        // the mint landed and took the key with it.
+        (None, Some(_)) => Mint::Committed,
+        (Some(before), Some(now)) if now > before => Mint::Committed,
+
+        (Some(_), Some(_)) | (None, None) => Mint::Untouched,
+
+        // A device that was registered a moment ago is gone. Something else is
+        // wrong, and guessing either way is worse than saying so.
+        (Some(_), None) => Mint::Unknown,
+    }
+}
+
 /// Everything after the mint.
 ///
 /// ⚠️ A failure anywhere in here leaves the device **dark**, and the issued key
@@ -625,7 +724,12 @@ fn install_key(
 /// ⚠️ Never halts or resets the board. Reading its address over the probe is a
 /// plain memory read, and the session is dropped before the wait: `verify` must
 /// not stop the sensor it is waiting to hear from.
-pub fn verify(api: &ApiArgs, address: Option<DeviceAddr>, timeout: Duration) -> anyhow::Result<()> {
+pub fn verify(
+    api: &ApiArgs,
+    probe: &ProbeArgs,
+    address: Option<DeviceAddr>,
+    timeout: Duration,
+) -> anyhow::Result<()> {
     let client = resolve_client(api)?;
 
     let device_addr = match address {
@@ -633,7 +737,7 @@ pub fn verify(api: &ApiArgs, address: Option<DeviceAddr>, timeout: Duration) -> 
             output::address(device_addr);
             device_addr
         }
-        None => address_from_probe()?,
+        None => address_from_probe(probe)?,
     };
 
     let summary = client.device(device_addr)?.ok_or_else(|| {
@@ -677,8 +781,8 @@ pub fn verify(api: &ApiArgs, address: Option<DeviceAddr>, timeout: Duration) -> 
 }
 
 /// Reads the attached board's address and releases the probe.
-fn address_from_probe() -> anyhow::Result<DeviceAddr> {
-    match Chip::connect()? {
+fn address_from_probe(probe: &ProbeArgs) -> anyhow::Result<DeviceAddr> {
+    match Chip::connect(probe.probe.as_deref())? {
         Connection::Attached(mut chip) => {
             let state = chip.read_state()?;
             output::identity(&chip.probe_description(), chip::TARGET, &state);
@@ -712,8 +816,8 @@ fn wait_failure(err: WaitError, name: &str, device_addr: DeviceAddr) -> anyhow::
     }
 }
 
-fn connect(unlock: bool, assume_yes: bool) -> anyhow::Result<Box<Chip>> {
-    let chip = match Chip::connect()? {
+fn connect(probe: &ProbeArgs, unlock: bool, assume_yes: bool) -> anyhow::Result<Box<Chip>> {
+    let chip = match Chip::connect(probe.probe.as_deref())? {
         Connection::Attached(chip) => {
             if unlock {
                 bail!(messages::device_already_unlocked());
@@ -747,4 +851,42 @@ fn connect(unlock: bool, assume_yes: bool) -> anyhow::Result<Box<Chip>> {
     };
 
     Ok(chip)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn at(offset_secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_753_000_000 + offset_secs, 0).expect("valid timestamp")
+    }
+
+    /// `provision` starts from an unregistered device, so a row appearing at all
+    /// means the API committed — and the key it returned is gone.
+    #[test]
+    fn a_new_registration_means_the_key_was_issued() {
+        assert_eq!(classify_mint(None, Some(at(0))), Mint::Committed);
+    }
+
+    /// `rotate` starts from a known epoch; only a *newer* one is a fresh mint.
+    #[test]
+    fn a_newer_key_epoch_means_the_key_was_issued() {
+        assert_eq!(classify_mint(Some(at(0)), Some(at(60))), Mint::Committed);
+    }
+
+    /// The common case, and the one worth getting right: the request never
+    /// reached the registry, so the device is untouched and a retry is safe.
+    #[test]
+    fn an_unchanged_epoch_means_nothing_happened() {
+        assert_eq!(classify_mint(Some(at(0)), Some(at(0))), Mint::Untouched);
+        assert_eq!(classify_mint(None, None), Mint::Untouched);
+    }
+
+    /// ⚠️ Never guessed. A device that was registered a moment ago and is now
+    /// absent means something other than this mint is wrong, and both "your key
+    /// is lost" and "nothing happened" would be inventions.
+    #[test]
+    fn a_vanished_device_is_not_guessed_at() {
+        assert_eq!(classify_mint(Some(at(0)), None), Mint::Unknown);
+    }
 }

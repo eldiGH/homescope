@@ -75,13 +75,32 @@ impl Chip {
         format_probe_info(&self.probe)
     }
 
-    pub fn connect() -> Result<Connection, ConnectError> {
+    /// Opens the one attached probe, or the one whose serial number is given.
+    ///
+    /// ⚠️ The selector matches the **serial**, not the identifier: two probes of
+    /// the same model share a name, and the serial is what the ambiguity error
+    /// prints for you to copy.
+    pub fn connect(serial: Option<&str>) -> Result<Connection, ConnectError> {
         let lister = Lister::new();
 
-        let probes = lister.list_all();
+        let all = lister.list_all();
+
+        let probes: Vec<DebugProbeInfo> = match serial {
+            Some(wanted) => all
+                .iter()
+                .filter(|probe| probe.serial_number.as_deref() == Some(wanted))
+                .cloned()
+                .collect(),
+            None => all,
+        };
 
         let probe = match probes.len() {
-            0 => return Err(ConnectError::NoProbe),
+            0 => {
+                return Err(match serial {
+                    Some(wanted) => ConnectError::NoSuchProbe(wanted.to_owned()),
+                    None => ConnectError::NoProbe,
+                });
+            }
             1 => probes.first().unwrap(),
             _ => return Err(ConnectError::AmbiguousProbe(probes)),
         };
@@ -259,10 +278,11 @@ pub enum ConnectError {
     #[error("no probe found")]
     NoProbe,
 
-    // TODO: `--probe <serial>` is named below but not implemented yet. See
-    // docs/design/provisioning.md § Postponed.
     #[error("{} probes connected:\n  {}\n\npass --probe <serial> to select one", .0.len(), format_probe_infos(.0).join("\n  "))]
     AmbiguousProbe(Vec<DebugProbeInfo>),
+
+    #[error("no probe with serial `{0}` is connected")]
+    NoSuchProbe(String),
 
     #[error(transparent)]
     Probe(#[from] probe_rs::Error),

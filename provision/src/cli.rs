@@ -39,6 +39,17 @@ pub struct ConfirmArgs {
     pub yes: bool,
 }
 
+/// Which probe to talk through.
+///
+/// Flattened into the commands that touch a board. One probe needs no flag; the
+/// ambiguity error prints the serials to choose from.
+#[derive(Args)]
+pub struct ProbeArgs {
+    /// Serial number of the debug probe to use
+    #[arg(long, value_name = "SERIAL", env = "HOMESCOPE_PROBE")]
+    pub probe: Option<String>,
+}
+
 /// Which stored image to put on the board.
 ///
 /// A **name** from the artifact store, not a path: "whatever ELF was in the
@@ -69,6 +80,12 @@ pub enum FirmwareCommand {
 
     /// List stored artifacts
     List,
+
+    /// Forget a stored artifact
+    Remove {
+        /// Name to forget
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,7 +124,10 @@ pub enum Commands {
     },
 
     /// Report what is on the attached probe right now
-    Info,
+    Info {
+        #[command(flatten)]
+        probe: ProbeArgs,
+    },
 
     /// Manage the firmware artifact store
     Firmware {
@@ -124,6 +144,9 @@ pub enum Commands {
     Flash {
         #[command(flatten)]
         firmware: FirmwareArgs,
+
+        #[command(flatten)]
+        probe: ProbeArgs,
     },
 
     /// Register a blank board with the fleet and write its key
@@ -135,6 +158,9 @@ pub enum Commands {
 
         #[command(flatten)]
         firmware: FirmwareArgs,
+
+        #[command(flatten)]
+        probe: ProbeArgs,
 
         #[command(flatten)]
         confirm: ConfirmArgs,
@@ -151,6 +177,9 @@ pub enum Commands {
 
         #[command(flatten)]
         firmware: FirmwareArgs,
+
+        #[command(flatten)]
+        probe: ProbeArgs,
 
         #[command(flatten)]
         confirm: ConfirmArgs,
@@ -171,6 +200,9 @@ pub enum Commands {
 
         #[command(flatten)]
         api: ApiArgs,
+
+        #[command(flatten)]
+        probe: ProbeArgs,
 
         // TODO: 180 s assumes today's 60 s cadence; raise it when production moves
         // to 1–5 min between bursts.

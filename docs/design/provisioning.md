@@ -690,13 +690,18 @@ comment at the place they would land.
   `key_valid_from` would turn that into the proper "device is dark, rotate
   again" message. Graceful HTTP shutdown in the API narrows the same window from
   the other side ([api-graceful-shutdown.md](api-graceful-shutdown.md)).
-- **`verify` surviving a network blip.** A single transport error ends the whole
-  wait; transient failures should be retried until the deadline.
+- ✅ **`verify` surviving a network blip** (2026-09-19). Polling *is* the retry,
+  so a transient failure now just means that tick learned nothing. A refusal
+  still fails immediately — a 401 does not fix itself. ⚠️ The timeout
+  distinguishes "no reading arrived" from "could not reach the API", because
+  the first sends you to look at the board and the second does not. The initial
+  lookup still fails fast, deliberately: without a baseline there is nothing to
+  wait for.
 - **`verify`'s default timeout.** 180 s assumes today's 60 s cadence, and has to
   grow when production moves to 1–5 min between bursts.
-- **A warning before rotating a `KEK_UNAVAILABLE` device.** Rotation works, but
-  loading the KEK generation is the fix, and rotating forces a re-flash of a
-  device whose key was never wrong.
+- ✅ **A warning before rotating a `KEK_UNAVAILABLE` device** (2026-09-19).
+  Printed above the existing prompt rather than made into a second one: it is
+  advice, and rotating anyway is sometimes right.
 - **`provision --verify`.** Chaining the L2 wait onto a successful provision.
   `provision … && verify` already does it, since `verify` reads the address
   from the probe.
@@ -861,8 +866,18 @@ Dev-stack carve-out: permit `http://` **only when the host resolves to
 loopback**. That rule cannot be misapplied to production by accident, which is
 the property a safety valve needs.
 
-⏳ *Not yet enforced:* the tool currently accepts any `http://` URL, and
-`HOMESCOPE_CA_CERT` pinning is unbuilt. There is still no `--insecure` flag.
+✅ **Enforced 2026-09-19** in `store::parse_url`, which every path that builds
+an `ApiTarget` passes through — including a URL read back out of `config.toml`,
+because that file is one a person edits and a check only on the way in is a
+check you can hand-edit around. `https://` always; `http://` only for a host
+that is *literally* loopback (`localhost`, `127.0.0.0/8`, `::1`), compared
+whole rather than by prefix — ⚠️ `localhost.example.com` is a name anyone can
+register, and a `starts_with` there would hand a device key to its owner in the
+clear. The refusal names the SSH tunnel, since that is the answer for a
+deployment without a certificate.
+
+⏳ `HOMESCOPE_CA_CERT` pinning is still unbuilt, so a self-signed API needs the
+tunnel rather than its own certificate. There is still no `--insecure` flag.
 
 Client-side handling of the returned key — same class of leak as the API side:
 

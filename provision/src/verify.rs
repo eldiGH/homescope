@@ -80,6 +80,9 @@ pub enum WaitError {
     #[error("no new reading within {0}s")]
     TimedOut(u64),
 
+    #[error("could not reach the API for the last {0}s: {1}")]
+    Unreachable(u64, String),
+
     #[error("the API cannot decrypt it: {}", remedy(*.0))]
     Undecryptable(DeviceKeyStatus),
 
@@ -103,20 +106,46 @@ pub fn wait_for_reading(
 ) -> Result<DateTime<Utc>, WaitError> {
     let deadline = Instant::now() + timeout;
 
+    // ⚠️ Cleared on every success, so the timeout only blames the network if the
+    // network is *still* the problem. A blip two minutes ago that recovered is
+    // not why no reading arrived.
+    // Deliberately uninitialised: every path through the loop below assigns it
+    // before the deadline check reads it, and an initial value would be dead.
+    let mut unreachable: Option<String>;
+
     loop {
         thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
 
-        // TODO: one transport error ends the whole wait; retry transient
-        // failures until the deadline. See docs/design/provisioning.md § Postponed.
-        let summary = client.device(device_addr)?.ok_or(WaitError::Unregistered)?;
+        match client.device(device_addr) {
+            Ok(Some(summary)) => {
+                unreachable = None;
 
-        match assess(baseline, &summary) {
-            Progress::Reported(at) => return Ok(at),
-            Progress::Undecryptable(status) => return Err(WaitError::Undecryptable(status)),
-            Progress::Waiting if Instant::now() >= deadline => {
-                return Err(WaitError::TimedOut(timeout.as_secs()));
+                match assess(baseline, &summary) {
+                    Progress::Reported(at) => return Ok(at),
+                    Progress::Undecryptable(status) => {
+                        return Err(WaitError::Undecryptable(status));
+                    }
+                    Progress::Waiting => {}
+                }
             }
-            Progress::Waiting => {}
+
+            Ok(None) => return Err(WaitError::Unregistered),
+
+            // ⚠️ A blip must not end a three-minute wait. Polling *is* the
+            // retry, so a transient failure just means this tick learned
+            // nothing — which is the same position as a tick that found no new
+            // reading.
+            Err(err) if err.is_transient() => unreachable = Some(err.to_string()),
+
+            // The API answered and refused. Waiting will not change its mind.
+            Err(err) => return Err(err.into()),
+        }
+
+        if Instant::now() >= deadline {
+            return Err(match unreachable {
+                Some(problem) => WaitError::Unreachable(timeout.as_secs(), problem),
+                None => WaitError::TimedOut(timeout.as_secs()),
+            });
         }
     }
 }

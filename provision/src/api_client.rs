@@ -27,8 +27,12 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    // TODO: refuse plain http:// unless the host is loopback, and support
-    // HOMESCOPE_CA_CERT pinning. See docs/design/provisioning.md § Postponed.
+    // The URL policy — https, or a literally-loopback host — is enforced in
+    // `store::parse_url`, where every path that produces an `ApiTarget` passes.
+    //
+    // TODO: no CA pinning yet, so a self-signed deployment needs an SSH tunnel
+    // rather than its own certificate. `HOMESCOPE_CA_CERT` is the planned shape;
+    // see docs/design/provisioning.md §2.
     pub fn new(target: ApiTarget) -> Self {
         let config = Agent::config_builder()
             .http_status_as_error(false)
@@ -137,6 +141,19 @@ impl ApiClientError {
     /// a request that issues a key exactly once, silence is not the same as
     /// "nothing happened". The key may exist in the registry and be gone from
     /// the world.
+    /// Whether retrying could plausibly succeed.
+    ///
+    /// ⚠️ A `Rejected` is the API speaking — a 401 does not fix itself, and
+    /// retrying one for three minutes only delays telling the operator to log
+    /// in. Silence might be a Wi-Fi blip, a restarting container, or a tunnel
+    /// coming back, all of which are ordinary during a bench session.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Rejected { .. } => false,
+            Self::TransportError(_) | Self::ResponseDeserializationError { .. } => true,
+        }
+    }
+
     pub fn may_have_committed(&self) -> bool {
         match self {
             Self::Rejected { .. } => false,
@@ -256,6 +273,16 @@ mod test {
             ))),
             Err(ApiClientError::Rejected { .. })
         ));
+    }
+
+    /// A refusal will not fix itself; silence might.
+    #[test]
+    fn only_silence_is_worth_retrying() {
+        assert!(
+            !rejected(StatusCode::UNAUTHORIZED, ApiErrorCode::Unauthorized).is_transient(),
+            "a rejected token does not become valid by waiting"
+        );
+        assert!(ApiClientError::TransportError(ureq::Error::HostNotFound).is_transient());
     }
 
     /// ⚠️ The distinction the mint recovery turns on: a refusal is the API

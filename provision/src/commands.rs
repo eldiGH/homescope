@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context as _, anyhow, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
-use homescope_api_types::devices::{DeviceKeyResponse, ProvisionDevicePayload};
+use homescope_api_types::devices::{DeviceKeyResponse, DeviceKeyStatus, ProvisionDevicePayload};
 use homescope_common::{device_addr::DeviceAddr, device_key::DeviceKey, uicr_record::RecordHeader};
 use zeroize::Zeroize as _;
 
@@ -411,9 +411,6 @@ pub fn provision(
     // destructive to the registry — it invalidates the running sensor's key the
     // moment it returns — so confirming after it asks a question whose answer
     // can no longer change anything.
-    // TODO: a transport error here is ambiguous — the API may have committed the
-    // key. Re-query the device and report "dark, rotate again" if
-    // key_valid_from moved. See docs/design/provisioning.md § Postponed.
     let mut response = output::step(&format!("Registering {:?}", send_body.name), || {
         mint_key(&api_client, state.device_addr, None, "provision", || {
             api_client.provision(&send_body)
@@ -470,8 +467,21 @@ pub fn rotate_key(
         );
     };
 
-    // TODO: warn before rotating a device whose key status is KEK_UNAVAILABLE —
-    // loading the KEK is the fix. See docs/design/provisioning.md § Postponed.
+    // ⚠️ Rotating is not the fix for a key the API cannot *unseal*. The key on
+    // the board may be perfectly good — the API is simply missing the KEK
+    // generation it was sealed under — and rotating forces a re-flash of a
+    // device whose key was never wrong. Said above the prompt rather than made
+    // into a second one: it is advice, and there are cases where rotating
+    // anyway is right.
+    if existing.key_status == DeviceKeyStatus::KekUnavailable {
+        writeln!(
+            stderr(),
+            "\n⚠️  the API cannot unseal this device's key — it is sealed under a KEK\n    \
+             generation the API has not loaded. Loading that generation is usually the\n    \
+             fix; rotating replaces a key that may be perfectly good and costs a reflash."
+        )?;
+    }
+
     confirm_record(
         &state.record,
         Action::Rotate {
@@ -481,7 +491,6 @@ pub fn rotate_key(
     )?;
     chip.halt()?;
 
-    // TODO: same ambiguity as `provision` if the connection drops mid-mint.
     let mut response = output::step("Requesting a new key", || {
         mint_key(
             &api_client,
@@ -866,6 +875,12 @@ fn address_from_probe(probe: &ProbeArgs) -> anyhow::Result<DeviceAddr> {
 /// is the one failure that does not say where the break is.
 fn wait_failure(err: WaitError, name: &str, device_addr: DeviceAddr) -> anyhow::Error {
     match err {
+        WaitError::Unreachable(secs, problem) => anyhow!(
+            "could not reach the API while waiting for {name:?} ({device_addr})\n\n  \
+             The last {secs}s of polling all failed: {problem}\n  \
+             Nothing was learned about the board — check the API, then re-run."
+        ),
+
         WaitError::TimedOut(secs) => anyhow!(
             "no new reading from {name:?} ({device_addr}) within {secs}s\n\n  \
              The API reports no problem with its key, so the break is between the board\n  \

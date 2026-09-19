@@ -212,7 +212,7 @@ impl Store {
 
         Ok(ApiTarget {
             label: name.to_owned(),
-            url: configured.api_url.clone(),
+            url: parse_url(&configured.api_url)?,
             token: credentials.token.clone(),
         })
     }
@@ -225,14 +225,17 @@ impl Store {
     /// normalisation this applies).
     pub fn login_url(&self, profile: &str, api_url: Option<&str>) -> Result<String, StoreError> {
         match api_url {
-            Some(url) => Ok(normalize_url(url)),
-            None => Ok(self
-                .config
-                .profiles
-                .get(profile)
-                .ok_or_else(|| StoreError::UnknownProfile(profile.to_owned()))?
-                .api_url
-                .clone()),
+            Some(url) => parse_url(url),
+            // ⚠️ Re-checked on the way out, not trusted because it was checked
+            // on the way in: `config.toml` is an ordinary file a person edits.
+            None => parse_url(
+                &self
+                    .config
+                    .profiles
+                    .get(profile)
+                    .ok_or_else(|| StoreError::UnknownProfile(profile.to_owned()))?
+                    .api_url,
+            ),
         }
     }
 
@@ -296,23 +299,87 @@ impl Store {
     }
 }
 
-/// Paths are joined as `{url}{path}` with the path leading in `/`, so a stored
-/// URL must not end in one. Normalising on the way *in* keeps every reader of
-/// the file — and every printed confirmation — seeing the same string.
-fn normalize_url(url: &str) -> String {
-    url.trim_end_matches('/').to_owned()
+/// Validates and normalises an API URL.
+///
+/// ⚠️ **HTTPS, or loopback.** The response body of a provisioning request *is* a
+/// device key, and the request carries an admin token, so there is no network
+/// on which plaintext HTTP is acceptable — LAN included. The one carve-out is a
+/// host that is literally loopback, which cannot be misapplied to production by
+/// accident: reaching a remote API that way means an SSH tunnel, and the tunnel
+/// is the transport security.
+///
+/// ⚠️ **There is deliberately no `--insecure` flag**, and adding one "just for
+/// the dev stack" is how it ends up in a shell history forever. A tool that
+/// skips verification hands device keys to whoever is on the path.
+///
+/// Trailing slashes are trimmed because paths are joined as `{url}{/path}`;
+/// normalising on the way *in* keeps every reader of the file, and every
+/// printed confirmation, seeing the same string.
+fn parse_url(url: &str) -> Result<String, StoreError> {
+    let url = url.trim().trim_end_matches('/');
+
+    let Some((scheme, authority)) = url.split_once("://") else {
+        return Err(StoreError::NotHttpUrl(url.to_owned()));
+    };
+
+    match scheme {
+        "https" if !authority.is_empty() => Ok(url.to_owned()),
+        "http" if is_loopback(authority) => Ok(url.to_owned()),
+        "http" => Err(StoreError::InsecureUrl(url.to_owned())),
+        _ => Err(StoreError::NotHttpUrl(url.to_owned())),
+    }
+}
+
+/// The host out of `host[:port][/path]`, IPv6 literals included.
+fn host_of(authority: &str) -> &str {
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or(authority);
+
+    // `[::1]:8080` — the colons inside the brackets are not the port separator.
+    if let Some(end) = authority.strip_prefix('[').and_then(|r| r.find(']')) {
+        return &authority[1..=end];
+    }
+
+    authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, port)| {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                host
+            } else {
+                authority
+            }
+        })
+}
+
+/// ⚠️ Whole-string comparisons, never prefixes: `localhost.example.com` and
+/// `127.0.0.1.example.com` are ordinary registrable names that an attacker can
+/// own, and a `starts_with` here would hand them a device key in the clear.
+fn is_loopback(authority: &str) -> bool {
+    let host = host_of(authority);
+
+    if host.eq_ignore_ascii_case("localhost") || host == "::1" {
+        return true;
+    }
+
+    // The whole 127.0.0.0/8 block, parsed rather than matched on text.
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The `--api-url` branch of [`Store::resolve`], with the environment lookup
 /// lifted out so the no-fallback rule is testable.
 fn direct_target(url: &str, env_token: Option<String>) -> Result<ApiTarget, StoreError> {
+    // ⚠️ The URL first. "Set HOMESCOPE_TOKEN" is unhelpful advice for a URL that
+    // will be refused once you have — and worse, it invites someone to go and
+    // find a token before learning their transport is the problem.
+    let url = parse_url(url)?;
+
     let token = env_token
         .filter(|token| !token.is_empty())
         .ok_or(StoreError::NoEnvToken)?;
 
     Ok(ApiTarget {
-        label: url.to_owned(),
-        url: normalize_url(url),
+        label: url.clone(),
+        url,
         token: Token::new(token),
     })
 }
@@ -523,6 +590,14 @@ pub enum StoreError {
         "--api-url requires the token in {TOKEN_ENV}\n\nstored profile credentials are never reused for a URL passed on the command line"
     )]
     NoEnvToken,
+
+    #[error(
+        "`{0}` is plaintext HTTP\n\nThe response to a provisioning request *is* a device key, and the request\ncarries an admin token, so https:// is required for anything but a loopback\nhost. To reach a remote API without a certificate, forward it over SSH:\n\n  ssh -N -L 7890:localhost:7890 <host>\n\nthen use http://localhost:7890. There is deliberately no --insecure flag."
+    )]
+    InsecureUrl(String),
+
+    #[error("`{0}` is not an http(s) URL")]
+    NotHttpUrl(String),
 }
 
 #[cfg(test)]
@@ -593,9 +668,101 @@ mod test {
     #[test]
     fn a_trailing_slash_is_stripped_from_a_stored_url() {
         // Paths are joined as `{url}{/path}`, so a stored slash means `//devices`.
-        assert_eq!(normalize_url("http://host:8080/"), "http://host:8080");
-        assert_eq!(normalize_url("http://host:8080///"), "http://host:8080");
-        assert_eq!(normalize_url("http://host:8080"), "http://host:8080");
+        assert_eq!(
+            parse_url("https://host:8080/").unwrap(),
+            "https://host:8080"
+        );
+        assert_eq!(
+            parse_url("https://host:8080///").unwrap(),
+            "https://host:8080"
+        );
+        assert_eq!(parse_url("https://host:8080").unwrap(), "https://host:8080");
+    }
+
+    #[test]
+    fn https_is_always_allowed() {
+        for url in ["https://pi.local", "https://example.com:4001/api"] {
+            assert!(parse_url(url).is_ok(), "{url} should be allowed");
+        }
+    }
+
+    /// The carve-out, and the only one: an SSH tunnel presents the remote API
+    /// as a loopback address, and the tunnel is the transport security.
+    #[test]
+    fn plain_http_is_allowed_only_on_loopback() {
+        for url in [
+            "http://localhost:7890",
+            "http://LocalHost:7890",
+            "http://127.0.0.1:7890",
+            "http://127.1.2.3",
+            "http://[::1]:7890",
+            "http://localhost",
+        ] {
+            assert!(parse_url(url).is_ok(), "{url} should be allowed");
+        }
+    }
+
+    /// ⚠️ The case a `starts_with` would get wrong. `localhost.example.com` and
+    /// `127.0.0.1.example.com` are ordinary names anyone can register, and
+    /// treating them as loopback would send a device key to their owner in the
+    /// clear.
+    #[test]
+    fn hosts_that_merely_look_like_loopback_are_refused() {
+        for url in [
+            "http://localhost.example.com",
+            "http://127.0.0.1.example.com",
+            "http://notlocalhost",
+            "http://localhost@example.com",
+            "http://example.com/localhost",
+            "http://192.168.1.5:7890",
+            "http://pi.local",
+        ] {
+            assert!(
+                matches!(parse_url(url), Err(StoreError::InsecureUrl(_))),
+                "{url} must not count as loopback"
+            );
+        }
+    }
+
+    /// The refusal has to say how to proceed, or it just blocks the work.
+    #[test]
+    fn the_insecure_refusal_names_the_ssh_tunnel() {
+        let err = expect_err(parse_url("http://pi.local"));
+
+        let message = err.to_string();
+        assert!(message.contains("ssh -N -L"), "{message}");
+        assert!(message.contains("no --insecure flag"), "{message}");
+    }
+
+    #[test]
+    fn anything_that_is_not_http_is_refused() {
+        for url in ["pi.local", "ftp://pi.local", "file:///etc/passwd", ""] {
+            assert!(
+                matches!(parse_url(url), Err(StoreError::NotHttpUrl(_))),
+                "{url:?} should be refused"
+            );
+        }
+    }
+
+    /// ⚠️ `config.toml` is an ordinary file. A URL that was checked when stored
+    /// must be checked again when used, or hand-editing it is the bypass.
+    #[test]
+    fn a_hand_edited_insecure_url_is_refused_on_use() {
+        let dir = TempDir::new().unwrap();
+        logged_in(&dir);
+
+        let path = config_dir(&dir).join(CONFIG_FILE);
+        let edited = fs::read_to_string(&path)
+            .unwrap()
+            .replace("http://localhost:8080", "http://pi.local");
+        fs::write(&path, edited).unwrap();
+
+        let store = store_at(&dir).unwrap();
+
+        assert!(matches!(
+            store.resolve(Some("dev"), None),
+            Err(StoreError::InsecureUrl(_))
+        ));
     }
 
     // ---- XDG resolution ---------------------------------------------------
@@ -879,7 +1046,7 @@ mod test {
     /// missing `HOMESCOPE_TOKEN` is a refusal, not a fallback.
     #[test]
     fn an_explicit_url_without_an_env_token_is_refused_not_substituted() {
-        let err = expect_err(direct_target("http://typed-by-hand", None));
+        let err = expect_err(direct_target("https://typed-by-hand", None));
 
         assert!(matches!(&err, StoreError::NoEnvToken));
         assert!(err.to_string().contains(TOKEN_ENV));
@@ -888,17 +1055,17 @@ mod test {
     #[test]
     fn an_empty_env_token_counts_as_unset() {
         assert!(matches!(
-            direct_target("http://host", Some(String::new())),
+            direct_target("https://host", Some(String::new())),
             Err(StoreError::NoEnvToken)
         ));
     }
 
     #[test]
     fn an_explicit_url_is_labelled_by_itself_and_normalised() {
-        let target = direct_target("http://host:8080/", Some("env-token".to_owned())).unwrap();
+        let target = direct_target("https://host:8080/", Some("env-token".to_owned())).unwrap();
 
-        assert_eq!(target.label, "http://host:8080/");
-        assert_eq!(target.url, "http://host:8080");
+        assert_eq!(target.label, "https://host:8080");
+        assert_eq!(target.url, "https://host:8080");
         assert_eq!(target.token.expose(), "env-token");
     }
 

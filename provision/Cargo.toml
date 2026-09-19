@@ -20,6 +20,7 @@ rpassword = "7.5.4"
 zeroize = "1.9.0"
 object = { version = "0.39", default-features = false, features = ["read_core", "elf", "std"] }
 sha2 = "0.10"
+defmt-decoder = "1.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -16,6 +16,7 @@ use thiserror::Error;
 use crate::{
     chip::memory::{MemoryExt, Mismatch},
     elf::PAGE_SIZE,
+    logs,
 };
 
 /// An erased flash word. The reset vector read back as this is what a board
@@ -249,6 +250,26 @@ impl Chip {
         }
 
         Ok(())
+    }
+
+    /// Reads the board's defmt log for `window` — level 0 verification.
+    ///
+    /// Takes the image's bytes because a log only decodes against the build
+    /// that is running; the caller has just flashed one, so it has them.
+    pub fn stream_logs(
+        &mut self,
+        elf: &[u8],
+        window: Duration,
+        out: &mut dyn std::io::Write,
+    ) -> Result<logs::Summary, logs::LogError> {
+        let mut core = self.session.core(0)?;
+
+        logs::stream(&mut core, elf, window, out)
+    }
+
+    /// The core's status, for diagnosing a silent board.
+    pub fn core_status(&mut self) -> Result<String, probe_rs::Error> {
+        Ok(format!("{:?}", self.session.core(0)?.status()?))
     }
 
     pub fn halt(&mut self) -> Result<(), probe_rs::Error> {

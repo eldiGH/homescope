@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{IsTerminal as _, Write as _, stderr, stdin, stdout},
     path::{Path, PathBuf},
     time::Duration,
@@ -13,7 +14,7 @@ use zeroize::Zeroize as _;
 use crate::{
     api_client::{ApiClient, ApiClientError},
     chip::{self, Chip, Connection},
-    cli::{ApiArgs, ConfirmArgs, FirmwareArgs, FirmwareCommand, ProbeArgs},
+    cli::{ApiArgs, ConfirmArgs, FirmwareArgs, FirmwareCommand, LogArgs, ProbeArgs},
     confirm::{self, ConfirmError},
     firmware::{self, Artifact},
     output,
@@ -286,7 +287,7 @@ fn optional_firmware(args: &FirmwareArgs) -> anyhow::Result<Option<(Artifact, Pa
 /// ⚠️ Does **not** clear the seq counter. No new key is minted here, and
 /// clearing the counter under a live key re-emits nonces the device has already
 /// used — see `Chip::erase_storage`.
-pub fn flash(args: &FirmwareArgs, probe: &ProbeArgs) -> anyhow::Result<()> {
+pub fn flash(args: &FirmwareArgs, probe: &ProbeArgs, logs: &LogArgs) -> anyhow::Result<()> {
     let (artifact, image) = choose_firmware(args)?;
 
     let mut chip = match Chip::connect(probe.probe.as_deref())? {
@@ -322,6 +323,8 @@ pub fn flash(args: &FirmwareArgs, probe: &ProbeArgs) -> anyhow::Result<()> {
     })?;
 
     output::step("Resetting", || chip.reset())?;
+
+    report_boot(&mut chip, &image, logs)?;
 
     println!("{}\t{}", state.device_addr, artifact.name);
     output::outcome(&format!(
@@ -364,6 +367,7 @@ pub fn provision(
     api: &ApiArgs,
     firmware_args: &FirmwareArgs,
     probe: &ProbeArgs,
+    logs: &LogArgs,
     confirm_args: &ConfirmArgs,
     unlock: bool,
     name: String,
@@ -421,6 +425,7 @@ pub fn provision(
         &state.record,
         &mut response,
         firmware.as_ref(),
+        logs,
         "provision",
     )?;
 
@@ -437,6 +442,7 @@ pub fn rotate_key(
     api: &ApiArgs,
     firmware_args: &FirmwareArgs,
     probe: &ProbeArgs,
+    logs: &LogArgs,
     confirm_args: &ConfirmArgs,
     unlock: bool,
 ) -> anyhow::Result<()> {
@@ -491,6 +497,7 @@ pub fn rotate_key(
         &state.record,
         &mut response,
         firmware.as_ref(),
+        logs,
         "rotate",
     )?;
 
@@ -570,6 +577,55 @@ fn confirm_record(
     };
 
     confirm::yes_no(&question, assume_yes)
+}
+
+/// Reads the board's own log after a reset — level 0 verification.
+///
+/// ⚠️ Never fails the run on its own. The board has already been keyed and
+/// flashed by this point; whatever the log says, the operation happened. What
+/// it can do is tell you *now*, at the bench with the probe still attached,
+/// that the firmware says it has no key — instead of after a walk to the
+/// cupboard and a timed-out `verify`.
+fn report_boot(chip: &mut Chip, image: &Path, args: &LogArgs) -> anyhow::Result<()> {
+    let window = Duration::from_secs(args.logs);
+    if window.is_zero() {
+        return Ok(());
+    }
+
+    let elf = fs::read(image)?;
+    let mut err = stderr();
+
+    writeln!(err, "\nBoot log ({}s):", args.logs)?;
+
+    let summary = match chip.stream_logs(&elf, window, &mut err) {
+        Ok(summary) => summary,
+        // The board is keyed and flashed either way, so a broken log reader
+        // must not look like a broken provision.
+        Err(problem) => {
+            writeln!(err, "  (could not read the log: {problem})")?;
+            return Ok(());
+        }
+    };
+
+    if summary.is_silent() {
+        writeln!(
+            err,
+            "  (nothing decoded: {} channel(s), {} bytes, core {} — either the board \
+             is not running, or this image was built without DEFMT_LOG)",
+            summary.channels,
+            summary.bytes,
+            chip.core_status().unwrap_or_else(|_| "unknown".to_owned())
+        )?;
+    } else if !summary.errors.is_empty() {
+        writeln!(
+            err,
+            "\n⚠️  the firmware reported {} error(s) above — the board is keyed and \
+             flashed,\n    but it is saying something is wrong.",
+            summary.errors.len()
+        )?;
+    }
+
+    Ok(())
 }
 
 /// What the registry says happened, when a mint failed without answering.
@@ -663,6 +719,7 @@ fn install_key(
     record: &RecordHeader,
     response: &mut DeviceKeyResponse,
     firmware: Option<&(Artifact, PathBuf)>,
+    logs: &LogArgs,
     retry_command: &str,
 ) -> anyhow::Result<()> {
     // Decode, then wipe the hex before anything else can fail — §2 asks that
@@ -703,6 +760,10 @@ fn install_key(
         }
 
         output::step("Resetting", || chip.reset())?;
+
+        if let Some((_, image)) = firmware {
+            report_boot(chip, image, logs)?;
+        }
 
         Ok(())
     })();

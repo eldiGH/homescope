@@ -77,6 +77,14 @@ fmt:
 
 # ---- static checks -----------------------------------------------------------
 
+# ⚠️ Every firmware recipe below runs `cargo` from inside `firmware/`, never
+# with `--manifest-path` from the root. Cargo resolves `.cargo/config.toml` by
+# *current directory*, not by manifest, and `firmware/.cargo/config.toml` sets
+# `DEFMT_LOG = "trace"` as well as the target. Built from the root, defmt
+# filters every statement out at compile time: the image links, runs, and logs
+# nothing — which is indistinguishable from a hung board when you attach RTT to
+# find out why a sensor went quiet. (Found exactly that way, 2026-09-19.)
+#
 # Firmware crate/board pairs that must compile AND link.
 #
 # Neither firmware crate has a default board feature, so every invocation must
@@ -115,8 +123,8 @@ lint-firmware:
     for pair in {{ firmware_matrix }}; do
         crate="${pair%%:*}"; board="${pair##*:}"
         echo ">>> clippy $crate / board-$board"
-        cargo clippy --manifest-path firmware/Cargo.toml --target thumbv7em-none-eabi \
-            -p "homescope-$crate" --features "board-$board" --all-targets -- -D warnings
+        (cd firmware && cargo clippy -p "homescope-$crate" \
+            --no-default-features --features "board-$board" --all-targets -- -D warnings)
     done
 
 # Build every firmware combination.
@@ -133,8 +141,8 @@ build-firmware:
     for pair in {{ firmware_matrix }}; do
         crate="${pair%%:*}"; board="${pair##*:}"
         echo ">>> build $crate / board-$board"
-        cargo build --manifest-path firmware/Cargo.toml --target thumbv7em-none-eabi \
-            --release -p "homescope-$crate" --features "board-$board"
+        (cd firmware && cargo build --release -p "homescope-$crate" \
+            --no-default-features --features "board-$board")
     done
 
 # Build one firmware image and store it under a name the provisioning tool can
@@ -148,8 +156,8 @@ build-firmware:
 firmware-store crate board:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --manifest-path firmware/Cargo.toml --target thumbv7em-none-eabi \
-        --release -p "homescope-{{ crate }}" --no-default-features --features "board-{{ board }}"
+    (cd firmware && cargo build --release -p "homescope-{{ crate }}" \
+        --no-default-features --features "board-{{ board }}")
     cargo run --quiet -p homescope-provision -- firmware add \
         "firmware/target/thumbv7em-none-eabi/release/homescope-{{ crate }}" \
         --name "{{ crate }}-{{ board }}"

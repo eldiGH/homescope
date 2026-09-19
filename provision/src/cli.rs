@@ -39,6 +39,18 @@ pub struct ConfirmArgs {
     pub yes: bool,
 }
 
+/// How long to read the board's own log after resetting it.
+///
+/// Level 0 of the verification ladder: the firmware reports whether it found a
+/// key in UICR and where its seq counter resumed, which is the whole question a
+/// provisioning run asks — and it needs no network, no receiver and no key.
+#[derive(Args)]
+pub struct LogArgs {
+    /// Seconds to read the board's log after reset; 0 to skip
+    #[arg(long, value_name = "SECONDS", default_value_t = 3)]
+    pub logs: u64,
+}
+
 /// Which probe to talk through.
 ///
 /// Flattened into the commands that touch a board. One probe needs no flag; the
@@ -147,6 +159,9 @@ pub enum Commands {
 
         #[command(flatten)]
         probe: ProbeArgs,
+
+        #[command(flatten)]
+        logs: LogArgs,
     },
 
     /// Register a blank board with the fleet and write its key
@@ -161,6 +176,9 @@ pub enum Commands {
 
         #[command(flatten)]
         probe: ProbeArgs,
+
+        #[command(flatten)]
+        logs: LogArgs,
 
         #[command(flatten)]
         confirm: ConfirmArgs,
@@ -180,6 +198,9 @@ pub enum Commands {
 
         #[command(flatten)]
         probe: ProbeArgs,
+
+        #[command(flatten)]
+        logs: LogArgs,
 
         #[command(flatten)]
         confirm: ConfirmArgs,

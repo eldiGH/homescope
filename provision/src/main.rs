@@ -11,6 +11,7 @@ mod commands;
 mod confirm;
 mod elf;
 mod firmware;
+mod logs;
 mod output;
 mod store;
 mod verify;
@@ -25,22 +26,28 @@ fn main() -> anyhow::Result<()> {
         Commands::List { api } => commands::list(&api)?,
         Commands::Info { probe } => commands::info(&probe)?,
         Commands::Firmware { command } => commands::firmware(command)?,
-        Commands::Flash { firmware, probe } => commands::flash(&firmware, &probe)?,
+        Commands::Flash {
+            firmware,
+            probe,
+            logs,
+        } => commands::flash(&firmware, &probe, &logs)?,
         Commands::Provision {
             name,
             api,
             firmware,
             probe,
+            logs,
             confirm,
             unlock,
-        } => commands::provision(&api, &firmware, &probe, &confirm, unlock, name)?,
+        } => commands::provision(&api, &firmware, &probe, &logs, &confirm, unlock, name)?,
         Commands::Rotate {
             api,
             firmware,
             probe,
+            logs,
             confirm,
             unlock,
-        } => commands::rotate_key(&api, &firmware, &probe, &confirm, unlock)?,
+        } => commands::rotate_key(&api, &firmware, &probe, &logs, &confirm, unlock)?,
         Commands::Verify {
             address,
             api,

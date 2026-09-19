@@ -9,6 +9,8 @@ const NVMC_READY: u64 = 0x4001_E400;
 const NVMC_ERASEUICR: u64 = 0x4001_E514;
 const ERASEUICR: u32 = 1;
 
+const NVMC_ERASEPAGE: u64 = 0x4001_E508;
+
 const NVMC_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[repr(u32)]
@@ -93,6 +95,17 @@ pub struct Eraser<'core, 'probe> {
 impl<'core, 'probe> Eraser<'core, 'probe> {
     pub fn erase_uicr(&mut self) -> Result<(), Error> {
         write_word(self.core, NVMC_ERASEUICR, ERASEUICR)
+    }
+
+    /// Erases one flash page — the erase granularity of the nRF52840's NVMC.
+    ///
+    /// ⚠️ `address` is written to `ERASEPAGE` as-is, and the hardware erases the
+    /// page containing it. Callers pass a page start; an address inside a page
+    /// would erase that whole page anyway, which is exactly the surprise worth
+    /// not having. `elf::read` rejects a storage range that is not page-aligned
+    /// before it can reach here.
+    pub fn erase_page(&mut self, address: u64) -> Result<(), Error> {
+        write_word(self.core, NVMC_ERASEPAGE, address as u32)
     }
 }
 

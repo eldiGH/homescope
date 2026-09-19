@@ -67,9 +67,7 @@ So the migration erases everything and mints a **new** key:
 
 ```bash
 # 1. Wipe MBR, SoftDevice, bootloader, application, old storage and UICR.
-#    probe-rs cannot chip-erase an nRF52 (it implements only debug_device_unlock),
-#    so use Nordic's tool:
-nrfjprog --eraseall -f nrf52
+probe-rs erase --chip nRF52840_xxAA
 
 # 2. Re-key and flash in one operation. UICR now reads Blank, which `rotate`
 #    accepts — it is the post-chip-erase recovery path — and a fresh key makes

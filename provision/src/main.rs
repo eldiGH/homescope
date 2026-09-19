@@ -9,6 +9,8 @@ mod chip;
 mod cli;
 mod commands;
 mod confirm;
+mod elf;
+mod firmware;
 mod output;
 mod store;
 mod verify;
@@ -22,17 +24,21 @@ fn main() -> anyhow::Result<()> {
         Commands::Whoami { api } => commands::whoami(&api)?,
         Commands::List { api } => commands::list(&api)?,
         Commands::Info => commands::info()?,
+        Commands::Firmware { command } => commands::firmware(command)?,
+        Commands::Flash { firmware } => commands::flash(&firmware)?,
         Commands::Provision {
             name,
             api,
+            firmware,
             confirm,
             unlock,
-        } => commands::provision(&api, &confirm, unlock, name)?,
+        } => commands::provision(&api, &firmware, &confirm, unlock, name)?,
         Commands::Rotate {
             api,
+            firmware,
             confirm,
             unlock,
-        } => commands::rotate_key(&api, &confirm, unlock)?,
+        } => commands::rotate_key(&api, &firmware, &confirm, unlock)?,
         Commands::Verify {
             address,
             api,

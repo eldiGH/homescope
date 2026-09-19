@@ -341,6 +341,45 @@ into the existing `Eraser` guard.
 `key_valid_from` means the ingest replay check accepts a restart at zero. It
 buys determinism, which is worth having while debugging. Do it.
 
+### ⚠️ A cleared counter is invisible to an already-running receiver
+
+Found on the bench 2026-09-19, the first time `rotate --firmware` cleared a
+counter for real. The device went silent and nothing in the provisioning path
+was wrong: firmware healthy over RTT, sensors reading, advertising every cycle.
+
+`firmware/receiver/src/ble_scan.rs` dedups a burst per device with
+
+```rust
+if cache.get(&device_addr).is_some_and(|cached| seq <= *cached) { continue; }
+```
+
+The dongle's cache still held the pre-clear high-water mark (24605); the board
+restarted at 1024. **Every genuine packet was dropped**, and would have been for
+the ~16 days it takes a once-a-minute counter to climb back. The cache lives in
+the dongle's RAM, so replugging it is the immediate cure.
+
+Two things follow.
+
+**`<=` is the wrong comparison for a burst dedup.** `==` drops the ~20 repeats
+of one burst, which is the whole job. The extra inequality buys replay
+protection the receiver was never meant to provide — it is deliberately
+semantics-blind and keyless — and which belongs to the API's per-device seq
+check, where the key epoch is known (see
+[ingest-db-error-handling.md](ingest-db-error-handling.md)).
+
+⚠️ **Worse, `<=` turns a forgeable field into a denial of service.** `seq` is
+cleartext and unauthenticated at the receiver by design. Anyone in range can
+advertise one packet carrying a victim's address and `seq = 0xFFFFFFFF`, and
+that device is dropped until the dongle is power-cycled. The AEAD tag stops the
+forgery reaching the database; it does not stop the forgery silencing a real
+device upstream of it. This is the same family as the note in `CLAUDE.md` about
+foreign advertisers evicting cache slots, but sharper — eviction degrades, this
+one is targeted and sticky.
+
+So the receiver should drop only `seq == cached`, and provisioning should keep
+clearing the counter. Until that lands, ⚠️ **re-keying a device requires
+replugging the receiver**, or it stays invisible.
+
 ⚠️ **Never offer a standalone `reset-seq`.** Clearing the counter under a
 *live* key is nonce reuse across the entire history of that key — the collapse
 `seq_counter.rs`'s module docs are written about, not a degradation. Inside
@@ -508,12 +547,17 @@ caveats worth keeping:
   header word first**, inverting the commit-marker property §5 is built
   around. Its contract is a superset of what is needed, in exactly the place
   where the surplus is fatal.
-- ⚠️ **`ERASEUICR`, not the debug erase sequence and not ERASEALL.** Asking
-  probe-rs for a chip erase fails at runtime with `Debug Erase Sequence`
-  unimplemented — nRF52's `ArmDebugSequence` implements `debug_device_unlock`
-  and nothing else, so the default `sequence_erase_all` returns `None`. The
-  only path that legitimately wants the whole chip is the APPROTECT unlock,
-  which `LockedChip::erase_to_unlock` owns.
+- ⚠️ **`ERASEUICR`, not the debug erase sequence and not ERASEALL.** The
+  *debug* erase sequence is what is unimplemented: nRF52's `ArmDebugSequence`
+  implements `debug_device_unlock` and nothing else, so `sequence_erase_all`
+  returns `None`. The only path that legitimately wants the whole chip is the
+  APPROTECT unlock, which `LockedChip::erase_to_unlock` owns.
+
+  ⚠️ **Corrected 2026-09-19:** an earlier draft of this bullet said "asking
+  probe-rs for a chip erase fails at runtime". That is too broad. `probe-rs
+  erase --chip nRF52840_xxAA` **works** on an unlocked chip — it goes through
+  the flash algorithm's erase-all, not the debug sequence — and is what the
+  XIAO migration uses. Only the locked-chip path needs CTRL-AP.
 - ⚠️ **`CONFIG.WEN` is a mode, not a bitfield** — `Ren`/`Wen`/`Een` are
   0/1/2, and the erase registers are only honoured in `Een`. Writing the key
   with `Wen` set and then poking ERASEUICR is a silent no-op. Hence the

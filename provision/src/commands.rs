@@ -1,5 +1,6 @@
 use std::{
     io::{IsTerminal as _, Write as _, stderr, stdin, stdout},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -12,8 +13,9 @@ use zeroize::Zeroize as _;
 use crate::{
     api_client::ApiClient,
     chip::{self, Chip, Connection},
-    cli::{ApiArgs, ConfirmArgs},
+    cli::{ApiArgs, ConfirmArgs, FirmwareArgs, FirmwareCommand},
     confirm::{self, ConfirmError},
+    firmware::{self, Artifact},
     output,
     store::{ApiTarget, Credentials, Store, Token},
     verify::{self, Progress, WaitError},
@@ -195,6 +197,141 @@ pub fn list(api: &ApiArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn firmware(command: FirmwareCommand) -> anyhow::Result<()> {
+    let mut store = firmware::Store::load()?;
+
+    match command {
+        FirmwareCommand::Add { path, name } => {
+            let artifact = output::step(&format!("Reading {}", path.display()), || {
+                store.add(&path, &name)
+            })?;
+
+            writeln!(
+                stderr(),
+                "\nStored {:?}\n  loads at {:#X}\n  seq storage {}",
+                artifact.name,
+                artifact.app_start,
+                match artifact.storage_range() {
+                    Some((start, end)) => format!("{start:#X}..{end:#X}"),
+                    None => "none declared".to_owned(),
+                }
+            )?;
+
+            println!("{}\t{}", artifact.name, artifact.id);
+        }
+
+        FirmwareCommand::List => {
+            let now = Utc::now();
+            let artifacts = store.artifacts();
+
+            if artifacts.is_empty() {
+                writeln!(
+                    stderr(),
+                    "No firmware stored.\n\nadd one: homescope-provision firmware add <PATH> --name <NAME>"
+                )?;
+                return Ok(());
+            }
+
+            for artifact in artifacts {
+                println!("{}", firmware::describe(artifact, now));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// The image to flash, from `--firmware` or the picker.
+///
+/// Returns the artifact *and* its path, because the store owns where the bytes
+/// live and nothing else should be constructing that path.
+fn choose_firmware(args: &FirmwareArgs) -> anyhow::Result<(Artifact, PathBuf)> {
+    let store = firmware::Store::load()?;
+
+    let artifact = match &args.firmware {
+        Some(name) => store.get(name).cloned().ok_or_else(|| {
+            anyhow!("no stored firmware called {name:?}\n\nsee: homescope-provision firmware list")
+        })?,
+        None => firmware::pick(&store, Utc::now())?.clone(),
+    };
+
+    let path = store.image_path(&artifact);
+
+    Ok((artifact, path))
+}
+
+/// Firmware for `provision`/`rotate`, where flashing is optional.
+///
+/// ⚠️ No picker here, unlike [`flash`]. Omitting `--firmware` means "do not
+/// flash", so re-keying a board that already runs firmware stays a single
+/// silent command — and a prompt that appeared on every rotate is a prompt that
+/// stops being read.
+fn optional_firmware(args: &FirmwareArgs) -> anyhow::Result<Option<(Artifact, PathBuf)>> {
+    args.firmware
+        .is_some()
+        .then(|| choose_firmware(args))
+        .transpose()
+}
+
+/// Puts firmware on a board and leaves its key alone.
+///
+/// ⚠️ Does **not** clear the seq counter. No new key is minted here, and
+/// clearing the counter under a live key re-emits nonces the device has already
+/// used — see `Chip::erase_storage`.
+pub fn flash(args: &FirmwareArgs) -> anyhow::Result<()> {
+    let (artifact, image) = choose_firmware(args)?;
+
+    let mut chip = match Chip::connect()? {
+        Connection::Locked(_) => bail!(messages::device_locked_warning()),
+        Connection::Attached(chip) => chip,
+    };
+
+    let state = chip.read_state()?;
+    output::identity(&chip.probe_description(), chip::TARGET, &state);
+
+    // A flash leaves UICR alone, so a board with no usable record keeps not
+    // having one. Worth saying — but not worth refusing: flashing a blank board
+    // is ordinary bring-up.
+    if !matches!(state.record, RecordHeader::Present) {
+        writeln!(
+            stderr(),
+            "\nnote: this board holds no usable key, so it will not report until it is \
+             provisioned.\n      Flashing does not change that."
+        )?;
+    }
+
+    let before = chip.read_uicr_words()?;
+
+    flash_image(&mut chip, &artifact, &image)?;
+
+    // Cheap, and it catches a wrong-range image or a flash algorithm that
+    // reached further than it claimed.
+    output::step("Confirming the key record is untouched", || {
+        let after = chip.read_uicr_words()?;
+        (after == before)
+            .then_some(())
+            .ok_or_else(|| anyhow!("the UICR record changed during flashing"))
+    })?;
+
+    output::step("Resetting", || chip.reset())?;
+
+    println!("{}\t{}", state.device_addr, artifact.name);
+    output::outcome(&format!(
+        "Flashed {:?} ({}) onto {}",
+        artifact.name, artifact.id, state.device_addr
+    ));
+
+    Ok(())
+}
+
+fn flash_image(chip: &mut Chip, artifact: &Artifact, image: &Path) -> anyhow::Result<()> {
+    output::step(&format!("Flashing {:?}", artifact.name), || {
+        chip.flash(image, artifact.app_start)
+    })?;
+
+    Ok(())
+}
+
 /// ⚠️ Never prompts and never refuses. A locked chip is a *state* to report,
 /// not a failure — and the old message told the reader to pass `--unlock`, a
 /// flag `info` does not have.
@@ -217,10 +354,15 @@ pub fn info() -> anyhow::Result<()> {
 
 pub fn provision(
     api: &ApiArgs,
+    firmware_args: &FirmwareArgs,
     confirm_args: &ConfirmArgs,
     unlock: bool,
     name: String,
 ) -> anyhow::Result<()> {
+    // Before the probe is touched: choosing firmware can prompt, and a prompt
+    // should not sit between a halt and a mint.
+    let firmware = optional_firmware(firmware_args)?;
+
     let api_client = resolve_client(api)?;
     check_auth_before_unlock(&api_client, unlock)?;
 
@@ -263,7 +405,13 @@ pub fn provision(
         api_client.provision(&send_body)
     })?;
 
-    install_key(&mut chip, &state.record, &mut response, "provision")?;
+    install_key(
+        &mut chip,
+        &state.record,
+        &mut response,
+        firmware.as_ref(),
+        "provision",
+    )?;
 
     println!("{}\t{}", response.device_addr, response.name);
     output::outcome(&format!(
@@ -274,7 +422,14 @@ pub fn provision(
     Ok(())
 }
 
-pub fn rotate_key(api: &ApiArgs, confirm_args: &ConfirmArgs, unlock: bool) -> anyhow::Result<()> {
+pub fn rotate_key(
+    api: &ApiArgs,
+    firmware_args: &FirmwareArgs,
+    confirm_args: &ConfirmArgs,
+    unlock: bool,
+) -> anyhow::Result<()> {
+    let firmware = optional_firmware(firmware_args)?;
+
     let api_client = resolve_client(api)?;
     check_auth_before_unlock(&api_client, unlock)?;
 
@@ -313,7 +468,13 @@ pub fn rotate_key(api: &ApiArgs, confirm_args: &ConfirmArgs, unlock: bool) -> an
         api_client.rotate_key(state.device_addr)
     })?;
 
-    install_key(&mut chip, &state.record, &mut response, "rotate")?;
+    install_key(
+        &mut chip,
+        &state.record,
+        &mut response,
+        firmware.as_ref(),
+        "rotate",
+    )?;
 
     println!("{}\t{}", response.device_addr, response.name);
     output::outcome(&format!(
@@ -402,6 +563,7 @@ fn install_key(
     chip: &mut Chip,
     record: &RecordHeader,
     response: &mut DeviceKeyResponse,
+    firmware: Option<&(Artifact, PathBuf)>,
     retry_command: &str,
 ) -> anyhow::Result<()> {
     // Decode, then wipe the hex before anything else can fail — §2 asks that
@@ -423,6 +585,23 @@ fn install_key(
         output::step("Writing and verifying UICR record", || {
             chip.write_uicr_record(key)
         })?;
+
+        // ⚠️ After the key is verified, not before: a bad key under good
+        // firmware fails silently, where good firmware with no key announces
+        // itself over RTT.
+        if let Some((artifact, image)) = firmware {
+            flash_image(chip, artifact, image)?;
+
+            // ⚠️ Only here, and only because a *new* key was just installed.
+            // The range comes from the image being flashed — the only thing
+            // that knows where this firmware keeps its counter — which is also
+            // why there is no way to ask for this without flashing.
+            if let Some((start, end)) = artifact.storage_range() {
+                output::step("Clearing the seq counter", || {
+                    chip.erase_storage(start, end)
+                })?;
+            }
+        }
 
         output::step("Resetting", || chip.reset())?;
 

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use homescope_common::{
     device_addr::DeviceAddr,
@@ -8,11 +8,19 @@ use homescope_common::{
 use probe_rs::{
     Core, MemoryInterface, Permissions, Session,
     architecture::arm::ArmError,
+    flashing::{DownloadOptions, ElfLoader, ElfOptions, download_file_with_options},
     probe::{DebugProbeInfo, list::Lister},
 };
 use thiserror::Error;
 
-use crate::chip::memory::{MemoryExt, Mismatch};
+use crate::{
+    chip::memory::{MemoryExt, Mismatch},
+    elf::PAGE_SIZE,
+};
+
+/// An erased flash word. The reset vector read back as this is what a board
+/// with nothing at `0x0` looks like to the CPU.
+const ERASED: u32 = u32::MAX;
 
 mod memory;
 mod nvmc;
@@ -147,6 +155,83 @@ impl Chip {
         Ok(())
     }
 
+    /// The raw UICR record words, for comparing a region against itself.
+    pub fn read_uicr_words(
+        &mut self,
+    ) -> Result<[u32; uicr_record::UICR_RECORD_WORDS], probe_rs::Error> {
+        self.session.core(0)?.read_words(UICR_CUSTOMER)
+    }
+
+    /// Writes a firmware image to flash and reads it back.
+    ///
+    /// ⚠️ `do_chip_erase` stays **false**. It is faster, and it would erase the
+    /// UICR key this run just wrote and verified — the one setting here that
+    /// turns a successful provision into a dark device.
+    ///
+    /// ⚠️ The guard is inside rather than beside: an image that starts above
+    /// `0x0` expects something beneath it — a bootloader — and flashing it onto
+    /// a board where that region is erased leaves the CPU reading `0xFFFFFFFF`
+    /// as its initial stack pointer and reset vector. The board looks dead. No
+    /// image we build has an offset since the XIAO bootloader was dropped, so
+    /// this fires only on a stale or foreign artifact, which is exactly when
+    /// nobody is expecting it.
+    pub fn flash(&mut self, image: &Path, app_start: u64) -> Result<(), FlashError> {
+        if app_start > 0 {
+            let beneath = self.session.core(0)?.read_word_32(0)?;
+
+            if beneath == ERASED {
+                return Err(FlashError::NothingBeneath { app_start });
+            }
+        }
+
+        // `#[non_exhaustive]`, so it is built by mutation rather than a literal.
+        let mut options = DownloadOptions::default();
+        options.verify = true;
+        options.do_chip_erase = false;
+
+        download_file_with_options(
+            &mut self.session,
+            image,
+            ElfLoader(ElfOptions::default()),
+            options,
+        )?;
+
+        Ok(())
+    }
+
+    /// Erases the seq checkpoint pages named by the image being flashed.
+    ///
+    /// ⚠️ Only ever called in the same operation that installs a **new** key.
+    /// Clearing the counter under a live key re-emits nonces the device has
+    /// already used, which for ChaCha20-Poly1305 leaks the Poly1305 key and
+    /// lets an attacker forge packets for that device — a break, not a
+    /// degradation. Inside `provision`/`rotate` it is safe because UICR is
+    /// erased before the new key lands, so no window exists where an old key
+    /// and a fresh counter coexist. There is deliberately no standalone
+    /// `reset-seq` command, because that window is all it would be.
+    pub fn erase_storage(&mut self, start: u64, end: u64) -> Result<(), EraseStorageError> {
+        if start >= end || !start.is_multiple_of(PAGE_SIZE) || !end.is_multiple_of(PAGE_SIZE) {
+            return Err(EraseStorageError::NotPageAligned { start, end });
+        }
+
+        let mut core = self.session.core(0)?;
+
+        nvmc::with_erase_enabled(&mut core, |eraser| {
+            for page in (start..end).step_by(PAGE_SIZE as usize) {
+                eraser.erase_page(page)?;
+            }
+
+            Ok(())
+        })?;
+
+        let words = ((end - start) / 4) as usize;
+        if let Some(mismatch) = core.find_mismatch(start, &vec![ERASED; words])? {
+            return Err(EraseStorageError::StillSet(mismatch));
+        }
+
+        Ok(())
+    }
+
     pub fn halt(&mut self) -> Result<(), probe_rs::Error> {
         self.session.core(0)?.halt(Duration::from_secs(1))?;
         Ok(())
@@ -187,6 +272,39 @@ impl From<probe_rs::probe::DebugProbeError> for ConnectError {
     fn from(value: probe_rs::probe::DebugProbeError) -> Self {
         Self::Probe(probe_rs::Error::Probe(value))
     }
+}
+
+#[derive(Debug, Error)]
+pub enum FlashError {
+    #[error(
+        "this image loads at {app_start:#X}, so it expects a bootloader beneath it — \
+         and flash at 0x0 is erased.\n\n  \
+         Flashing it would leave the CPU reading 0xFFFFFFFF as its stack pointer and\n  \
+         reset vector, and the board would look dead. Every current image links at 0x0;\n  \
+         this artifact predates the bootloader being dropped, or is not ours."
+    )]
+    NothingBeneath { app_start: u64 },
+
+    #[error(transparent)]
+    Probe(#[from] probe_rs::Error),
+
+    #[error(transparent)]
+    Download(#[from] probe_rs::flashing::FileDownloadError),
+}
+
+#[derive(Debug, Error)]
+pub enum EraseStorageError {
+    #[error("storage region {start:#X}..{end:#X} is not whole pages of {PAGE_SIZE} bytes")]
+    NotPageAligned { start: u64, end: u64 },
+
+    #[error(transparent)]
+    Probe(#[from] probe_rs::Error),
+
+    #[error(transparent)]
+    Nvmc(#[from] nvmc::Error),
+
+    #[error("the seq counter is still set at 0x{:08X} after erasing: found 0x{:08X}", .0.address, .0.actual)]
+    StillSet(Mismatch),
 }
 
 #[derive(Debug, Error)]

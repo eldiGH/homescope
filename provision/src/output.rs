@@ -114,7 +114,7 @@ pub fn timestamp(at: DateTime<Utc>) -> String {
 }
 
 fn seen_at(seen: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    format!("{} ({})", timestamp(seen), ago(seen, now))
+    format!("{} ({})", timestamp(seen), age(seen, now))
 }
 
 /// A rough age for a person, measured against this workstation's clock.
@@ -123,7 +123,7 @@ fn seen_at(seen: DateTime<Utc>, now: DateTime<Utc>) -> String {
 /// in the future reads as "just now" rather than as a negative age. Display
 /// only — nothing is ever decided on it; `verify` compares server timestamps
 /// with each other instead.
-fn ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+pub fn age(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let secs = (now - then).num_seconds();
 
     match secs {
@@ -263,7 +263,7 @@ mod test {
         }
     }
 
-    fn three_minutes_ago() -> Option<DateTime<Utc>> {
+    fn three_minutes_age() -> Option<DateTime<Utc>> {
         Some(now() - chrono::Duration::seconds(180))
     }
 
@@ -279,7 +279,7 @@ mod test {
             (86_400, "1d ago"),
         ] {
             assert_eq!(
-                ago(now() - chrono::Duration::seconds(secs), now()),
+                age(now() - chrono::Duration::seconds(secs), now()),
                 expected
             );
         }
@@ -290,7 +290,7 @@ mod test {
     #[test]
     fn a_reading_from_the_future_is_just_now() {
         assert_eq!(
-            ago(now() + chrono::Duration::seconds(90), now()),
+            age(now() + chrono::Duration::seconds(90), now()),
             "just now"
         );
     }
@@ -303,7 +303,7 @@ mod test {
                     1,
                     "kitchen",
                     DeviceKeyStatus::Ok,
-                    three_minutes_ago()
+                    three_minutes_age()
                 )),
                 now()
             ),
@@ -324,7 +324,7 @@ mod test {
     #[test]
     fn the_terminal_table_is_aligned_and_sorted() {
         let devices = [
-            device(1, "kitchen", DeviceKeyStatus::Ok, three_minutes_ago()),
+            device(1, "kitchen", DeviceKeyStatus::Ok, three_minutes_age()),
             device(2, "garage", DeviceKeyStatus::KekUnavailable, None),
         ];
 
@@ -357,7 +357,7 @@ mod test {
     #[test]
     fn piped_output_is_bare_tab_separated_rows() {
         let devices = [
-            device(1, "kitchen", DeviceKeyStatus::Ok, three_minutes_ago()),
+            device(1, "kitchen", DeviceKeyStatus::Ok, three_minutes_age()),
             device(2, "gar\tage", DeviceKeyStatus::KekUnavailable, None),
         ];
 

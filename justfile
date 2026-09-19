@@ -137,6 +137,23 @@ build-firmware:
             --release -p "homescope-$crate" --features "board-$board"
     done
 
+# Build one firmware image and store it under a name the provisioning tool can
+# flash by.
+#
+# This is the seam: the tool consumes artifacts, it never builds them. A
+# provisioning CLI that shelled out to cargo would take a source checkout, a
+# thumbv7em toolchain and a rustup target as hard runtime requirements — see
+# docs/design/firmware-variants.md.
+[doc("Build a firmware image and add it to the artifact store (release)")]
+firmware-store crate board:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --manifest-path firmware/Cargo.toml --target thumbv7em-none-eabi \
+        --release -p "homescope-{{ crate }}" --no-default-features --features "board-{{ board }}"
+    cargo run --quiet -p homescope-provision -- firmware add \
+        "firmware/target/thumbv7em-none-eabi/release/homescope-{{ crate }}" \
+        --name "{{ crate }}-{{ board }}"
+
 # Check homescope-common's whole feature powerset on host and firmware targets.
 #
 # A per-crate `cargo check -p` resolves features narrowly and will not catch a

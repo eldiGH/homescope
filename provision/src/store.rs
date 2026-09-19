@@ -320,17 +320,30 @@ fn direct_target(url: &str, env_token: Option<String>) -> Result<ApiTarget, Stor
 /// XDG only — this is a Linux workstation CLI. If macOS or Windows ever
 /// matter, swap in `etcetera`'s base strategy rather than growing this.
 fn config_dir() -> Result<PathBuf, StoreError> {
-    config_dir_from(
+    base_dir(
         env::var_os("XDG_CONFIG_HOME").as_deref(),
         env::var_os("HOME").as_deref(),
+        ".config",
     )
 }
 
-fn config_dir_from(
-    xdg_config_home: Option<&OsStr>,
+/// Where the tool keeps artifacts it manages, rather than settings a person
+/// edits: the firmware store. Regenerable from a build, which is exactly why it
+/// does not live beside credentials that are not.
+pub fn data_dir() -> Result<PathBuf, StoreError> {
+    base_dir(
+        env::var_os("XDG_DATA_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+        ".local/share",
+    )
+}
+
+fn base_dir(
+    xdg: Option<&OsStr>,
     home: Option<&OsStr>,
+    fallback: &str,
 ) -> Result<PathBuf, StoreError> {
-    if let Some(dir) = xdg_config_home {
+    if let Some(dir) = xdg {
         let path = Path::new(dir);
 
         // The spec says to ignore the variable unless it holds an absolute
@@ -342,7 +355,7 @@ fn config_dir_from(
 
     let home = home.ok_or(StoreError::NoHome)?;
 
-    Ok(Path::new(home).join(".config").join(APP_DIR))
+    Ok(Path::new(home).join(fallback).join(APP_DIR))
 }
 
 /// Creates the config directory at 0700.
@@ -589,7 +602,12 @@ mod test {
 
     #[test]
     fn an_absolute_xdg_config_home_wins() {
-        let dir = config_dir_from(Some(OsStr::new("/xdg")), Some(OsStr::new("/home/e"))).unwrap();
+        let dir = base_dir(
+            Some(OsStr::new("/xdg")),
+            Some(OsStr::new("/home/e")),
+            ".config",
+        )
+        .unwrap();
 
         assert_eq!(dir, Path::new("/xdg/homescope"));
     }
@@ -599,17 +617,40 @@ mod test {
     #[test]
     fn an_empty_or_relative_xdg_config_home_is_ignored() {
         for ignored in ["", "relative/path", "./here"] {
-            let dir =
-                config_dir_from(Some(OsStr::new(ignored)), Some(OsStr::new("/home/e"))).unwrap();
+            let dir = base_dir(
+                Some(OsStr::new(ignored)),
+                Some(OsStr::new("/home/e")),
+                ".config",
+            )
+            .unwrap();
 
             assert_eq!(dir, Path::new("/home/e/.config/homescope"), "{ignored:?}");
         }
     }
 
+    /// The data dir follows the same rule with a different fallback — so the
+    /// firmware store lands beside the artifacts, not beside the credentials.
+    #[test]
+    fn the_data_dir_uses_the_same_rule_with_its_own_fallback() {
+        assert_eq!(
+            base_dir(
+                Some(OsStr::new("/xdg-data")),
+                Some(OsStr::new("/home/e")),
+                ".local/share"
+            )
+            .unwrap(),
+            Path::new("/xdg-data/homescope")
+        );
+        assert_eq!(
+            base_dir(None, Some(OsStr::new("/home/e")), ".local/share").unwrap(),
+            Path::new("/home/e/.local/share/homescope")
+        );
+    }
+
     #[test]
     fn with_neither_variable_there_is_nowhere_to_look() {
         assert!(matches!(
-            config_dir_from(None, None),
+            base_dir(None, None, ".config"),
             Err(StoreError::NoHome)
         ));
     }

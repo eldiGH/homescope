@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 use homescope_common::device_addr::DeviceAddr;
 
@@ -35,6 +37,38 @@ pub struct ConfirmArgs {
     /// rather than assuming consent.
     #[arg(long)]
     pub yes: bool,
+}
+
+/// Which stored image to put on the board.
+///
+/// A **name** from the artifact store, not a path: "whatever ELF was in the
+/// directory you ran from" is not an acceptable input to the one command that
+/// writes flash. Omitting it where firmware is required opens the picker on a
+/// terminal — see `firmware::pick`.
+#[derive(Args)]
+pub struct FirmwareArgs {
+    /// Stored artifact to flash (see `firmware list`)
+    #[arg(long, value_name = "NAME")]
+    pub firmware: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum FirmwareCommand {
+    /// Store a built ELF under a name
+    ///
+    /// Reads where the image loads and where it keeps its seq counter out of
+    /// the ELF itself, so neither can be a hand-copied claim.
+    Add {
+        /// Path to the built ELF
+        path: PathBuf,
+
+        /// What to call it — what you will type at `--firmware`
+        #[arg(long)]
+        name: String,
+    },
+
+    /// List stored artifacts
+    List,
 }
 
 #[derive(Subcommand)]
@@ -75,12 +109,32 @@ pub enum Commands {
     /// Report what is on the attached probe right now
     Info,
 
+    /// Manage the firmware artifact store
+    Firmware {
+        #[command(subcommand)]
+        command: FirmwareCommand,
+    },
+
+    /// Put firmware on a board without touching its key
+    ///
+    /// An ordinary flash does not touch UICR, so the device keeps its key and
+    /// needs no re-provisioning. Deliberately does **not** clear the seq
+    /// counter: no new key is minted here, and clearing it under a live key
+    /// would reuse nonces.
+    Flash {
+        #[command(flatten)]
+        firmware: FirmwareArgs,
+    },
+
     /// Register a blank board with the fleet and write its key
     Provision {
         name: String,
 
         #[command(flatten)]
         api: ApiArgs,
+
+        #[command(flatten)]
+        firmware: FirmwareArgs,
 
         #[command(flatten)]
         confirm: ConfirmArgs,
@@ -94,6 +148,9 @@ pub enum Commands {
     Rotate {
         #[command(flatten)]
         api: ApiArgs,
+
+        #[command(flatten)]
+        firmware: FirmwareArgs,
 
         #[command(flatten)]
         confirm: ConfirmArgs,

@@ -88,7 +88,7 @@ impl<'a> EventHandler for PacketHandler<'a> {
 
                     if cache
                         .get(&device_addr)
-                        .is_some_and(|cached_seq| seq <= *cached_seq)
+                        .is_some_and(|cached_seq| seq == *cached_seq)
                     {
                         continue;
                     }

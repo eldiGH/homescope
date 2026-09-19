@@ -460,6 +460,22 @@ this key". Cost is one column on the `DeviceSummary` response.
 
 **Build L2 first.** It is the most convincing and the least work.
 
+✅ **L0 and L1 built 2026-09-19**, after L2. L0 streams the boot log over RTT
+after the reset; L1 decodes a packet the board logged, using the key just
+written. Both run inside `provision`/`rotate` and neither fails the run — by
+then the board is keyed and flashed, so calling that a failed run would be
+false; they warn instead.
+
+⚠️ **L1 costs one relaxation worth naming.** The key used to be zeroized the
+moment it reached UICR; now a `PacketCipher` is built from it first, so it
+outlives the write by a few seconds. Still memory-only — never a file, a log,
+stdout or a `Debug` impl — and still minted once and never re-read.
+
+⚠️ **L1 couples the tool to a firmware format string.** It matches the
+`packet: [..]` line `packet_builder.rs` emits. A reworded line makes level 1 go
+quiet rather than fail, deliberately: a silent check is better than one that
+accuses a healthy board.
+
 ✅ **Built as `verify` (2026-09-13).** It reads `lastSeen` — the newest reading
 time since `key_valid_from` — rather than `MAX(seq)`, and passes only on a value
 *newer* than the one on file when waiting began, so on a deployed board it
@@ -470,6 +486,13 @@ from the server; the workstation's clock is never compared.
 fails, L1 is what says which side of the radio the problem is on.
 
 ⚠️ **Rejected: proxying a defmt-captured packet to a test ingest endpoint.**
+(Re-examined 2026-09-19 and still rejected, but the reasoning below has a hole
+worth recording: it assumes network implies a gateway in earshot, which is
+false — a basement bench may have one and not the other. What actually settles
+it is that `list` already reports whether the API can unseal a device's key, so
+composing that with a local decrypt gives the same assurance with no new
+endpoint, no second decode path to keep in step with ingest, and nothing that
+could one refactor later start persisting what it was sent.)
 It sits between L1 and L2 and is dominated by both — against L1 it costs a new
 admin-authenticated packet-injection endpoint plus a second ingest path to
 keep in sync with the MQTT one, to prove strictly less than L2; against L2 it
@@ -638,7 +661,10 @@ Still unexercised: `erase_to_unlock` against a genuinely locked board — see
    `/devices` token check now runs only on the `--unlock` path.
 4. `firmware add`/`list` + the picker, then `--firmware` flashing with both
    guards, and seq clearing on its back.
-5. L1, if and when provisioning happens somewhere the gateway cannot hear.
+5. ✅ L0 and L1 — the boot log, and decoding a packet the board built. Done
+   2026-09-19, earlier than "if and when": the case is real (network but no
+   receiver in range), and L0 paid for itself the same afternoon by showing a
+   wedged I²C bus that looked like a provisioning failure.
 6. `lock`/`unlock`, after the firmware `Debug::Disallowed` change.
 
 ## Postponed (recorded 2026-09-13)

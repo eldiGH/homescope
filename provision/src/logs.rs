@@ -50,6 +50,11 @@ pub struct Summary {
     /// catch: `device is empty - not provisioned` and its siblings are the
     /// firmware saying the key did not land.
     pub errors: Vec<String>,
+
+    /// Sealed air packets the firmware logged as it built them — level 1's
+    /// input. Exactly the bytes that go on air a moment later, so capturing
+    /// them costs nothing and reveals nothing.
+    pub packets: Vec<Vec<u8>>,
 }
 
 impl Summary {
@@ -131,6 +136,10 @@ pub fn stream(
                         summary.errors.push(message.clone());
                     }
 
+                    if let Some(packet) = parse_packet(&message) {
+                        summary.packets.push(packet);
+                    }
+
                     let _ = writeln!(out, "  [{:<5}] {message}", level.to_uppercase());
                 }
 
@@ -151,6 +160,24 @@ pub fn stream(
     }
 
     Ok(summary)
+}
+
+/// The firmware's format string, minus its argument.
+const PACKET_PREFIX: &str = "packet: ";
+
+/// Pulls the bytes out of the firmware's `packet: [48, 50, 01, …]` line.
+///
+/// ⚠️ Matched by prefix against a `defmt` line, which couples the tool to a
+/// format string in `packet_builder.rs`. That coupling is why a missing packet
+/// is reported as *absent* rather than as a failure: if the line is reworded,
+/// level 1 should go quiet, not accuse a healthy board.
+fn parse_packet(message: &str) -> Option<Vec<u8>> {
+    let list = message.strip_prefix(PACKET_PREFIX)?.trim();
+    let list = list.strip_prefix('[')?.strip_suffix(']')?;
+
+    list.split(',')
+        .map(|byte| u8::from_str_radix(byte.trim(), 16).ok())
+        .collect()
 }
 
 #[derive(Debug, Error)]
@@ -194,6 +221,33 @@ mod test {
             ..Summary::default()
         };
         assert!(!spoke.is_silent(), "frames decoded, so the board spoke");
+    }
+
+    /// The exact shape `defmt`'s `{=[u8]:02x}` produces, taken from a real
+    /// capture rather than guessed: two hex digits per byte, comma-separated.
+    #[test]
+    fn a_logged_packet_parses_to_its_bytes() {
+        let bytes = parse_packet("packet: [48, 50, 01, 00, 48, 00, 00, a8]").expect("parses");
+
+        assert_eq!(bytes, [0x48, 0x50, 0x01, 0x00, 0x48, 0x00, 0x00, 0xA8]);
+        // "HP", version 1, seq 0x4800 little-endian — the air header.
+        assert_eq!(&bytes[..2], b"HP");
+    }
+
+    #[test]
+    fn an_ordinary_log_line_is_not_a_packet() {
+        assert!(parse_packet("battery_mv: 3354").is_none());
+        assert!(parse_packet("sht read failed, dropping T/H this cycle: Timeout").is_none());
+    }
+
+    /// ⚠️ A line that looks like the packet line but is not parseable must not
+    /// yield a half-read packet: decoding a truncated one would report a
+    /// tampered device.
+    #[test]
+    fn a_malformed_packet_line_yields_nothing() {
+        assert!(parse_packet("packet: [48, 50, zz]").is_none());
+        assert!(parse_packet("packet: 48, 50").is_none());
+        assert!(parse_packet("packet: [48, 50").is_none());
     }
 
     #[test]

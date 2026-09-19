@@ -15,9 +15,7 @@ use embassy_nrf::{Peri, gpio::AnyPin, saadc::AnyInput};
     feature = "xiao-expansion",
     feature = "xiao-breadboard"
 )))]
-compile_error!(
-    "enable exactly one board feature: `db40`, `xiao-expansion` or `xiao-breadboard`"
-);
+compile_error!("enable exactly one board feature: `db40`, `xiao-expansion` or `xiao-breadboard`");
 #[cfg(any(
     all(feature = "db40", feature = "xiao-expansion"),
     all(feature = "db40", feature = "xiao-breadboard"),

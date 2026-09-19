@@ -35,6 +35,14 @@ impl PacketBuilder {
         )?;
 
         buffer.truncate(buffer_len);
+
+        // Level 1 verification: `homescope-provision` reads this back over RTT
+        // and decrypts it with the key it just wrote to UICR, which proves the
+        // whole chain — UICR read, cipher, seq counter, sensors, TV encoding —
+        // without a receiver in range. Ciphertext is safe to log: it is exactly
+        // what goes on air a moment later.
+        defmt::debug!("packet: {=[u8]:02x}", &buffer[..]);
+
         Ok(buffer)
     }
 }

@@ -111,8 +111,7 @@ const BOARDS: &[BoardMemory] = &[
 
 /// Both XIAO entries carry this: the bootloader is gone from the part itself,
 /// not from one wiring of it.
-const XIAO_BOOTLOADER_NOTE: &str =
-    "Factory MBR, SoftDevice S140 and UF2 bootloader erased 2026-09-19; a XIAO \
+const XIAO_BOOTLOADER_NOTE: &str = "Factory MBR, SoftDevice S140 and UF2 bootloader erased 2026-09-19; a XIAO \
      still carrying them must be chip-erased and re-keyed — see docs/flashing.md.";
 
 /// A validated flash/RAM layout, derived from a [`BoardMemory`]. If one of these

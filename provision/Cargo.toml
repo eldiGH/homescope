@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-homescope-common = { workspace = true, features = ["crypto"] }
+# `codec` carries the packet module itself, `crypto` its cipher and `decode`:
+# both are needed to open a packet the board logged (level 1 verification).
+homescope-common = { workspace = true, features = ["codec", "crypto"] }
 homescope-api-types = { workspace = true }
 
 clap = { version = "4.6.6", features = ["derive", "env"] }

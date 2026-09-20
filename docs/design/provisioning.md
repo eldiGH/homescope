@@ -92,9 +92,10 @@ way. The API is chosen per command — `--profile` or `--api-url`, flattened int
 the commands that talk to it — rather than by a global `--url` (§ Auth below).
 `--yes` is flattened into the destructive commands rather than global, because
 `info` and `login` destroy nothing and should not accept a flag that skips a
-prompt they never ask. ⏳ Not yet: `--firmware`, `flash`, `firmware add/list`,
-`lock`/`unlock`, and `--probe <serial>`, which the `AmbiguousProbe` error still
-names.
+prompt they never ask. ✅ **Extended 2026-09-19:** `firmware add/list/remove`,
+`flash`, `--firmware` on `provision`/`rotate`, `--probe <serial>` and `--logs`.
+⏳ Not yet: `lock`/`unlock`, which waits on the firmware `Debug::Disallowed`
+change.
 
 `list` is worth more than it looks — `GET /devices` already returns the union
 you need, and the first question when a sensor goes quiet is "does the API
@@ -659,8 +660,11 @@ Still unexercised: `erase_to_unlock` against a genuinely locked board — see
    `provision`/`rotate` also look the device up after reading the chip (name in
    the prompt, refusal before any halt or mint) and halt only after consent; the
    `/devices` token check now runs only on the `--unlock` path.
-4. `firmware add`/`list` + the picker, then `--firmware` flashing with both
-   guards, and seq clearing on its back.
+4. ✅ `firmware add`/`list` + the picker, then `--firmware` flashing with both
+   guards, and seq clearing on its back. Done 2026-09-19. The image became the
+   authority on its own layout: `elf.rs` reads `app_start` and
+   `__storage_start`/`__storage_end` out of the artifact, so nothing stores a
+   second copy of an address that could drift.
 5. ✅ L0 and L1 — the boot log, and decoding a packet the board built. Done
    2026-09-19, earlier than "if and when": the case is real (network but no
    receiver in range), and L0 paid for itself the same afternoon by showing a
@@ -679,10 +683,11 @@ comment at the place they would land.
   when the API gains users (`whoami` then reports a subject, and
   `Credentials.subject` / `expires_at` finally have a source), or when the fleet
   is large enough that listing it is a real payload.
-- **`--probe <serial>`.** The `AmbiguousProbe` error already tells the user to
-  pass it.
-- **HTTPS enforcement.** Refuse `http://` unless the host is loopback, and pin a
-  CA through `HOMESCOPE_CA_CERT` (§2). Today any `http://` URL is accepted.
+- ✅ **`--probe <serial>`** (2026-09-19). Every command that touches a board
+  takes it, and `AmbiguousProbe` names the serials to choose from.
+- 🔶 **HTTPS enforcement** (2026-09-19). Refusing `http://` to a non-loopback
+  host is built — see §2 § HTTPS, and the flag not to add. ⏳ `HOMESCOPE_CA_CERT`
+  pinning is not, so a self-signed API still needs an SSH tunnel.
 - **A mint whose response never arrives.** If the connection drops after the API
   commits a key but before the response lands, the tool reports a failed step it
   cannot tell apart from "nothing happened" — yet the registry now holds a key

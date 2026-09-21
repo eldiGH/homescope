@@ -16,7 +16,6 @@ RUN cargo chef cook --release -p homescope-api --recipe-path recipe.json
 # as a missing file — the stub stays, and the build fails much later with
 # "could not find <module> in <crate>". Add new members here when they land.
 COPY Cargo.toml Cargo.lock ./
-COPY gateway ./gateway
 COPY common ./common
 COPY host-util ./host-util
 COPY api-types ./api-types

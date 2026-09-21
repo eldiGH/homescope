@@ -17,8 +17,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY gateway ./gateway
 COPY common ./common
 COPY host-util ./host-util
-COPY api-types ./api-types
-COPY api ./api
 
 RUN cargo build --release -p homescope-gateway
 

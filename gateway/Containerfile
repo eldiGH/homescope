@@ -11,10 +11,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release -p homescope-gateway --recipe-path recipe.json
+# See the note in api/Containerfile: a member missing from this list is a
+# cargo-chef stub, not a build error, so keep the two lists in step.
 COPY Cargo.toml Cargo.lock ./
 COPY gateway ./gateway
 COPY common ./common
 COPY host-util ./host-util
+COPY api-types ./api-types
 COPY api ./api
 
 RUN cargo build --release -p homescope-gateway

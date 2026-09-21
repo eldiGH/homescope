@@ -7,6 +7,21 @@ Network=homescope.network
 EnvironmentFile=%h/.config/homescope/db.env
 AutoUpdate=registry
 
+# Loopback only, for database clients run off-machine (lazysql, psql, DBeaver)
+# over an SSH tunnel:
+#
+#     ssh -N -L 15432:127.0.0.1:5432 <pi>
+#
+# The services themselves do not use this — they reach the container by name on
+# homescope.network. It exists because a rootless container's own IP is not
+# routable from the host namespace, so without a published port the database is
+# unreachable from the Pi's shell as well as from the LAN.
+#
+# Never widen this to `5432:5432`: postgres authenticates with a password over a
+# cleartext connection, and nothing here terminates TLS. The tunnel is what
+# makes it safe to reach, and it is already authenticated and encrypted.
+PublishPort=127.0.0.1:5432:5432
+
 [Service]
 Restart=on-failure
 

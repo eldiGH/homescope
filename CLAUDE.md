@@ -192,6 +192,7 @@ See [docs/protocol.md](docs/protocol.md) for the full spec (v0.7, 2026-07-31). Q
 - [docs/architecture.md](docs/architecture.md) — full design rationale: protocol choice, sensor selection, power topology, security model, BLE vs ESB tradeoff, API/deployment architecture
 - [docs/protocol.md](docs/protocol.md) — USB-CDC wire protocol between receiver and gateway (v0.7, AEAD-sealed TV body; v0.6 magic/version header; variable-length frames)
 - [docs/flashing.md](docs/flashing.md) — SWD flashing, the one flash layout, and migrating a XIAO off its bootloader
+- [docs/operations.md](docs/operations.md) — production runbook for the Pi: logs, service control, updating, secrets, DB access (incl. remote/lazysql), backup+restore, troubleshooting table
 - `deploy/deploy.sh` header comment — the deployment model (two-phase, idempotent, ownership rules; **never chown into `~/.local/share/containers`**)
 - `docs/design/` — design records: settled decisions with their reasoning and status; read the matching one before working on a topic (index: `docs/design/README.md`)
 - `~/.claude/plans/let-s-analyze-that-my-glowing-peacock.md` — original full design exploration (lives in Claude's plan store, not committed)

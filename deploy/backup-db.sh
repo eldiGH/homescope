@@ -67,6 +67,12 @@ homescope_podman() {
 
 [[ $EUID -eq 0 ]] || die "This script must run as root: sudo $0"
 
+# Run from a directory $HOMESCOPE_USER can reach. sudo keeps the caller's cwd,
+# and rootless podman re-execs inside a user namespace where the child chdir()s
+# back to it — from a 0700 home dir that fails with "cannot chdir to <dir>:
+# Permission denied" before podman does any work. Every path here is absolute.
+cd /
+
 homescope_podman exec "$CONTAINER" pg_isready -U postgres > /dev/null \
 	|| die "Container $CONTAINER is not running or postgres is not ready"
 

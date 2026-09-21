@@ -154,6 +154,16 @@ drop_to_homescope() {
 		setup_configs setup_quadlets setup_autoupdate_timer start_services \
 		homescope_phase
 
+	# runuser keeps the caller's cwd, which is normally the git checkout under
+	# some human's home — and home dirs are 0700, so $HOMESCOPE_USER cannot
+	# even traverse into it. Every path below is absolute, so the shell itself
+	# doesn't care; rootless podman does. It re-execs inside a user namespace
+	# and the child chdir()s back to this cwd, dying with
+	# "cannot chdir to <dir>: Permission denied" before it runs anything.
+	# $STAGING_DIR rather than /: it is what this phase reads from, and root
+	# just created it owned by $HOMESCOPE_USER.
+	cd "$STAGING_DIR"
+
 	exec runuser -u "$HOMESCOPE_USER" -- bash -c 'set -euo pipefail; homescope_phase'
 }
 

@@ -189,7 +189,22 @@ hpodman secret rm homescope-admin-token && sudo ./deploy/deploy.sh
 ### From the Pi
 
 ```bash
-hpodman exec -it homescope-db psql -U postgres -d homescope
+hpodman exec -it homescope-db psql -U postgres -d homescope   # always works
+psql -h 127.0.0.1 -U api -d homescope                         # via the published port
+```
+
+Bare `psql` does **not** work: with no `-h` it tries the Unix socket
+`/var/run/postgresql/.s.PGSQL.5432`, which lives inside the container, and fails
+with "No such file or directory". `-h` is what forces TCP.
+
+Use `127.0.0.1`, never `localhost` — the port is published on IPv4 loopback
+only, and `localhost` usually resolves to `::1` first, which looks like
+`Connection refused`. Roles are `api` (owns the schema) and `postgres`
+(superuser); passwords are in `db.env` (see [Secrets](#secrets)). To stop
+retyping, `~/.pgpass` at mode 0600:
+
+```
+127.0.0.1:5432:homescope:api:<API_DB_PASSWORD>
 ```
 
 Useful one-liners:
@@ -210,18 +225,73 @@ the top two bits of an AdvA are forced to 1 (static-random marking), so the
 leading byte is never below `0xC0`. The column is a BIGINT because a 48-bit
 address always fits one, positively.
 
+Going the other way — writing an address you have as hex — needs care:
+
+```sql
+-- correct
+SELECT ('x' || lpad('CEA99627BD3F', 16, '0'))::bit(64)::bigint;   -- 227227763981631
+-- WRONG: 'x…'::bit(64) pads on the RIGHT, so the address lands in the high bits
+SELECT ('x' || 'CEA99627BD3F')::bit(64)::bigint;                  -- -3555145333409382400
+```
+
+`lpad` to 16 digits first. The check that catches the mistake instantly: a valid
+address in this column is **positive and exactly 12 hex digits** — a negative
+value means the MSB is set, which a 48-bit address can never do.
+
+That the displayed hex works as a plain big-endian number is not a coincidence:
+`encode_hex` walks the byte array reversed (MSB-first, normal BLE notation)
+while `as_i64` is little-endian over the same array, so the two reversals
+cancel. `common/src/device_addr.rs:246` pins it.
+
 ### From your workstation (lazysql, DBeaver, psql…)
 
 `timescaledb.container` publishes Postgres on the Pi's **loopback**, so the way
 in is an SSH tunnel:
 
 ```bash
-ssh -N -L 15432:127.0.0.1:5432 pi@rpi5-jawo
-lazysql 'postgres://api:<API_DB_PASSWORD>@127.0.0.1:15432/homescope'
+ssh -fN -o ExitOnForwardFailure=yes -L 15432:127.0.0.1:5432 pi@rpi5-jawo
+ss -ltnp | grep 15432     # verify the listener before blaming the database
+lazysql 'postgres://api:<API_DB_PASSWORD>@127.0.0.1:15432/homescope?sslmode=disable'
 ```
 
 The password is `API_DB_PASSWORD` from `~homescope/.config/homescope/db.env`
 (user `api`, owns the schema), or `POSTGRES_PASSWORD` for the superuser.
+`openssl rand -hex 24` generates them, so they need no URL escaping.
+
+Three things that go wrong here, in the order you'll hit them:
+
+**`Connection refused` on the local port** means the tunnel isn't running — not
+that the database is down. `ssh -N … &` dies with its terminal; `-f` forks after
+authentication instead. `ExitOnForwardFailure=yes` is load-bearing: without it,
+an ssh that cannot bind the local port prints a warning and **carries on without
+the forward**, so a client then reaches whatever else is on that port. The dev
+stack in `compose.dev.yml` listens on 5432 of your workstation, with the same
+table names and ~90 days of seeded fake readings — forwarding to a busy 5432
+without this flag is how you end up reading dev while believing it's prod. Using
+15432 locally sidesteps that entirely.
+
+**`SSL is not enabled on the server`** from lazysql, DBeaver or anything else
+built on Go's `lib/pq`: append `?sslmode=disable`. Their default is `require`,
+while libpq's is `prefer`, which is why `psql` connects and they don't.
+Disabling it is correct here rather than a compromise — the bytes are inside the
+SSH tunnel, and both ends of the Postgres connection are `127.0.0.1`. TLS in the
+container would mean a certificate no client can verify, protecting a hop that
+is already protected.
+
+**Saved connection strings hold the prod password in cleartext**
+(`~/.config/lazysql/config.toml`) — `chmod 600`, and name the entry
+`homescope-prod` so it is distinguishable from the dev stack at a glance. The
+two are identical once you are looking at table contents.
+
+For a durable setup, put the forward in `~/.ssh/config`:
+
+```
+Host homescope-db
+    HostName rpi5-jawo
+    User pi
+    LocalForward 15432 127.0.0.1:5432
+    ExitOnForwardFailure yes
+```
 
 Why a published port is needed at all, given you could just SSH in: a rootless
 container's IP is **not routable from the host namespace**, so `homescope-db`
@@ -240,6 +310,33 @@ hpodman run --rm --network systemd-homescope -p 127.0.0.1:1883:1883 \
 ```
 
 Ctrl-C removes it, leaving no config behind.
+
+### SQL clients
+
+Anything that speaks the Postgres wire protocol works — `psql`, `pgcli`,
+vim-dadbod, DBeaver. One caveat applies to all of them:
+
+⚠️ **Do not delete or edit `readings` rows through a result grid.** The table
+has no primary key (only `UNIQUE (device_id, seq, time)`), so a client that
+offers row-level edits falls back to `ctid` — and on a hypertable the rows live
+in chunk tables under `_timescaledb_internal`, where the same `ctid` value
+exists in every chunk. A `ctid`-targeted delete routed through the parent can
+match a *different* row than the one selected, with no error. Name the row
+instead:
+
+```sql
+DELETE FROM readings
+WHERE device_id = 1 AND seq = 12345 AND time = '2026-09-21 13:21:37.712+00';
+```
+
+For bulk removal, drop chunks rather than rows — a metadata operation instead
+of a scan:
+
+```sql
+SELECT drop_chunks('readings', older_than => INTERVAL '90 days');
+```
+
+`devices` does have a primary key, so grid edits there behave normally.
 
 ### Backup and restore
 
@@ -264,6 +361,35 @@ A migration that fails on a constraint is telling you the *data* is wrong, not
 the migration. Fix the rows, then restart the service — it picks up where it
 stopped.
 
+Worked example (2026-09-21): `20260716201805` renames `hardware_id` to
+`device_addr` and asserts it fits 48 bits. It failed because the rows predated
+the identity refactor — `devices` had been seeded from `readings.device_id` back
+when that was the 64-bit FICR `DEVICEID`, and no arithmetic turns a `DEVICEID`
+into a `DEVICEADDR`; they are different registers. Either rewrite each row with
+the board's real AdvA (which keeps its readings, since they FK to `devices.id`),
+or delete the row and its readings. Two notes that cost time:
+
+- Until that migration applies, the column is still called `hardware_id` —
+  writing `device_addr` in the fix just errors.
+- Clear the *whole* table before restarting; the constraint is checked across
+  every row, so one leftover blocks it exactly as before:
+
+```sql
+SELECT count(*) FROM devices WHERE hardware_id > 281474976710655;   -- must be 0
+```
+
+Then check the next migration's precondition too, rather than waiting for the
+crash loop to tell you — `20260728121628` adds `UNIQUE (device_id, seq, time)`:
+
+```sql
+SELECT device_id, seq, time, count(*) FROM readings
+GROUP BY 1,2,3 HAVING count(*) > 1 LIMIT 10;                        -- must be empty
+```
+
+Rewriting an address leaves `key` NULL, so the device still reports as
+`MISSING` and its packets are still dropped. A `homescope-provision rotate`
+against that board is what mints one.
+
 ## API
 
 ```bash
@@ -287,14 +413,29 @@ From the workstation, tunnel and point the provisioning CLI at the tunnel.
 `http://127.0.0.1:…` is accepted by design:
 
 ```bash
-ssh -N -L 4001:127.0.0.1:4001 pi@rpi5-jawo
-homescope-provision login --api-url http://127.0.0.1:4001   # prompts for the token
+ssh -fN -o ExitOnForwardFailure=yes -L 4001:127.0.0.1:4001 pi@rpi5-jawo
+homescope-provision login --profile prod --api-url http://127.0.0.1:4001
 homescope-provision whoami                                  # is it accepted?
 homescope-provision list
 ```
 
-`login` verifies the token before storing it, so a typo fails there rather than
-later with a board in your hand.
+`login` prompts for the token on stdin and verifies it against the API before
+storing it, so a typo fails there rather than later with a board in your hand
+and a key already minted. Two things about that command:
+
+- **`--api-url` is required the first time a profile is used** — without it,
+  `login` looks the profile up to find its URL and reports `unknown profile`.
+  On a re-login (replacing a token) it is optional.
+- **Always name the profile.** `login` falls back to the configured default, so
+  a bare `login --api-url <prod>` repoints your *existing* default profile at
+  prod instead of creating a new one. Note this is the opposite of every other
+  command, where `--profile` and `--api-url` are mutually exclusive.
+
+Profiles live in `~/.config/homescope/config.toml` (0644) and their tokens in
+`~/.config/homescope/credentials.toml` (0600). The first profile saved becomes
+the default, and there is no command to change it afterwards — edit
+`default_profile`, or select per-invocation with `-p prod` /
+`HOMESCOPE_PROFILE=prod`.
 
 ## MQTT
 

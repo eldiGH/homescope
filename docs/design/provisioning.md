@@ -3,9 +3,9 @@
 > **Status: 🔶 in progress.** Decisions settled 2026-07-20; the tool's final
 > shape settled 2026-08-26 in §0. Built so far: device keys envelope-encrypted
 > at rest (§4); the UICR record, its firmware reader and the tool's write path
-> (§5); and `homescope-provision` build-order steps 1–3 — preconditions,
-> confirmations and output, `login` with named profiles, `list` and `verify`.
-> Next: step 4, firmware artifacts and flashing.
+> (§5); and `homescope-provision` build-order steps 1–4 — preconditions,
+> confirmations and output, `login` with named profiles, `list`, `verify`, the
+> firmware artifact store, `--firmware` flashing and seq clearing.
 >
 > **Read §0 first.** Everything after it predates the tool existing, and §0
 > supersedes several of those passages by name. Inline ✅ / ⚠️ markers record

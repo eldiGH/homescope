@@ -24,6 +24,7 @@ How to read them:
 | [api-graceful-shutdown.md](api-graceful-shutdown.md) | ⏳ Planned | Draining ingest and in-flight HTTP requests on SIGTERM |
 | [site-room-topology.md](site-room-topology.md) | 🔶 Partly done | `devices.site`/`room`, the per-gateway topic prefix, and the settled decisions around them |
 | [mosquitto-acl.md](mosquitto-acl.md) | ⏳ Planned | Broker authentication and per-gateway topic ACLs |
+| [deployment-topology.md](deployment-topology.md) | ⏳ Planned | Multi-site deployment: one central API + broker, a bridging local broker per remote site (store-and-forward), deployment roles |
 | [receiver-usb-link.md](receiver-usb-link.md) | 🔶 Partly done | The receiver's VID/PID, its udev rule, and a gateway service bound to the dongle's presence |
 | [firmware-variants.md](firmware-variants.md) | ⏳ Planned | One firmware per board with boot-time sensor detection; the firmware artifact store |
 | [twim-cancel-safety.md](twim-cancel-safety.md) | ⏳ Open bug | The orphaned-DMA hazard in async TWIM, and its fix |

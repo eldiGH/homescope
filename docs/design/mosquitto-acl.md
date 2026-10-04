@@ -70,4 +70,10 @@ Depends on the site topic prefix, `homescope/<site>/sensors/<device-addr>/envelo
 - A mosquitto bridge per site (a local broker spooling during VPN flaps) will
   need its own bridge credentials. Design the user list with that in mind:
   `bridge-home-b` writing `homescope/home-b/#` is indistinguishable from the
-  gateway user, so one user per *site* may be enough.
+  gateway user, so one user per *site* may be enough. ⚠️ *Updated 2026-10-04:*
+  the bridge is now the recommended default for remote sites, and the central
+  ACL uses one user per site — see
+  [deployment-topology.md](deployment-topology.md).
+- The central broker may be a shared, general-purpose broker that other systems
+  on the site also use. Then homescope does not own its `mosquitto.conf`: ship
+  the user list and ACL lines it needs, not a broker configuration.

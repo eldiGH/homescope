@@ -84,7 +84,11 @@ other house's fleet — see [mosquitto-acl.md](mosquitto-acl.md).
 
 - **A Mosquitto bridge per site** — a local broker at the remote house spools
   during VPN flaps and forwards to the central broker when the link returns.
-  Only worth it if VPN reliability turns out to be a real problem.
+  ~~Only worth it if VPN reliability turns out to be a real problem.~~
+  ⚠️ *Updated 2026-10-04:* now the recommended default for every remote site —
+  link outages have more causes than VPN flaps, and an envelope missed while
+  the link is down is lost for good. See
+  [deployment-topology.md](deployment-topology.md).
 - **Broker auth** — see [mosquitto-acl.md](mosquitto-acl.md): per-gateway
   credentials that publish only under their own site prefix, and API credentials
   that only subscribe.

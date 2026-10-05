@@ -16,12 +16,16 @@
 #         first deploy of a fresh installation
 #     sudo ./deploy/deploy.sh --import-kek FILE [--import-admin-token FILE]
 #         first deploy of a restored installation
+#     --mqtt-api-password FILE, --mqtt-gateway-password FILE
+#         an external broker's passwords, instead of being asked for them
 #     --config PATH   another config file than /etc/homescope/deploy.toml
 #
-# With an external broker, a first deploy pauses ("ACTION NEEDED") until the
-# MQTT passwords are set with `homescope secret set`. Repeating the exact same
-# command afterwards is safe: an imported KEK or token that matches the file is
-# left alone.
+# With an external broker the deploy needs the passwords of the MQTT users its
+# owner created. It asks for any it does not have yet (input hidden), or takes
+# them from the --mqtt-*-password files, and carries on — one run. Only without
+# a terminal and without those flags does it stop at "ACTION NEEDED"; then set
+# them with `homescope secret set` and run the plain deploy again. After the
+# containers start, it checks that the API (and a running gateway) logged in.
 #
 # Two phases. Root does only what needs root — the service user, the udev
 # rule, data directories, secrets, system units, staging the deploy tree —
@@ -48,9 +52,10 @@ MIN_PODMAN_VERSION="5.0"
 
 CONFIG_FILE="$DEFAULT_CONFIG_FILE"
 NEW_KEK=false
-ORIGINAL_ARGS=()
 IMPORT_KEK=""
 IMPORT_ADMIN_TOKEN=""
+MQTT_API_PASSWORD_FILE=""
+MQTT_GATEWAY_PASSWORD_FILE=""
 CHECK_ONLY=false
 INIT_ROLE=""
 MISSING_SECRETS=()
@@ -81,6 +86,16 @@ parse_args() {
 				IMPORT_ADMIN_TOKEN="$2"
 				shift
 				;;
+			--mqtt-api-password)
+				[[ $# -ge 2 ]] || die "--mqtt-api-password needs a file"
+				MQTT_API_PASSWORD_FILE="$2"
+				shift
+				;;
+			--mqtt-gateway-password)
+				[[ $# -ge 2 ]] || die "--mqtt-gateway-password needs a file"
+				MQTT_GATEWAY_PASSWORD_FILE="$2"
+				shift
+				;;
 			--config)
 				[[ $# -ge 2 ]] || die "--config needs a path"
 				CONFIG_FILE="$2"
@@ -96,9 +111,25 @@ parse_args() {
 		die "--new-kek and --import-kek exclude each other"
 	fi
 	local file
-	for file in "$IMPORT_KEK" "$IMPORT_ADMIN_TOKEN"; do
+	for file in "$IMPORT_KEK" "$IMPORT_ADMIN_TOKEN" "$MQTT_API_PASSWORD_FILE" "$MQTT_GATEWAY_PASSWORD_FILE"; do
 		[[ -z $file || -r $file ]] || die "cannot read $file"
 	done
+}
+
+# Flags that only make sense for some configs, checked once the config is known.
+check_flags_against_config() {
+	local flag
+	for flag in "$MQTT_API_PASSWORD_FILE" "$MQTT_GATEWAY_PASSWORD_FILE"; do
+		if [[ -n $flag ]] && $CFG_BROKER_LOCAL; then
+			die "--mqtt-*-password applies to an external broker; this host runs its own, whose passwords are generated"
+		fi
+	done
+	if [[ -n $MQTT_API_PASSWORD_FILE ]] && ! $CFG_HAS_API; then
+		die "--mqtt-api-password has no effect without the api component"
+	fi
+	if [[ -n $MQTT_GATEWAY_PASSWORD_FILE ]] && ! $CFG_HAS_GATEWAY; then
+		die "--mqtt-gateway-password has no effect without the gateway component"
+	fi
 }
 
 do_init() {
@@ -241,45 +272,84 @@ install_admin_tools() {
 	fi
 }
 
-# Secrets an operator must provide (an external broker's passwords). Collected
-# across components, then reported together, with the commands to set them.
-# A password this deploy generated for a local broker does not count: it would
-# never log in to someone else's broker.
-require_secret() {
-	local short="$1" description="$2" name generated
+# A secret only the operator can provide — an external broker's password for
+# one of homescope's MQTT users. In order of preference:
+#
+#   1. a --mqtt-*-password FILE: stored (replacing a different value — the flag
+#      states what it should be), or left alone when identical;
+#   2. already set by the operator: nothing to do;
+#   3. a terminal: ask, input hidden — then the deploy simply carries on;
+#   4. none of those: recorded, and reported in one banner at the end of the
+#      root phase.
+#
+# A password this deploy generated for a local broker counts as unset: it
+# would never log in to someone else's broker.
+operator_secret() {
+	local short="$1" user="$2" file="$3" name generated
 	name="${SECRET_NAMES[$short]}"
+
+	if [[ -n $file ]]; then
+		if secret_exists "$name" && secret_value "$name" | cmp -s - "$file"; then
+			log "$short already set from $file"
+		else
+			log "Setting $short from $file"
+			secret_put "$name" < "$file"
+		fi
+		return 0
+	fi
+
 	if secret_exists "$name"; then
 		generated="$(homescope_podman secret inspect \
 			-f '{{index .Spec.Labels "homescope.generated"}}' "$name")"
 		[[ $generated == true ]] || return 0
 	fi
-	MISSING_SECRETS+=("$short|$description")
+
+	if [[ -t 0 ]]; then
+		local value
+		echo >&2
+		echo "homescope needs the password of MQTT user $user on $CFG_MQTT_HOST:$CFG_MQTT_PORT" >&2
+		echo "(the broker's owner creates the user and hands the password over)." >&2
+		read -rsp "  Password for $user (input hidden, empty to skip for now): " value
+		echo >&2
+		if [[ -n $value ]]; then
+			printf '%s\n' "$value" | secret_put "$name"
+			log "Set $short."
+			return 0
+		fi
+	fi
+
+	MISSING_SECRETS+=("$short|$user")
 }
 
-# Not an error: with an external broker this is the expected state of a first
-# deploy — the broker's owner creates the users and hands over the passwords.
-# Everything up to here is done and kept; the containers start on the next run.
-# Exit 0, because nothing went wrong; the banner is what says "not finished".
+# Not an error: the passwords simply have not been given yet — no terminal to
+# ask on, and no --mqtt-*-password flags. Everything up to here is done and
+# kept; the containers start on the next run. Exit 0, because nothing went
+# wrong; the banner is what says "not finished". The rerun needs no flags: the
+# one-off imports of this run are done.
 report_missing_secrets() {
 	((${#MISSING_SECRETS[@]})) || return 0
 
-	local entry rerun
-	rerun="sudo $(printf '%q ' "$0" "${ORIGINAL_ARGS[@]}")"
+	local entry rerun="sudo $0"
+	[[ $CONFIG_FILE == "$DEFAULT_CONFIG_FILE" ]] || rerun+=" --config $CONFIG_FILE"
 	{
 		echo
 		echo "======================================================================"
 		echo "  ACTION NEEDED — homescope is set up, but not started yet"
 		echo "======================================================================"
 		echo "  This host publishes to an external MQTT broker, and homescope does"
-		echo "  not have its passwords yet. Set them (each prompts, or pipe a file in):"
+		echo "  not have the passwords of its users there yet. Set them (each"
+		echo "  prompts, or pipe a file in):"
 		echo
 		for entry in "${MISSING_SECRETS[@]}"; do
-			echo "      sudo homescope secret set ${entry%%|*}    # ${entry#*|}"
+			printf '      sudo homescope secret set %-13s # MQTT user %s\n' "${entry%%|*}" "${entry#*|}"
 		done
 		echo
-		echo "  Then run the same deploy again — repeating it is safe:"
+		echo "  Then run the deploy again — no flags needed:"
 		echo
-		echo "      ${rerun% }"
+		echo "      $rerun"
+		echo
+		echo "  (Next time, a terminal or --mqtt-api-password / --mqtt-gateway-password"
+		echo "  lets the deploy finish in one run.)"
 		echo "======================================================================"
 		echo
 	} >&2
@@ -309,6 +379,58 @@ run_user_phase() {
 			source "$STAGING_DIR/lib/user-phase.sh"
 			for f in "$STAGING_DIR"/components/*.sh; do source "$f"; done
 			user_phase'
+}
+
+# The deploy's last word: did the containers that talk to MQTT log in? A
+# mistyped password would otherwise surface only as an API that receives
+# nothing. Root reads the homescope user's container logs from the journal;
+# a gateway that is not running (no receiver plugged in) is skipped.
+#
+# Only the *current* container's lines count (podman tags each with
+# CONTAINER_ID_FULL; every restart is a new container). Reading by time would
+# also catch the replaced container, which may still have been failing with
+# the old password until the moment it was stopped.
+check_mqtt_logins() {
+	local entry unit user secret id line _
+	local checks=()
+	$CFG_HAS_API && checks+=("homescope-api|$CFG_MQTT_API_USER|mqtt-api")
+	$CFG_HAS_GATEWAY && checks+=("homescope-gateway|$CFG_MQTT_GATEWAY_USER|mqtt-gateway")
+
+	for entry in "${checks[@]}"; do
+		IFS='|' read -r unit user secret <<< "$entry"
+		as_homescope systemctl --user is-active --quiet "$unit.service" || continue
+
+		line=""
+		for _ in $(seq 1 30); do
+			# Looked up every round: if the container dies, systemd starts a new one.
+			if id="$(homescope_podman inspect -f '{{.Id}}' "$unit" 2> /dev/null)"; then
+				line="$(journalctl --no-hostname -o cat "CONTAINER_ID_FULL=$id" |
+					sed 's/\x1b\[[0-9;]*m//g' |
+					grep -m1 -oE 'connected to the MQTT broker|mqtt err.*' || true)"
+			fi
+			[[ -n $line ]] && break
+			sleep 1
+		done
+
+		case "$line" in
+			"connected to the MQTT broker")
+				log "$unit logged in to $CFG_MQTT_HOST:$CFG_MQTT_PORT as $user"
+				;;
+			*NotAuthorized* | *BadUserNamePassword*)
+				if $CFG_BROKER_LOCAL; then
+					warn "$unit cannot log in to the local broker as $user — run the deploy again, which rebuilds the broker's password file."
+				else
+					warn "$unit cannot log in to $CFG_MQTT_HOST:$CFG_MQTT_PORT as $user — wrong password, or the broker has no such user (yet). Fix: sudo homescope secret set $secret && sudo homescope restart ${unit#homescope-}"
+				fi
+				;;
+			"")
+				warn "$unit reported no MQTT connection within 30 s — check: sudo homescope logs ${unit#homescope-}"
+				;;
+			*)
+				warn "$unit cannot reach the MQTT broker at $CFG_MQTT_HOST:$CFG_MQTT_PORT: $line"
+				;;
+		esac
+	done
 }
 
 ### --check ###################################################################
@@ -348,7 +470,6 @@ print_plan() {
 ### Main ######################################################################
 
 main() {
-	ORIGINAL_ARGS=("$@")
 	parse_args "$@"
 	[[ $EUID -eq 0 ]] || die "This script must run as root: sudo $0 $*"
 
@@ -359,6 +480,7 @@ main() {
 
 	preflight
 	load_config "$CONFIG_FILE" "$SCRIPT_DIR/lib"
+	check_flags_against_config
 	check_data_mounts
 
 	if $CHECK_ONLY; then
@@ -378,7 +500,9 @@ main() {
 	report_missing_secrets
 
 	stage_deploy_tree
+
 	run_user_phase
+	check_mqtt_logins
 }
 
 main "$@"

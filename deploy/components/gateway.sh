@@ -41,7 +41,7 @@ gateway_root() {
 	fi
 
 	if ! $CFG_BROKER_LOCAL; then
-		require_secret mqtt-gateway "the password of MQTT user $CFG_MQTT_GATEWAY_USER"
+		operator_secret mqtt-gateway "$CFG_MQTT_GATEWAY_USER" "$MQTT_GATEWAY_PASSWORD_FILE"
 	fi
 }
 

@@ -27,7 +27,7 @@ broker_acl() {
 # processes could read, and reach the broker as its own uid.
 broker_root() {
 	# Labelled as generated: should this host later switch to an external
-	# broker, require_secret then treats them as unset and asks for the real
+	# broker, operator_secret then treats them as unset and asks for the real
 	# ones, instead of the API failing to log in with a local password.
 	local secret
 	for secret in homescope-mqtt-api homescope-mqtt-gateway; do

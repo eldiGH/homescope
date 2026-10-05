@@ -133,7 +133,7 @@ api_root() {
 	setup_admin_token
 
 	if ! $CFG_BROKER_LOCAL; then
-		require_secret mqtt-api "the password of MQTT user $CFG_MQTT_API_USER"
+		operator_secret mqtt-api "$CFG_MQTT_API_USER" "$MQTT_API_PASSWORD_FILE"
 	fi
 
 	# 0700, root: the globals dump holds role password hashes.

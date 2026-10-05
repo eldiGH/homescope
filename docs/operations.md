@@ -55,13 +55,27 @@ sudo ./deploy/deploy.sh --import-kek kek-file \
 
 Without either flag it stops before touching anything that matters.
 
-With an **external broker**, the first deploy then pauses with an **ACTION
-NEEDED** banner. That is expected: the broker's owner creates the MQTT users and
-hands over their passwords. The banner lists the `sudo homescope secret set …`
-commands and the exact deploy command to repeat. Repeating it is safe: an
-identical `--import-kek` / `--import-admin-token` file is recognised as already
-imported, `--new-kek` keeps a KEK that exists, and only a *different* KEK is
-refused.
+With an **external broker**, the deploy also needs the passwords of the MQTT
+users the broker's owner created. It **asks for any it does not have yet**
+(input hidden) and carries on, so a first deploy is one run:
+
+```bash
+sudo ./deploy/deploy.sh --import-kek kek-file --import-admin-token admin-token-file
+#   homescope needs the password of MQTT user homescope-api on host.containers.internal:1883
+#     Password for homescope-api (input hidden, empty to skip for now):
+```
+
+Without a terminal, pass them as files: `--mqtt-api-password FILE` and
+`--mqtt-gateway-password FILE`. Only with neither does the deploy stop at an
+**ACTION NEEDED** banner (exit 0): set them with `sudo homescope secret set …`,
+then run the plain deploy again. The one-off flags are not needed a second
+time. Repeating a full first-deploy command is still harmless: an identical
+`--import-kek` / `--import-admin-token` file is recognised, `--new-kek` keeps a
+KEK that exists, and only a *different* KEK is refused.
+
+When the containers are up, the deploy checks that the API, and a running
+gateway, **logged in to the broker**. A refused login is reported with the
+fix, not left to be discovered as missing readings.
 
 ## Machine layout
 
@@ -209,8 +223,8 @@ sudo homescope secret show admin-token                  # for homescope-provisio
 sudo homescope secret set mqtt-api                      # prompts; or < file
 ```
 
-With an external broker the deploy pauses (the ACTION NEEDED banner, exit 0)
-until both MQTT passwords are set. A password generated earlier for a local
+With an external broker the deploy asks for missing MQTT passwords, or takes
+`--mqtt-*-password FILE` (see [above](#what-a-host-is-etchomescopedeploytoml)). A password generated earlier for a local
 broker does not count — it would never log in elsewhere. During a first deploy,
 rerun the deploy after `secret set`; on a running host, `homescope restart api`
 applies a new `mqtt-api`. With a local broker, always rerun the deploy, which
@@ -550,7 +564,8 @@ While the dongle is unplugged the unit sits in `auto-restart`, retrying every
 | --- | --- | --- |
 | Nothing runs after a reboot; `homescope status` warns about the user manager | The data disk did not mount | `systemctl status user@$(id -u homescope).service`, `findmnt /srv` |
 | Deploy: "no KEK yet. Say which case this is" | First deploy without `--new-kek` / `--import-kek` | decide which case it is — never guess on a restore |
-| Deploy: "ACTION NEEDED — … not started yet" | External broker passwords not set yet (expected on a first deploy) | the `homescope secret set …` lines it printed, then the same deploy again |
+| Deploy: "ACTION NEEDED — … not started yet" | External broker passwords not given, and no terminal to ask on | the `homescope secret set …` lines it printed, then the plain deploy again |
+| Deploy: "cannot log in to … as homescope-api" | Wrong password, or the broker's owner has not created the user yet | `sudo homescope secret set mqtt-api && sudo homescope restart api` |
 | Deploy: "…is under /srv, which fstab lists but is not mounted" | Data disk missing; the deploy refuses to write underneath it | mount it |
 | Deploy: "generated without its host drop-in" | Podman older than 5.0 | upgrade podman |
 | API log: `ConnectionRefused(NotAuthorized)` | Wrong or missing broker password | `homescope secret set mqtt-api`, then restart |

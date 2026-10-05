@@ -1,86 +1,171 @@
 #!/bin/bash
 #
-# Idempotent deployment script for the homescope stack.
-# Safe to rerun at any time — it converges the machine to the state
-# described by this repo (deploy/). Typical update flow:
+# Converges this host to /etc/homescope/deploy.toml. Safe to rerun at any time:
 #
 #     git pull && sudo ./deploy/deploy.sh
 #
-# Runs in two phases: root does only what needs root (user creation, udev
-# rule, staging the deploy tree into $STAGING_DIR), then drops to
-# $HOMESCOPE_USER for everything else, so all deploy-managed files get the
-# right owner at creation time. In particular,
-# nothing here may ever chown into ~/.local/share/containers — podman's
-# storage holds files owned by subuids (the containers' own users), and a
-# recursive chown corrupts every image and volume in it.
+# The config file says what the host *is*: its components (broker, api,
+# gateway), its site, where data lives, which MQTT broker to use. Flags only
+# request one-off actions and never change what the host is:
 #
-# Secrets are generated once and never overwritten on reruns.
+#     sudo ./deploy/deploy.sh init <all-in-one|server|gateway>
+#         start a new host's config from deploy/examples/
+#     sudo ./deploy/deploy.sh --check
+#         validate the config and show the plan; changes nothing
+#     sudo ./deploy/deploy.sh --new-kek
+#         first deploy of a fresh installation
+#     sudo ./deploy/deploy.sh --import-kek FILE [--import-admin-token FILE]
+#         first deploy of a restored installation
+#     --config PATH   another config file than /etc/homescope/deploy.toml
 #
-# Two secrets are exceptions to "secrets live in $CONFIG_DIR" — the KEK and the
-# admin API token. Both are podman secrets, so they reach the API as tmpfs files
-# under /run/secrets rather than as environment variables. See setup_kek and
-# setup_admin_token.
+# Two phases. Root does only what needs root — the service user, the udev
+# rule, data directories, secrets, system units, staging the deploy tree —
+# then drops to the homescope user for the rest, so everything created there
+# has the right owner from the start. Nothing here may ever chown into
+# ~/.local/share/containers: podman's storage holds files owned by subuids
+# (the containers' own users), and a recursive chown corrupts every image in it.
+#
+# Secrets never pass through the config file: they are podman secrets, mounted
+# into the containers as files under /run/secrets. Day-to-day operation goes
+# through the `homescope` admin command this script installs
+# (`sudo homescope help`). Design: docs/design/deployment-topology.md.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+for component_file in "$SCRIPT_DIR"/components/*.sh; do
+	source "$component_file"
+done
 
-HOMESCOPE_USER="homescope"
-HOMESCOPE_DIR="/var/lib/homescope"
-CONFIG_DIR="$HOMESCOPE_DIR/.config/homescope"
-QUADLET_DIR="$HOMESCOPE_DIR/.config/containers/systemd"
-STAGING_DIR="$HOMESCOPE_DIR/deploy-src"
+# 5.0: quadlet drop-in directories (secret --replace is 4.7, labels 4.3).
+MIN_PODMAN_VERSION="5.0"
 
-# Names of the podman secrets (see setup_kek / setup_admin_token).
-KEK_SECRET="homescope-kek"
-ADMIN_TOKEN_SECRET="homescope-admin-token"
+CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+NEW_KEK=false
+IMPORT_KEK=""
+IMPORT_ADMIN_TOKEN=""
+CHECK_ONLY=false
+INIT_ROLE=""
+MISSING_SECRETS=()
 
-MIN_PODMAN_VERSION="4.5" # 4.4 for quadlets, 4.5 for `podman secret exists`
-
-log() {
-	echo ">>> $*"
+usage() {
+	sed -n '3,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	exit "${1:-0}"
 }
 
-die() {
-	echo "ERROR: $*" >&2
-	exit 1
-}
-
-generate_password() {
-	openssl rand -hex 24
-}
-
-# 32 bytes as 64 hex chars — the width homescope-api's KEK parser requires.
-generate_kek() {
-	openssl rand -hex 32
-}
-
-# 32 bytes as 64 hex chars. Deliberately not a UUID: v4 has ample entropy, but
-# UUID is a format for uniqueness rather than unpredictability and not every
-# generator on the path is cryptographic. Same effort, one fewer question.
-generate_admin_token() {
-	openssl rand -hex 32
-}
-
-### Root phase ################################################################
-
-preflight_checks() {
-	local tool
-	for tool in podman rsync openssl udevadm loginctl runuser; do
-		if ! command -v "$tool" > /dev/null; then
-			die "Missing required tool: $tool"
-		fi
+parse_args() {
+	while (($#)); do
+		case "$1" in
+			init)
+				[[ $# -ge 2 ]] || die "init needs a role: all-in-one, server or gateway"
+				INIT_ROLE="$2"
+				shift
+				;;
+			--check) CHECK_ONLY=true ;;
+			--new-kek) NEW_KEK=true ;;
+			--import-kek)
+				[[ $# -ge 2 ]] || die "--import-kek needs a file"
+				IMPORT_KEK="$2"
+				shift
+				;;
+			--import-admin-token)
+				[[ $# -ge 2 ]] || die "--import-admin-token needs a file"
+				IMPORT_ADMIN_TOKEN="$2"
+				shift
+				;;
+			--config)
+				[[ $# -ge 2 ]] || die "--config needs a path"
+				CONFIG_FILE="$2"
+				shift
+				;;
+			-h | --help) usage ;;
+			*) die "unknown argument: $1 (see --help)" ;;
+		esac
+		shift
 	done
+
+	if $NEW_KEK && [[ -n $IMPORT_KEK ]]; then
+		die "--new-kek and --import-kek exclude each other"
+	fi
+	local file
+	for file in "$IMPORT_KEK" "$IMPORT_ADMIN_TOKEN"; do
+		[[ -z $file || -r $file ]] || die "cannot read $file"
+	done
+}
+
+do_init() {
+	local example="$SCRIPT_DIR/examples/$INIT_ROLE.toml"
+	[[ -f $example ]] || die "no such role: $INIT_ROLE (expected all-in-one, server or gateway)"
+	[[ ! -e $CONFIG_FILE ]] || die "$CONFIG_FILE already exists; edit it instead"
+
+	install -d -m 0755 "$(dirname "$CONFIG_FILE")"
+	install -m 0644 "$example" "$CONFIG_FILE"
+	log "Wrote $CONFIG_FILE from the $INIT_ROLE example."
+	echo "    Edit it, check it with: sudo $0 --check"
+	echo "    then deploy with:       sudo $0 --new-kek   (or --import-kek FILE when restoring)"
+}
+
+### Checks ####################################################################
+
+preflight() {
+	local tool
+	for tool in podman rsync openssl udevadm loginctl runuser python3 systemd-analyze findmnt mountpoint awk sha256sum; do
+		command -v "$tool" > /dev/null || die "Missing required tool: $tool"
+	done
+
+	python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' ||
+		die "python3 >= 3.11 required (tomllib), found $(python3 --version)"
 
 	local podman_version
 	podman_version="$(podman version --format '{{.Client.Version}}')"
 	if [[ "$(printf '%s\n' "$MIN_PODMAN_VERSION" "$podman_version" | sort -V | head -n1)" != "$MIN_PODMAN_VERSION" ]]; then
-		die "podman >= $MIN_PODMAN_VERSION required, found $podman_version"
+		die "podman >= $MIN_PODMAN_VERSION required (quadlet drop-ins), found $podman_version"
 	fi
+}
 
-	if [[ $EUID -ne 0 ]]; then
-		die "This script must run as root: sudo $0"
+check_config_values() {
+	if $CFG_HAS_API; then
+		systemd-analyze calendar "$CFG_BACKUP_ON_CALENDAR" > /dev/null 2>&1 ||
+			die "$CONFIG_FILE: backup.on_calendar is not a systemd calendar expression: $CFG_BACKUP_ON_CALENDAR"
 	fi
+}
+
+# A data directory under a mount point that fstab lists but that is not mounted
+# — a missing USB disk on a host that boots anyway thanks to `nofail` — would
+# otherwise be created on the filesystem underneath, and the database would
+# start empty on the SD card.
+check_data_mounts() {
+	local dir target best
+	local dirs=("$CFG_DATA_DIR")
+	$CFG_HAS_API && dirs+=("$CFG_BACKUP_DIR")
+
+	for dir in "${dirs[@]}"; do
+		best=""
+		while read -r target; do
+			[[ $target == / ]] && continue
+			if [[ $dir == "$target" || $dir == "$target"/* ]] && ((${#target} > ${#best})); then
+				best="$target"
+			fi
+		done < <(findmnt --fstab -n -l -o TARGET)
+
+		if [[ -n $best ]] && ! mountpoint -q "$best"; then
+			die "$dir is under $best, which fstab lists but is not mounted — refusing to create data on the filesystem underneath. Mount it first."
+		fi
+	done
+}
+
+### Root phase ################################################################
+
+wait_for_user_manager() {
+	local uid bus _
+	uid="$(id -u "$HOMESCOPE_USER")"
+	bus="/run/user/$uid/bus"
+	for _ in $(seq 1 30); do
+		[[ -S $bus ]] && return
+		sleep 1
+	done
+	die "the user manager of $HOMESCOPE_USER did not come up ($bus missing)"
 }
 
 setup_user() {
@@ -96,300 +181,188 @@ setup_user() {
 		usermod --add-subuids 200000-265535 --add-subgids 200000-265535 "$HOMESCOPE_USER"
 	fi
 
-	# The group owning serial devices is distro-specific (Debian: dialout, Arch: uucp).
-	local serial_group
-	if getent group dialout > /dev/null; then
-		serial_group="dialout"
-	elif getent group uucp > /dev/null; then
-		serial_group="uucp"
-	else
-		die "No serial group (dialout/uucp) found"
-	fi
-
-	usermod -aG "$serial_group" "$HOMESCOPE_USER"
-
-	# Linger starts the user's systemd manager immediately and keeps it (and
-	# thus all services) running without a login session. It must come AFTER
-	# the group changes: processes only get supplementary groups present at
-	# start, and everything (podman, containers) inherits them from this
-	# manager. If a group is ever added while the manager is already running:
-	#     systemctl restart user@$(id -u homescope).service
+	# Linger starts the user's systemd manager now and keeps it, with every
+	# container, running without a login session.
 	loginctl enable-linger "$HOMESCOPE_USER"
+	wait_for_user_manager
 }
 
-setup_udev_rule() {
-	local rule="99-homescope-receiver.rules"
+setup_data_dirs() {
+	# Created when missing, never touched when present: the database and
+	# Grafana chown their directories to their own (sub)uids, and re-owning
+	# them would lock the containers out of their data.
+	if [[ ! -d $CFG_DATA_DIR ]]; then
+		log "Creating $CFG_DATA_DIR"
+		install -d -m 0755 -o "$HOMESCOPE_USER" -g "$HOMESCOPE_USER" "$CFG_DATA_DIR"
+	fi
 
-	# cmp guard skips the udev reload when the rule is unchanged;
-	# the copy itself would be harmless to repeat.
-	if ! cmp -s "$SCRIPT_DIR/udev/$rule" "/etc/udev/rules.d/$rule"; then
-		log "Installing udev rule $rule"
-		cp "$SCRIPT_DIR/udev/$rule" /etc/udev/rules.d/
-		udevadm control --reload-rules
-		udevadm trigger --subsystem-match=tty
+	local component dir mode
+	for component in $CFG_COMPONENTS; do
+		while read -r dir mode; do
+			[[ -n $dir && ! -d $dir ]] || continue
+			install -d -m "$mode" -o "$HOMESCOPE_USER" -g "$HOMESCOPE_USER" "$dir"
+		done < <("${component}_dirs")
+	done
+}
+
+# The containers run in the homescope *user* manager, which does not load
+# fstab mount units — a RequiresMountsFor= inside a quadlet would fail as
+# "unit not found" at boot, or work by accident. On the system unit of that
+# manager it is well defined: without the data disk the whole homescope stack
+# does not start (verified by booting a VM with the disk missing).
+#
+# ⚠️ It does NOT show in `systemctl --failed`: a job that fails for a missing
+# dependency leaves the unit *inactive* with result 'dependency', not failed.
+# Monitoring has to ask `systemctl is-active user@<uid>.service` directly.
+setup_mount_dependency() {
+	local uid dir file content
+	uid="$(id -u "$HOMESCOPE_USER")"
+	dir="/etc/systemd/system/user@$uid.service.d"
+	file="$dir/homescope-data.conf"
+	content="$(printf '%s\n' \
+		"# Written by homescope's deploy.sh: the homescope user's services keep their data under data_dir." \
+		"[Unit]" \
+		"RequiresMountsFor=$CFG_DATA_DIR")"
+
+	if [[ "$(cat "$file" 2> /dev/null)" != "$content" ]]; then
+		log "Tying the homescope user manager to the mount holding $CFG_DATA_DIR"
+		install -d -m 0755 "$dir"
+		printf '%s\n' "$content" > "$file"
+		systemctl daemon-reload
 	fi
 }
 
-# The homescope user usually cannot read the git checkout (home dirs are 700
-# on current Raspberry Pi OS, and path resolution needs traversal rights on
-# every ancestor), so root — which can read anything — stages a copy that
-# homescope owns. The copy is kept after the deploy: --delete keeps it
-# converged, it doubles as a record of what the last deploy shipped, and a
-# cleanup-on-exit would be one more thing to go wrong mid-failure.
+install_admin_tools() {
+	install -m 0755 -o root -g root "$SCRIPT_DIR/homescope" /usr/local/bin/homescope
+	install -d -m 0755 "$LIB_INSTALL_DIR"
+	install -m 0644 -o root -g root "$SCRIPT_DIR/lib/common.sh" "$SCRIPT_DIR/lib/config.py" "$LIB_INSTALL_DIR/"
+	if [[ $CONFIG_FILE != "$DEFAULT_CONFIG_FILE" ]]; then
+		warn "the homescope command reads $DEFAULT_CONFIG_FILE; this deploy used $CONFIG_FILE"
+	fi
+}
+
+# Secrets an operator must provide (an external broker's passwords). Collected
+# across components, then reported together, with the commands to set them.
+# A password this deploy generated for a local broker does not count: it would
+# never log in to someone else's broker.
+require_secret() {
+	local short="$1" description="$2" name generated
+	name="${SECRET_NAMES[$short]}"
+	if secret_exists "$name"; then
+		generated="$(homescope_podman secret inspect \
+			-f '{{index .Spec.Labels "homescope.generated"}}' "$name")"
+		[[ $generated == true ]] || return 0
+	fi
+	MISSING_SECRETS+=("$short|$description")
+}
+
+report_missing_secrets() {
+	((${#MISSING_SECRETS[@]})) || return 0
+
+	local entry
+	{
+		echo "ERROR: secrets this host needs are not set yet:"
+		for entry in "${MISSING_SECRETS[@]}"; do
+			echo "    sudo homescope secret set ${entry%%|*}     # ${entry#*|}"
+		done
+		echo "Then run the deploy again."
+	} >&2
+	exit 1
+}
+
+# The homescope user usually cannot read the git checkout (home dirs are 0700,
+# and path resolution needs traversal rights on every ancestor), so root
+# stages a copy it owns. Kept afterwards: --delete keeps it converged, and it
+# records what the last deploy shipped.
 stage_deploy_tree() {
 	log "Staging deploy tree to $STAGING_DIR"
-
-	rsync -a --delete --chown "$HOMESCOPE_USER:$HOMESCOPE_USER" \
-		"$SCRIPT_DIR/" "$STAGING_DIR/"
+	rsync -a --delete --chown "$HOMESCOPE_USER:$HOMESCOPE_USER" "$SCRIPT_DIR/" "$STAGING_DIR/"
 }
 
-# Shell functions don't survive into a child process on their own; export -f
-# carries them through the environment, so the runuser'd bash below runs the
-# exact functions defined in this file — no flags, no second script.
-drop_to_homescope() {
-	export STAGING_DIR HOMESCOPE_USER HOMESCOPE_DIR CONFIG_DIR QUADLET_DIR \
-		KEK_SECRET ADMIN_TOKEN_SECRET
-	export -f log die generate_password generate_kek generate_admin_token \
-		setup_secrets setup_kek setup_admin_token \
-		setup_configs setup_quadlets setup_autoupdate_timer start_services \
-		homescope_phase
-
-	# runuser keeps the caller's cwd, which is normally the git checkout under
-	# some human's home — and home dirs are 0700, so $HOMESCOPE_USER cannot
-	# even traverse into it. Every path below is absolute, so the shell itself
-	# doesn't care; rootless podman does. It re-execs inside a user namespace
-	# and the child chdir()s back to this cwd, dying with
-	# "cannot chdir to <dir>: Permission denied" before it runs anything.
-	# $STAGING_DIR rather than /: it is what this phase reads from, and root
-	# just created it owned by $HOMESCOPE_USER.
+run_user_phase() {
+	# shellcheck disable=SC2163 # exports every CFG_* variable by name
+	export "${!CFG_@}" STAGING_DIR
+	# cd: runuser keeps the cwd, and rootless podman dies chdir()ing back into
+	# a directory the homescope user cannot enter.
 	cd "$STAGING_DIR"
-
-	exec runuser -u "$HOMESCOPE_USER" -- bash -c 'set -euo pipefail; homescope_phase'
+	# shellcheck disable=SC2016 # expanded by the homescope user's shell
+	runuser -u "$HOMESCOPE_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$HOMESCOPE_USER")" \
+		bash -c '
+			set -euo pipefail
+			source "$STAGING_DIR/lib/common.sh"
+			source "$STAGING_DIR/lib/user-phase.sh"
+			for f in "$STAGING_DIR"/components/*.sh; do source "$f"; done
+			user_phase'
 }
 
-### Homescope phase ###########################################################
+### --check ###################################################################
 
-setup_secrets() {
-	local db_env="$CONFIG_DIR/db.env"
-	local api_env="$CONFIG_DIR/api.env"
-	local grafana_env="$CONFIG_DIR/grafana.env"
+print_plan() {
+	echo "Config: $CONFIG_FILE"
+	python3 "$SCRIPT_DIR/lib/config.py" --show "$CONFIG_FILE" | sed 's/^/    /'
 
-	if [[ -f "$db_env" && -f "$api_env" && -f "$grafana_env" ]]; then
-		log "Secrets already generated, skipping"
+	# findmnt -T needs an existing path; before the first deploy, data_dir is not.
+	local probe="$CFG_DATA_DIR"
+	while [[ ! -e $probe ]]; do
+		probe="$(dirname "$probe")"
+	done
+	echo "Data:   $CFG_DATA_DIR on $(findmnt -n -o SOURCE,FSTYPE -T "$probe" | tr -s ' ')"
+
+	local units="" component
+	for component in $CFG_COMPONENTS; do
+		units+="$("${component}_units" | tr '\n' ' ')"
+	done
+	echo "Units:  $units"
+
+	echo "Secrets:"
+	if ! id "$HOMESCOPE_USER" &> /dev/null; then
+		echo "    (user $HOMESCOPE_USER does not exist yet — none set)"
 		return
 	fi
-
-	# The api/grafana DB passwords each live in TWO files (db.env for role
-	# creation at first DB init, service env for the client), so the files
-	# are only valid as a complete set. Never regenerate just one.
-	if [[ -f "$db_env" || -f "$api_env" || -f "$grafana_env" ]]; then
-		die "Partial secrets state in $CONFIG_DIR — some env files exist, some are missing. Resolve manually."
-	fi
-
-	log "Generating secrets"
-
-	# 'local' and assignment are split on purpose: 'local x="$(cmd)"' would
-	# swallow cmd's exit status and set -e could not catch an openssl failure.
-	local api_db_password grafana_db_password
-	api_db_password="$(generate_password)"
-	grafana_db_password="$(generate_password)"
-
-	cat > "$db_env" <<-EOF
-		# Read by the postgres image ONLY on first init of the data volume.
-		# Editing these later does NOT change any database password.
-		POSTGRES_PASSWORD=$(generate_password)
-		API_DB_PASSWORD=$api_db_password
-		GRAFANA_DB_PASSWORD=$grafana_db_password
-	EOF
-
-	cat > "$api_env" <<-EOF
-		DB_USER=api
-		DB_PASSWORD=$api_db_password
-	EOF
-
-	cat > "$grafana_env" <<-EOF
-		# Admin password is read by grafana only on first start (empty data volume).
-		GF_SECURITY_ADMIN_PASSWORD=$(generate_password)
-		GRAFANA_DB_PASSWORD=$grafana_db_password
-	EOF
-
-	chmod 600 "$CONFIG_DIR"/*.env
+	local short
+	for short in kek admin-token mqtt-api mqtt-gateway mqtt-passwd mqtt-acl; do
+		if secret_exists "${SECRET_NAMES[$short]}" 2> /dev/null; then
+			echo "    $short: set"
+		else
+			echo "    $short: not set"
+		fi
+	done
 }
 
-# The KEK wraps every per-device AEAD key stored in devices.key. It is the one
-# secret that must never live in the database or in a database backup: with it,
-# a leaked dump yields the whole fleet's keys; without it, the dump is inert.
-#
-# A podman secret rather than an env file, for two reasons. It is delivered as
-# a tmpfs file under /run/secrets, so it never enters the API's environment —
-# an env var would be readable from /proc/<pid>/environ by anything running as
-# this user, inherited by every child process, and echoed by `podman inspect`.
-# And `podman secret create -` reads stdin, so the generated key never touches
-# a filesystem outside podman's own storage.
-#
-# Rotation is deliberately NOT automated here. It means: add a generation to
-# the ring, re-wrap every devices.key row, promote it with `current`, then drop
-# the old line. Doing that from a converge script would risk orphaning rows.
-setup_kek() {
-	if podman secret exists "$KEK_SECRET"; then
-		log "KEK secret already exists, skipping"
-		return
-	fi
-
-	log "Generating KEK (generation 1)"
-
-	# Format must match homescope-api's parser: `current = N` plus one
-	# `N = <64 hex>` line per generation. Generation numbers are foreign keys
-	# into devices.kek_ver and are never renumbered or reused.
-	{
-		echo "# homescope KEK ring — wraps the per-device keys in devices.key."
-		echo "# Generated $(date -Is) by deploy.sh."
-		echo "current = 1"
-		echo "1 = $(generate_kek)"
-	} | podman secret create "$KEK_SECRET" -
-
-	cat >&2 <<-EOF
-
-		!!  A new KEK was generated. Back it up NOW, somewhere other than
-		!!  wherever the database backups go — same drive means one theft or
-		!!  one failure takes both, which is the exact scenario it defends
-		!!  against. Losing it means re-provisioning every sensor by hand.
-		!!
-		!!      sudo podman secret inspect --showsecret \\
-		!!          -f '{{.SecretData}}' $KEK_SECRET
-		!!
-		!!  (as $HOMESCOPE_USER — see the wrapping in backup-db.sh)
-
-	EOF
-}
-
-# The bearer token guarding the device-management endpoints — the ones that
-# mint a key, and the ones that rotate a deployed sensor's key out from under
-# it. `device_addr` is broadcast in the clear in every BLE advertisement, so
-# an unauthenticated rotate endpoint is a one-request denial of service against
-# the whole fleet by anyone who can reach the port.
-#
-# A podman secret for the same reasons as the KEK: tmpfs under /run/secrets
-# instead of the environment, and `podman secret create -` reads stdin so the
-# token never touches a filesystem outside podman's storage.
-#
-# Unlike the KEK this one is NOT worth backing up — it derives nothing and
-# protects nothing at rest. Revocation is exactly "generate a new one":
-#
-#     podman secret rm homescope-admin-token && sudo ./deploy/deploy.sh
-setup_admin_token() {
-	if podman secret exists "$ADMIN_TOKEN_SECRET"; then
-		log "Admin token secret already exists, skipping"
-		return
-	fi
-
-	log "Generating admin API token"
-
-	# Piped, never assigned: the token stays out of shell variables and out of
-	# any process's argv. homescope-api reads the first line and trims it, so
-	# openssl's trailing newline is fine — but nothing else may be in here.
-	generate_admin_token | podman secret create "$ADMIN_TOKEN_SECRET" -
-
-	cat >&2 <<-EOF
-
-		!!  A new admin API token was generated. Read it out and store it on
-		!!  the workstation that runs homescope-provision:
-		!!
-		!!      sudo -u $HOMESCOPE_USER XDG_RUNTIME_DIR=/run/user/\$(id -u $HOMESCOPE_USER) \\
-		!!          podman secret inspect --showsecret -f '{{.SecretData}}' $ADMIN_TOKEN_SECRET
-		!!
-		!!  The API is published on loopback only (see api.container), so reach
-		!!  it through an SSH tunnel rather than over the LAN — nothing
-		!!  terminates TLS in front of it yet and the token is a bearer token.
-
-	EOF
-}
-
-setup_configs() {
-	log "Syncing container configs"
-
-	mkdir -p "$CONFIG_DIR"
-	# 755, not 700: containers that drop privileges (postgres, grafana) access
-	# mounts below this dir as non-root mapped uids and need traversal rights.
-	# Secrets are protected by the 600 mode on the env files themselves.
-	chmod 755 "$CONFIG_DIR"
-
-	cp "$SCRIPT_DIR/mosquitto/mosquitto.conf" "$CONFIG_DIR/mosquitto.conf"
-
-	rsync -a --delete "$SCRIPT_DIR/timescaledb/init/" "$CONFIG_DIR/timescaledb-init/"
-	rsync -a --delete "$SCRIPT_DIR/grafana/provisioning/" "$CONFIG_DIR/grafana-provisioning/"
-	rsync -a --delete "$SCRIPT_DIR/grafana/dashboards/" "$CONFIG_DIR/grafana-dashboards/"
-}
-
-setup_quadlets() {
-	log "Syncing quadlets"
-
-	mkdir -p "$QUADLET_DIR"
-	rsync -a --delete "$SCRIPT_DIR/quadlets/" "$QUADLET_DIR/"
-}
-
-setup_autoupdate_timer() {
-	log "Installing podman-auto-update timer override"
-
-	local dropin_dir="$HOMESCOPE_DIR/.config/systemd/user/podman-auto-update.timer.d"
-	mkdir -p "$dropin_dir"
-	cp "$SCRIPT_DIR/systemd/podman-auto-update.timer.d/override.conf" "$dropin_dir/"
-}
-
-start_services() {
-	log "Reloading systemd and (re)starting services"
-
-	# daemon-reload runs the quadlet generator and picks up the timer
-	# drop-in — it must precede enable/restart.
-	systemctl --user daemon-reload
-	systemctl --user enable --now podman-auto-update.timer
-
-	# 'restart' below reuses locally cached images and never contacts the
-	# registry — without this pull pass a deploy would restart services on
-	# stale code. Same oneshot unit the timer fires (incl. auto-rollback);
-	# 'start' blocks until it finishes. No-op for not-yet-running containers
-	# (first deploy pulls happen in the restarts below instead).
-	systemctl --user start podman-auto-update.service
-
-	systemctl --user restart \
-		mosquitto.service \
-		timescaledb.service \
-		api.service \
-		gateway.service \
-		grafana.service
-
-	log "Done. Check status with: sudo systemctl --user -M $HOMESCOPE_USER@ status <unit>"
-}
-
-homescope_phase() {
-	# runuser resets HOME/USER to the target user but keeps the rest of the
-	# caller's environment; systemctl --user finds the user's systemd manager
-	# through XDG_RUNTIME_DIR, which still points at root's — fix it.
-	XDG_RUNTIME_DIR="/run/user/$(id -u)"
-	export XDG_RUNTIME_DIR
-
-	if [[ ! -S "$XDG_RUNTIME_DIR/bus" ]]; then
-		die "No user manager for $HOMESCOPE_USER at $XDG_RUNTIME_DIR — linger not active yet?"
-	fi
-
-	# Everything below reads from the root-staged copy, not the checkout.
-	SCRIPT_DIR="$STAGING_DIR"
-
-	setup_configs
-	setup_secrets
-	setup_kek
-	setup_admin_token
-	setup_quadlets
-	setup_autoupdate_timer
-	start_services
-}
+### Main ######################################################################
 
 main() {
-	preflight_checks
+	parse_args "$@"
+	[[ $EUID -eq 0 ]] || die "This script must run as root: sudo $0 $*"
+
+	if [[ -n $INIT_ROLE ]]; then
+		do_init
+		return
+	fi
+
+	preflight
+	load_config "$CONFIG_FILE" "$SCRIPT_DIR/lib"
+	check_config_values
+	check_data_mounts
+
+	if $CHECK_ONLY; then
+		print_plan
+		return
+	fi
+
 	setup_user
-	setup_udev_rule
+	setup_data_dirs
+	setup_mount_dependency
+	install_admin_tools
+
+	local component
+	for component in $CFG_COMPONENTS; do
+		"${component}_root"
+	done
+	report_missing_secrets
+
 	stage_deploy_tree
-	drop_to_homescope
+	run_user_phase
 }
 
 main "$@"

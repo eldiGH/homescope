@@ -1,0 +1,53 @@
+# homescope-api — part of the `api` component.
+#
+# The drop-in deploy.sh generates (homescope-api.container.d/50-host.conf) sets
+# the image, the published port and, with a local broker, the dependency on
+# it. MQTT host/port/user come from mqtt-api.env, generated from deploy.toml.
+[Unit]
+Description=homescope API
+After=homescope-db.service
+Wants=homescope-db.service
+
+[Container]
+ContainerName=homescope-api
+Network=homescope.network
+EnvironmentFile=%h/.config/homescope/api.env
+EnvironmentFile=%h/.config/homescope/mqtt-api.env
+
+# Secrets arrive as tmpfs files under /run/secrets, never as environment
+# variables — env would put them in /proc/<pid>/environ and `podman inspect`.
+#
+# The KEK wraps every device key in devices.key. Created once by deploy.sh
+# (--new-kek, or --import-kek on a restore) and never by accident.
+Secret=homescope-kek,type=mount,target=kek,mode=0400
+Environment=KEK_PATH=/run/secrets/kek
+
+# The bearer token guarding /devices. Regenerable, unlike the KEK.
+Secret=homescope-admin-token,type=mount,target=admin-token,mode=0400
+Environment=ADMIN_TOKEN_PATH=/run/secrets/admin-token
+
+# This API's password on the MQTT broker. Generated for a local broker; for an
+# external one, set by the operator: `sudo homescope secret set mqtt-api`.
+Secret=homescope-mqtt-api,type=mount,target=mqtt-password,mode=0400
+Environment=MQTT_PASSWORD_PATH=/run/secrets/mqtt-password
+
+# 0.0.0.0 is the *container's* namespace; what the host exposes is decided by
+# the PublishPort in the drop-in (loopback by default — the admin token is a
+# bearer token, so nothing should reach it without TLS in front).
+Environment=HTTP_BIND=0.0.0.0:3000
+
+Environment=DB_HOST=homescope-db
+Environment=DB_PORT=5432
+Environment=DB_DATABASE=homescope
+Environment=DB_POOL_MAX_CONNECTIONS=10
+Environment=RUN_MIGRATIONS=true
+
+[Service]
+# The first start pulls the image inside the unit; systemd's default 90 s can
+# kill a large pull on a slow SD card.
+TimeoutStartSec=900
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -17,7 +17,7 @@
   installed by `deploy.sh`'s `setup_udev_rule`, links `/dev/homescope-receiver`
   to whichever `ttyACM<n>` the dongle enumerated as. It matches VID/PID plus the
   product string.
-- **Rootless device access** — `gateway.container` sets
+- **Rootless device access** — `homescope-gateway.container` sets
   `GroupAdd=keep-groups`.
 
 ## 1. VID/PID is embassy's example placeholder
@@ -48,14 +48,14 @@ Today's rule only creates the symlink. What the finished rule should also do:
    endpoint. `ENV{ID_MM_DEVICE_IGNORE}="1"` opts out.
 4. **Permissions** — `MODE`/`GROUP`, so the rootless container user can open the
    node without running privileged.
-5. **Pull in the gateway** — `ENV{SYSTEMD_USER_WANTS}="gateway.service"`; §3 says
+5. **Pull in the gateway** — `ENV{SYSTEMD_USER_WANTS}="homescope-gateway.service"`; §3 says
    why it is the *user* variant.
 
 ```udev
 SUBSYSTEM=="tty", ATTRS{idVendor}=="c0de", ATTRS{idProduct}=="cafe", \
   ATTRS{serial}=="<device-addr>", \
   SYMLINK+="homescope-receiver", \
-  TAG+="systemd", ENV{SYSTEMD_USER_WANTS}="gateway.service", \
+  TAG+="systemd", ENV{SYSTEMD_USER_WANTS}="homescope-gateway.service", \
   ENV{ID_MM_DEVICE_IGNORE}="1", \
   MODE="0660", GROUP="dialout"
 ```
@@ -66,7 +66,7 @@ Reload with `udevadm control --reload-rules && udevadm trigger
 
 ## 3. Bind the gateway service to the device
 
-Goal: `gateway.service` runs exactly while the dongle is plugged in — started by
+Goal: `homescope-gateway.service` runs exactly while the dongle is plugged in — started by
 udev on plug, stopped cleanly by systemd on unplug. No restart loops, and an
 honest `systemctl status`: inactive when unplugged, never parked-failed.
 
@@ -88,7 +88,7 @@ used `ENV{SYSTEMD_WANTS}`, which only reaches the system manager, and kept
 `WantedBy=default.target` plus `Restart=always`. For a user unit the rule needs
 `SYSTEMD_USER_WANTS`.
 
-In `gateway.container`:
+In `homescope-gateway.container`:
 
 ```ini
 [Unit]
@@ -103,7 +103,7 @@ After=dev-homescope\x2dreceiver.device
   device-driven. Booting with the dongle plugged in still works: udev coldplug
   events fire during boot.
 
-`deploy.sh` names `gateway.service` among the units it manages. With `BindsTo`,
+`deploy.sh` names `homescope-gateway.service` among the units it manages. With `BindsTo`,
 starting or restarting it fails while the dongle is unplugged, and `set -e`
 would abort the deploy — use `try-restart` for the gateway, or tolerate that
 failure. Check the exact command when making this change.

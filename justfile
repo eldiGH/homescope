@@ -139,7 +139,7 @@ firmware_matrix := "sensor:db40 sensor:xiao-expansion sensor:xiao-breadboard rec
 common_features := "codec crypto serde defmt"
 
 # Everything CI should run, cheapest-to-fail first
-check: fmt-check lint check-features check-sqlx test build-firmware
+check: fmt-check lint check-features check-sqlx check-deploy test build-firmware
 
 # Report formatting violations without rewriting (`just fmt` rewrites)
 fmt-check:
@@ -235,6 +235,12 @@ check-features:
 [doc("Compile the API offline, the way the container image does")]
 check-sqlx:
     SQLX_OFFLINE=true cargo check -p homescope-api --all-targets
+
+# The deploy scripts: shellcheck, plus the deploy.toml parser's tests. Neither
+# says whether a deploy works — that needs a real host (a throwaway VM).
+check-deploy:
+    shellcheck -x -s bash -e SC1090,SC1091,SC2034 deploy/deploy.sh deploy/homescope deploy/backup-db.sh deploy/lib/*.sh deploy/components/*.sh
+    python3 -m unittest discover -s deploy/lib
 
 # Regenerate api/.sqlx after changing a query (needs a migrated dev DB)
 [working-directory('api')]

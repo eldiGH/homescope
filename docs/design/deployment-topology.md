@@ -15,6 +15,32 @@
 > corrects three details of the bridge sketch (⚠️ notes beside it). Sections
 > marked **proposed** await the owner's decision. Everything else stands as
 > written on 2026-10-04.
+>
+> ✅ **Built 2026-10-05** (step 3 of the srv01 rollout), all proposals accepted
+> by the owner:
+> - **Config:** `deploy.sh` reads **TOML** at `/etc/homescope/deploy.toml`
+>   (owner's choice over KEY=value), validated by `deploy/lib/config.py`.
+> - **Components** `broker` / `api` / `gateway`, with `homescope-*` units.
+> - **Host values** in generated quadlet drop-ins, which needs **Podman ≥ 5.0**.
+> - **Data** under `data_dir`, behind the user-manager mount dependency.
+> - **A fail-closed first KEK** (`--new-kek` / `--import-kek`).
+> - **Broker auth:** external-broker passwords as operator-set secrets; the
+>   local broker authenticated with a generated password file and ACL.
+> - **The nightly dump timer.**
+> - **The `homescope` admin command.**
+>
+> Verified in a throwaway Debian 13 VM (Podman 5.4.2, srv01's version):
+> - all-in-one, then a switch to the server shape against a rootful
+>   host-network broker standing in for asgard's;
+> - thor's dump restored and migrated;
+> - the nightly dump;
+> - data on a separate `nofail` disk, including a boot without it;
+> - deselecting a component;
+> - every KEK guard.
+>
+> Not built: the remote-site bridge and the central-broker shape of a local
+> `broker`. The deploy refuses both for now. ⚠️ notes below correct what the
+> testing disproved.
 
 ## The picture
 
@@ -191,11 +217,14 @@ whose ACL allows writing exactly those topics and nothing else.
 
 ## The deploy script: components and a per-host config
 
-*Added 2026-10-05.* ✅ **The approach was accepted by the owner on 2026-10-05.**
-The script itself is deferred, and the details below are the starting point
-for it. The single `deploy.sh` reads a host config file,
-`/etc/homescope/deploy.conf`, which declares *what this host is*: its
-components, plus the values listed under [Roles](#roles).
+*Added 2026-10-05.* ✅ **The approach was accepted by the owner on 2026-10-05,
+and built the same day** — as **TOML** at `/etc/homescope/deploy.toml` rather
+than the KEY=value sketched below. The owner preferred it. Python's `tomllib`
+parses it, and Python ≥ 3.11 costs nothing, because the Podman 5.0 floor
+already excludes every distro without it. The examples became
+`deploy/examples/{all-in-one,server,gateway}.toml`. The single `deploy.sh`
+reads a host config file, which declares *what this host is*: its components,
+plus the values listed under [Roles](#roles).
 
 The owner's refinements:
 
@@ -306,9 +335,11 @@ homescope stays generic.
   generated per-service env files that already exist under
   `~/.config/homescope/`. What *podman* reads (bind-mount paths, `PublishPort`)
   goes into a generated quadlet drop-in, `<unit>.container.d/50-host.conf`,
-  next to the unchanged repo quadlet. Check drop-in support on the oldest
-  target with `man podman-systemd.unit`; srv01 runs Podman 5.4. Then raise
-  `MIN_PODMAN_VERSION` to match.
+  next to the unchanged repo quadlet. ✅ Quadlet drop-ins arrived in **Podman
+  5.0.0** (release notes), which is now `MIN_PODMAN_VERSION`. Debian 13 and
+  srv01 have 5.4; Ubuntu 24.04's 4.9 is out. After `daemon-reload` the deploy
+  also checks every container unit for the drop-in's marker label, and
+  refuses to start one whose drop-in did not apply.
 - **Deselecting a component**: stop and disable its unit *before* its quadlet
   disappears. Otherwise the running container outlives its unit file. Data is
   never deleted.
@@ -319,6 +350,8 @@ homescope stays generic.
   without having to run them separately.
 
 ## Naming: units and client ids — proposed
+
+✅ *Built 2026-10-05: the units and the client ids alike.*
 
 *Added 2026-10-05.* This is the free moment to rename, because no deployment
 exists right now (thor is archived and srv01 is fresh). Make quadlet file =
@@ -345,6 +378,8 @@ with the same id kicks the first, and they reconnect in a loop. Use
 because the new broker has no session yet. Afterwards it is not.
 
 ## Data on a separate disk — proposed
+
+✅ *Built 2026-10-05 and verified in the VM, with one correction (⚠️ below).*
 
 *Added 2026-10-05.* On srv01, data lives on `/srv`, an HDD mounted with
 `nofail`, and the SD card holds only the system. Postgres must not live in a
@@ -382,7 +417,22 @@ podman named volume under `/var/lib/homescope` (SD).
   it can be generated unconditionally. ⚠️ Verify this on srv01 by rebooting with
   the disk unplugged.
 
+  ⚠️ *Verified 2026-10-05 in the VM, and corrected.*
+  - **Holds:** booting with the disk missing leaves the homescope manager
+    stopped. Stopping `srv.mount` stops the whole stack first, then unmounts.
+    Starting the manager again remounts the disk and brings everything back.
+    The deploy itself also refuses to create `data_dir` under an fstab mount
+    point that is not mounted.
+  - **Does not hold:** it does **not** show in `systemctl --failed`. A job that
+    fails for a missing dependency leaves the unit *inactive* with result
+    `dependency`, not *failed*. Monitoring must ask
+    `systemctl is-active user@<uid>.service`, and `homescope status` reports it.
+
 ## Reaching a broker on the same host from rootless podman
+
+✅ *Verified 2026-10-05 in the VM on Podman 5.4.2. The API, on
+`homescope.network`, reached a rootful host-network Mosquitto as
+`host.containers.internal:1883`.*
 
 *Added 2026-10-05.* ⚠️ **Not by the host's own IP.** Rootless networking is
 pasta, and pasta *copies the host's addresses into the namespace*
@@ -393,7 +443,7 @@ nothing. Podman maps `host.containers.internal` (`169.254.1.2`, pasta's
 Verify before wiring the services:
 
 ```bash
-hpodman run --rm --network systemd-homescope docker.io/library/eclipse-mosquitto:2.0.22 \
+sudo homescope podman run --rm --network systemd-homescope docker.io/library/eclipse-mosquitto:2.0.22 \
     mosquitto_sub -h host.containers.internal -u homescope-api -P '…' \
     -t 'homescope/#' -C 1 -W 5 -v
 ```
@@ -477,6 +527,12 @@ raise it. The setting is global, which is harmless to clean-session clients.
 
 ## Restoring onto a fresh host — proposed
 
+✅ *Built 2026-10-05: the deploy fails closed without `--new-kek` or
+`--import-kek`, and refuses either one on a host that already has a KEK. The
+restore sequence ran in the VM against thor's dump: 7 → 9 migrations, all
+readings kept. ⚠️ The documented `CREATE EXTENSION timescaledb` step needed
+`IF NOT EXISTS`, because the image installs the extension into `template1`.*
+
 *Added 2026-10-05, for srv01 from the archive of thor's old Pi.* ⚠️ **The KEK
 must exist before the first deploy, or deploy mints a new one.** A restored
 dump wrapped under thor's KEK, opened with a fresh generation 1, fails on every
@@ -497,7 +553,7 @@ Sequence:
 1. The broker owner creates the MQTT users and ACL. The reverse-proxy entries
    go in.
 2. Images with MQTT credentials and client ids are built.
-3. Write `/etc/homescope/deploy.conf`. Create the MQTT password secrets.
+3. Write `/etc/homescope/deploy.toml`. Create the MQTT password secrets.
 4. `sudo ./deploy/deploy.sh --import-kek <archive>/kek --import-admin-token <archive>/admin-token`.
    The fresh cluster's init script creates `api`/`grafana` with *new* passwords.
    Do not restore the archive's `globals-*.sql`.
@@ -510,6 +566,10 @@ Sequence:
    chain: receiver → gateway → broker ACL → API → key under the imported KEK.
 
 ## Backups — proposed
+
+✅ *Built 2026-10-05 as described. The archive check streamed the dump into
+`pg_restore --list` through `podman exec -i`, and that failed once dumps
+outgrew a pipe buffer, so it now drains stdin.*
 
 *Added 2026-10-05.*
 
@@ -550,7 +610,7 @@ Sequence:
 - Behind a reverse proxy it needs `GF_SERVER_ROOT_URL`. To be embedded (HA
   panels) it needs `GF_SECURITY_ALLOW_EMBEDDING=true`, or Grafana sends
   `X-Frame-Options: deny`. These are host values, so they belong in
-  `deploy.conf`. The default stays as today: published on the LAN, anonymous
+  `deploy.toml`. The default stays as today: published on the LAN, anonymous
   viewer.
 - **Who owns the Grafana on a shared host.** asgard plans one Grafana for all
   of odin, with Prometheus as a second source later. Once a non-homescope

@@ -1297,7 +1297,7 @@ current = 2
 ```
 
 ✅ **Delivered as a podman secret in production** (2026-08-06, `deploy.sh`
-`setup_kek` + `Secret=` in `api.container`): mounted on tmpfs at
+`setup_kek` + `Secret=` in `homescope-api.container`): mounted on tmpfs at
 `/run/secrets/kek`, `KEK_PATH` names the path. `podman secret create -` reads
 stdin so the generated key never touches a filesystem outside podman's storage,
 and `podman secret exists` keeps the converge idempotent. Dev uses a plain file
@@ -1393,7 +1393,7 @@ during a rollback.
 
 ⚠️ **Do not commit phase 3 until no row in production has a NULL key.** With
 the backfill dropped, provisioning is what takes that count to zero.
-`RUN_MIGRATIONS=true` in `api.container` applies everything pending on the next
+`RUN_MIGRATIONS=true` in `homescope-api.container` applies everything pending on the next
 deploy, so an unrelated release would run `SET NOT NULL` against NULL rows and
 the API would fail to start. The rule generalises: *never commit a
 migration whose precondition is not already true in production.*

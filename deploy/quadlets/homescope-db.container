@@ -1,0 +1,26 @@
+# TimescaleDB — part of the `api` component.
+#
+# Host-specific settings live in the drop-in deploy.sh generates beside this
+# file (homescope-db.container.d/50-host.conf): the data bind mount under
+# data_dir and the loopback port from deploy.toml. Without that drop-in the
+# database would write into the container's own layer; deploy.sh refuses to
+# start a unit whose drop-in did not apply.
+[Unit]
+Description=homescope database (TimescaleDB)
+
+[Container]
+ContainerName=homescope-db
+Image=docker.io/timescale/timescaledb:2.28.2-pg18
+AutoUpdate=registry
+Network=homescope.network
+Volume=%h/.config/homescope/timescaledb-init:/docker-entrypoint-initdb.d:ro
+EnvironmentFile=%h/.config/homescope/db.env
+
+[Service]
+# The first start pulls the image inside the unit; systemd's default 90 s can
+# kill a large pull on a slow SD card.
+TimeoutStartSec=900
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,35 @@
+# Grafana — part of the `api` component unless deploy.toml sets
+# grafana.enabled = false (a host running its own Grafana).
+#
+# The generated drop-in (homescope-grafana.container.d/50-host.conf) sets the
+# data bind mount and the published port; grafana-host.env carries the
+# reverse-proxy settings from deploy.toml.
+[Unit]
+Description=homescope Grafana
+After=homescope-db.service
+Wants=homescope-db.service
+
+[Container]
+ContainerName=homescope-grafana
+Image=docker.io/grafana/grafana:12.2
+AutoUpdate=registry
+Network=homescope.network
+Volume=%h/.config/homescope/grafana-provisioning:/etc/grafana/provisioning:ro
+Volume=%h/.config/homescope/grafana-dashboards:/etc/grafana/dashboards:ro
+EnvironmentFile=%h/.config/homescope/grafana.env
+EnvironmentFile=%h/.config/homescope/grafana-host.env
+Environment=GRAFANA_DB_USER=grafana
+Environment=GRAFANA_ALLOW_UI_UPDATES=false
+Environment=GF_AUTH_ANONYMOUS_ENABLED=true
+Environment="GF_AUTH_ANONYMOUS_ORG_NAME=Main Org."
+Environment=GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+Environment=GF_AUTH_ANONYMOUS_HIDE_VERSION=true
+
+[Service]
+# The first start pulls the image inside the unit; systemd's default 90 s can
+# kill a large pull on a slow SD card.
+TimeoutStartSec=900
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,20 @@
+# homescope on one machine: its own MQTT broker, the API with its database and
+# Grafana, and a gateway with the receiver dongle plugged in. The simplest way
+# to run homescope in a single house.
+#
+# Copy to /etc/homescope/deploy.toml (`sudo ./deploy/deploy.sh init all-in-one`),
+# adjust, then run `sudo ./deploy/deploy.sh --new-kek`.
+
+components = ["broker", "api", "gateway"]
+
+# This house's name: the topic level, the gateway's SITE, the broker user
+# homescope-<site>. Lowercase letters, digits and '-'.
+site = "home"
+
+# Database, Grafana and broker data. Put it on durable storage; the default
+# is /var/lib/homescope/data.
+# data_dir = "/srv/homescope"
+
+[grafana]
+# All interfaces, anonymous viewer: the LAN reads the dashboards directly.
+publish = "4000"

@@ -1,0 +1,22 @@
+# A remote site: only the gateway and its receiver, publishing straight to the
+# central broker over the VPN.
+#
+# ⚠️ Without a local spooling broker, readings heard while the link is down are
+# lost. The recommended remote-site shape adds a local broker bridging to the
+# central one (docs/design/deployment-topology.md) — not built yet.
+#
+# The central broker's owner creates the user homescope-<site>, allowed to
+# write homescope/<site>/#; its password reaches homescope as a secret:
+#
+#     sudo homescope secret set mqtt-gateway
+#
+# Copy to /etc/homescope/deploy.toml (`sudo ./deploy/deploy.sh init gateway`),
+# adjust, then run `sudo ./deploy/deploy.sh`.
+
+components = ["gateway"]
+site = "thor"
+
+[mqtt]
+host = "10.49.30.10"
+port = 1883
+gateway_user = "homescope-thor"

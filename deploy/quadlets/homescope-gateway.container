@@ -1,0 +1,32 @@
+# homescope-gateway — the `gateway` component.
+#
+# The generated drop-in (homescope-gateway.container.d/50-host.conf) sets the
+# image and, with a local broker, the dependency on it. SITE and the MQTT
+# host/port/user come from gateway.env, generated from deploy.toml.
+[Unit]
+Description=homescope gateway
+
+[Container]
+ContainerName=homescope-gateway
+Network=homescope.network
+GroupAdd=keep-groups
+AddDevice=/dev/homescope-receiver:/dev/homescope-receiver
+EnvironmentFile=%h/.config/homescope/gateway.env
+
+# This gateway's password on the MQTT broker — never an environment variable.
+# Generated for a local broker; for an external one, set by the operator:
+# `sudo homescope secret set mqtt-gateway`.
+Secret=homescope-mqtt-gateway,type=mount,target=mqtt-password,mode=0400
+Environment=MQTT_PASSWORD_PATH=/run/secrets/mqtt-password
+
+[Service]
+# The first start pulls the image inside the unit; systemd's default 90 s can
+# kill a large pull on a slow SD card.
+TimeoutStartSec=900
+# While the receiver is unplugged, creating the container fails; retry slowly.
+# Binding the unit to the device instead is planned (receiver-usb-link.md).
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

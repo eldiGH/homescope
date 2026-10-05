@@ -14,3 +14,4 @@ kek
 **/*.kek
 
 **/*.token
+__pycache__/

@@ -1,0 +1,50 @@
+# The central site: the API with its database and Grafana, publishing to an
+# MQTT broker that is not homescope's — typically one the house already runs
+# for other systems. This example is srv01 in the odin network: server plus a
+# gateway with the receiver attached, data on a separate disk, everything
+# behind a reverse proxy. Drop "gateway" if no receiver is attached here.
+#
+# The broker's owner creates the users and ACL lines (see
+# docs/design/deployment-topology.md); the passwords reach homescope as
+# secrets, never through this file:
+#
+#     sudo homescope secret set mqtt-api
+#     sudo homescope secret set mqtt-gateway
+#
+# Copy to /etc/homescope/deploy.toml (`sudo ./deploy/deploy.sh init server`),
+# adjust, then run `sudo ./deploy/deploy.sh --new-kek` — or, restoring a
+# previous installation, `--import-kek FILE`.
+
+components = ["api", "gateway"]
+site = "odin"
+data_dir = "/srv/homescope"
+
+[mqtt]
+# A broker on this same host: not its LAN address. Rootless containers share
+# the host's IP inside their own namespace, so that address leads back into
+# the container; host.containers.internal leads to the host.
+host = "host.containers.internal"
+port = 1883
+api_user = "homescope-api"
+gateway_user = "homescope-odin"
+
+[api]
+publish = "127.0.0.1:4001"
+db_publish = "127.0.0.1:5432"
+
+[grafana]
+# Loopback only: a reverse proxy serves it, and may embed it.
+publish = "127.0.0.1:4000"
+root_url = "https://grafana.odin.mari-code.pl/"
+allow_embedding = true
+# enabled = false   # when the host runs its own Grafana against db_publish
+
+[backup]
+# Nightly dump, before the host's own file backup picks it up.
+dir = "/srv/homescope/backups"
+on_calendar = "*-*-* 03:00"
+
+# [images]
+# Pin a build instead of following main:
+# api = "ghcr.io/eldigh/homescope-api:<git sha>"
+# gateway = "ghcr.io/eldigh/homescope-gateway:<git sha>"

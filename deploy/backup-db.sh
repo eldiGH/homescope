@@ -4,20 +4,29 @@
 # globals (roles) from the running container. The dump is a consistent MVCC
 # snapshot — the stack keeps running while it is taken.
 #
-#     sudo homescope backup                 on demand, e.g. before a migration
-#     homescope-backup-db --scheduled       the nightly timer (homescope-backup-db.timer)
+#     sudo homescope backup                     on demand, e.g. before a migration
+#     sudo homescope backup --snapshot DIR      for the host's own backup job
 #
-# On demand, each run writes a new timestamped, compressed pair and deletes
-# nothing. --scheduled writes stable names (homescope.dump, globals.sql),
-# replacing the previous night's: the host's file backup (restic of /srv on
-# srv01) keeps the history, and timestamped files would only pile up. It also
-# skips compression: a gzip stream changes from its first differing byte on and
+# Scheduling and keeping backups is the host's job, not homescope's: the host
+# already backs up its files on its own schedule, and a second, clock-coupled
+# schedule here could only race it. So homescope offers the one thing a file
+# backup cannot do itself — a consistent snapshot of a live database — and the
+# host's backup job calls it right before snapshotting its files:
+#
+#     homescope backup --snapshot /srv/.backup-staging/homescope
+#
+# --snapshot writes stable names (homescope.dump, globals.sql) into DIR,
+# replacing what is there: the host's backup keeps the history. It skips
+# compression: a gzip stream changes from its first differing byte on and
 # defeats restic's deduplication, while an uncompressed dump of an
 # append-mostly hypertable dedups almost completely — restic compresses itself.
+# A non-zero exit means no new snapshot; what that means for the rest of the
+# backup run is the host's decision.
 #
-# BACKUP_DIR comes from the environment (deploy.toml's backup.dir, set by the
-# timer's unit and by `homescope backup`), defaulting to
-# /var/lib/homescope/backups.
+# On demand, without --snapshot, each run writes a new timestamped, compressed
+# pair into BACKUP_DIR and deletes nothing. BACKUP_DIR comes from the
+# environment (`homescope backup` passes deploy.toml's backup.dir), defaulting
+# to /var/lib/homescope/backups.
 #
 # Restore — destroys the current homescope DB, so every step is manual on
 # purpose:
@@ -61,13 +70,19 @@ HOMESCOPE_USER="homescope"
 CONTAINER="homescope-db"
 DATABASE="homescope"
 BACKUP_DIR="${BACKUP_DIR:-/var/lib/homescope/backups}"
-SCHEDULED=false
+SNAPSHOT_DIR=""
 
 case "${1:-}" in
-	--scheduled) SCHEDULED=true ;;
+	--snapshot)
+		if [[ -z ${2:-} || $2 != /* ]]; then
+			echo "usage: $0 [--snapshot ABSOLUTE_DIR]" >&2
+			exit 2
+		fi
+		SNAPSHOT_DIR="$2"
+		;;
 	"") ;;
 	*)
-		echo "usage: $0 [--scheduled]" >&2
+		echo "usage: $0 [--snapshot ABSOLUTE_DIR]" >&2
 		exit 2
 		;;
 esac
@@ -100,20 +115,23 @@ cd /
 homescope_podman exec "$CONTAINER" pg_isready -U postgres > /dev/null \
 	|| die "Container $CONTAINER is not running or postgres is not ready"
 
-if $SCHEDULED; then
-	dump="$BACKUP_DIR/$DATABASE.dump"
-	globals="$BACKUP_DIR/globals.sql"
+if [[ -n $SNAPSHOT_DIR ]]; then
+	out_dir="$SNAPSHOT_DIR"
+	dump="$out_dir/$DATABASE.dump"
+	globals="$out_dir/globals.sql"
 	compression=(-Z0)
 else
+	out_dir="$BACKUP_DIR"
 	stamp="$(date +%Y%m%d-%H%M%S)"
-	dump="$BACKUP_DIR/$DATABASE-$stamp.dump"
-	globals="$BACKUP_DIR/globals-$stamp.sql"
+	dump="$out_dir/$DATABASE-$stamp.dump"
+	globals="$out_dir/globals-$stamp.sql"
 	compression=()
 fi
 
-# 700 + root-owned: the globals dump contains role password hashes.
-mkdir -p "$BACKUP_DIR"
-chmod 700 "$BACKUP_DIR"
+# Created 0700, root-owned, when missing: the globals dump holds role password
+# hashes. An existing directory is left as it is — with --snapshot it is the
+# host's, and its permissions are the host's decision.
+[[ -d $out_dir ]] || install -d -m 0700 -o root -g root "$out_dir"
 
 # Dumps land in .part files and are only renamed after validation, so an
 # interrupted or failed run can never leave a plausible-looking backup.

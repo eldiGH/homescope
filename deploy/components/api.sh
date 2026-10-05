@@ -91,59 +91,25 @@ setup_admin_token() {
 	fi
 }
 
-# The nightly dump, run by root from a root-owned copy: the staged deploy tree
-# belongs to the homescope user, and root executing a file that user can write
-# would let anything running as homescope — a container escape included —
-# choose what root runs every night.
-setup_backup_timer() {
+# The dump script, as a root-owned copy for `homescope backup`: the staged
+# deploy tree belongs to the homescope user, and root executing a file that
+# user can write would let anything running as homescope — a container escape
+# included — choose what root runs.
+#
+# No timer: scheduling and keeping backups is the host's job. Its backup run
+# calls `homescope backup --snapshot DIR` right before snapshotting files, so
+# the two cannot race (see backup-db.sh). A timer an earlier deploy installed
+# is removed.
+install_backup_tool() {
 	install -m 0755 -o root -g root "$SCRIPT_DIR/backup-db.sh" /usr/local/sbin/homescope-backup-db
 
-	local unit_dir=/etc/systemd/system changed=false
-	local service timer
-	service="$(
-		cat <<-EOF
-			# Written by homescope's deploy.sh from deploy.toml.
-			[Unit]
-			Description=homescope nightly database dump
-			RequiresMountsFor=$CFG_BACKUP_DIR
-
-			[Service]
-			Type=oneshot
-			Environment=BACKUP_DIR=$CFG_BACKUP_DIR
-			ExecStart=/usr/local/sbin/homescope-backup-db --scheduled
-			Nice=10
-			IOSchedulingClass=idle
-		EOF
-	)"
-	timer="$(
-		cat <<-EOF
-			# Written by homescope's deploy.sh from deploy.toml.
-			[Unit]
-			Description=homescope nightly database dump
-
-			[Timer]
-			OnCalendar=$CFG_BACKUP_ON_CALENDAR
-			# Catch up after the host was off at the scheduled time.
-			Persistent=true
-
-			[Install]
-			WantedBy=timers.target
-		EOF
-	)"
-
-	if [[ "$(cat "$unit_dir/homescope-backup-db.service" 2> /dev/null)" != "$service" ]]; then
-		printf '%s\n' "$service" > "$unit_dir/homescope-backup-db.service"
-		changed=true
-	fi
-	if [[ "$(cat "$unit_dir/homescope-backup-db.timer" 2> /dev/null)" != "$timer" ]]; then
-		printf '%s\n' "$timer" > "$unit_dir/homescope-backup-db.timer"
-		changed=true
-	fi
-	if $changed; then
-		log "Installing the nightly dump timer ($CFG_BACKUP_ON_CALENDAR → $CFG_BACKUP_DIR)"
+	local unit_dir=/etc/systemd/system
+	if [[ -e $unit_dir/homescope-backup-db.timer || -e $unit_dir/homescope-backup-db.service ]]; then
+		log "Removing the nightly dump timer (backups are scheduled by the host now)"
+		systemctl disable --now --quiet homescope-backup-db.timer 2> /dev/null || true
+		rm -f "$unit_dir/homescope-backup-db.timer" "$unit_dir/homescope-backup-db.service"
 		systemctl daemon-reload
 	fi
-	systemctl enable --now --quiet homescope-backup-db.timer
 }
 
 api_root() {
@@ -156,7 +122,7 @@ api_root() {
 
 	# 0700, root: the globals dump holds role password hashes.
 	install -d -m 0700 -o root -g root "$CFG_BACKUP_DIR"
-	setup_backup_timer
+	install_backup_tool
 }
 
 # The database passwords, generated once. Each lives in two files (db.env for

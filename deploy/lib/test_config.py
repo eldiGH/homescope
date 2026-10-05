@@ -86,6 +86,15 @@ class Strictness(unittest.TestCase):
     def test_bool_is_not_a_port(self):
         rejects(self, 'components = ["api"]\n[mqtt]\nhost = "b"\nport = true\n', "must be int")
 
+    def test_backup_scheduling_is_not_ours(self):
+        # Removed 2026-10-05: the host's backup job calls `homescope backup
+        # --snapshot DIR`. A leftover key must fail loudly, not look honoured.
+        rejects(
+            self,
+            'components = ["api"]\n[mqtt]\nhost = "b"\n[backup]\non_calendar = "daily"\n',
+            "on_calendar",
+        )
+
     def test_toml_syntax_error_is_reported(self):
         rejects(self, 'components = ["api"]\nsite = \n', "at line 2")
 

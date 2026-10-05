@@ -39,10 +39,15 @@ root_url = "https://grafana.odin.mari-code.pl/"
 allow_embedding = true
 # enabled = false   # when the host runs its own Grafana against db_publish
 
+# Backups are the host's job. Its backup run calls, right before it
+# snapshots files:
+#
+#     homescope backup --snapshot /srv/.backup-staging/homescope
+#
+# and excludes data_dir/timescaledb, the live database. This directory only
+# holds on-demand dumps (`sudo homescope backup`, e.g. before a migration).
 [backup]
-# Nightly dump, before the host's own file backup picks it up.
 dir = "/srv/homescope/backups"
-on_calendar = "*-*-* 03:00"
 
 # [images]
 # Pin a build instead of following main:

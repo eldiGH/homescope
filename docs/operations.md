@@ -29,7 +29,7 @@ git pull && sudo ./deploy/deploy.sh
 | `[mqtt]` | an external broker: `host`, `port`, `api_user`, `gateway_user` (omit with a local broker) |
 | `[api]` | `publish`, `db_publish` — loopback by default |
 | `[grafana]` | `enabled`, `publish`, `root_url`, `allow_embedding` |
-| `[backup]` | `dir` (default `<data_dir>/backups`), `on_calendar` (default `*-*-* 03:00`) |
+| `[backup]` | `dir` — where on-demand dumps go (default `<data_dir>/backups`). Scheduling backups is the host's job, see [Backup and restore](#backup-and-restore). |
 | `[images]` | `api`, `gateway` — default `ghcr.io/eldigh/homescope-*:latest`; pin a `:<git sha>` to stop following `main` |
 
 The file is validated strictly: an unknown key, a wrong type or a table for a
@@ -66,7 +66,7 @@ Without either flag it stops before touching anything that matters.
 | Generated env files, DB passwords | `/var/lib/homescope/.config/homescope/` |
 | Staged deploy tree | `/var/lib/homescope/deploy-src/` (what the last deploy shipped) |
 | Admin command | `/usr/local/bin/homescope`, helpers in `/usr/local/lib/homescope/` |
-| Nightly dump | `/etc/systemd/system/homescope-backup-db.{service,timer}` running `/usr/local/sbin/homescope-backup-db` |
+| Dump tool | `/usr/local/sbin/homescope-backup-db` (root-owned copy), behind `homescope backup` |
 | Data-disk dependency | `/etc/systemd/system/user@<uid>.service.d/homescope-data.conf` |
 | Receiver dongle | `/dev/homescope-receiver` (udev symlink, gateway hosts only) |
 
@@ -94,13 +94,13 @@ into its container layer instead of `data_dir`.
 ## The `homescope` command
 
 ```bash
-sudo homescope status                  # units, containers, the nightly dump
+sudo homescope status                  # units and containers
 sudo homescope logs api -f             # api, db, grafana, gateway, mqtt
 sudo homescope restart gateway         # start | stop | restart, or `all`
 sudo homescope psql                    # psql as postgres, in the database
 sudo homescope podman ps               # podman as the homescope user
 sudo homescope secret list             # set | show | rm <name>
-sudo homescope backup                  # on-demand dump
+sudo homescope backup                  # on-demand dump; --snapshot DIR for the host's backup job
 sudo homescope config                  # the effective deploy.toml
 ```
 
@@ -354,17 +354,34 @@ normally.
 
 ### Backup and restore
 
-- **Nightly**: `homescope-backup-db.timer` (`backup.on_calendar`, default 03:00)
-  writes `<backup.dir>/homescope.dump` and `globals.sql`, replacing the previous
-  night's. They are uncompressed on purpose, so a file-level backup with
-  deduplication (restic) stores only what changed; that backup holds the
-  history. Run it now with `sudo systemctl start homescope-backup-db.service`.
+**Scheduling and keeping backups is the host's job, not homescope's.** The host
+already backs up its files on its own schedule. A second schedule inside
+homescope could only race it, so homescope schedules nothing. It offers the one
+thing a file backup cannot do by itself: a consistent snapshot of a live
+database. The host's backup job calls it right before it snapshots files:
+
+```bash
+homescope backup --snapshot /srv/.backup-staging/homescope
+```
+
+- **`--snapshot DIR`** writes `homescope.dump` and `globals.sql` into `DIR`
+  (absolute path), replacing what is there. The host's backup holds the
+  history. The dump is uncompressed on purpose, so a deduplicating backup
+  (restic) stores only what changed. `DIR` is created `0700` if missing; an
+  existing one keeps its permissions. A non-zero exit means no new snapshot,
+  and what that means for the rest of the run is the host's call.
 - **On demand**, e.g. before a migration: `sudo homescope backup` writes a
-  timestamped, compressed pair and deletes nothing.
-- **For a file-level backup of the host**: include `<backup.dir>` and
-  `<data_dir>/grafana`; **exclude `<data_dir>/timescaledb`**, the live database,
+  timestamped, compressed pair into `backup.dir` and deletes nothing.
+- **What the host's file backup should cover:** the snapshot directory and
+  `<data_dir>/grafana`. **Exclude `<data_dir>/timescaledb`**, the live database,
   which a file copy can catch mid-write. The KEK lives in podman's secret store
-  under `/var/lib/homescope`, deliberately not under `data_dir`.
+  under `/var/lib/homescope`, deliberately not under `data_dir`, and is backed
+  up separately.
+
+A host without a backup system of its own can still get a nightly snapshot from
+a plain systemd timer whose service runs
+`/usr/local/bin/homescope backup --snapshot <dir>` — it then owns that timer
+like any other host job.
 
 Restore is deliberately manual. The full sequence — stop the API, drop and
 recreate the database, `timescaledb_pre_restore`, `pg_restore`,

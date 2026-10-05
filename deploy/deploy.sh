@@ -110,7 +110,7 @@ do_init() {
 
 preflight() {
 	local tool
-	for tool in podman rsync openssl udevadm loginctl runuser python3 systemd-analyze findmnt mountpoint awk sha256sum; do
+	for tool in podman rsync openssl udevadm loginctl runuser python3 findmnt mountpoint awk sha256sum; do
 		command -v "$tool" > /dev/null || die "Missing required tool: $tool"
 	done
 
@@ -121,13 +121,6 @@ preflight() {
 	podman_version="$(podman version --format '{{.Client.Version}}')"
 	if [[ "$(printf '%s\n' "$MIN_PODMAN_VERSION" "$podman_version" | sort -V | head -n1)" != "$MIN_PODMAN_VERSION" ]]; then
 		die "podman >= $MIN_PODMAN_VERSION required (quadlet drop-ins), found $podman_version"
-	fi
-}
-
-check_config_values() {
-	if $CFG_HAS_API; then
-		systemd-analyze calendar "$CFG_BACKUP_ON_CALENDAR" > /dev/null 2>&1 ||
-			die "$CONFIG_FILE: backup.on_calendar is not a systemd calendar expression: $CFG_BACKUP_ON_CALENDAR"
 	fi
 }
 
@@ -342,7 +335,6 @@ main() {
 
 	preflight
 	load_config "$CONFIG_FILE" "$SCRIPT_DIR/lib"
-	check_config_values
 	check_data_mounts
 
 	if $CHECK_ONLY; then

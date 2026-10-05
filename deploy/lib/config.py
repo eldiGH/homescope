@@ -35,7 +35,7 @@ TABLES = {
     "mqtt": (None, {"host", "port", "api_user", "gateway_user"}),
     "api": ("api", {"publish", "db_publish"}),
     "grafana": ("api", {"enabled", "publish", "root_url", "allow_embedding"}),
-    "backup": ("api", {"dir", "on_calendar"}),
+    "backup": ("api", {"dir"}),
     "images": (None, {"api", "gateway"}),
 }
 TOP_LEVEL = {"components", "site", "data_dir"}
@@ -62,7 +62,6 @@ class Config:
     grafana_root_url: str
     grafana_allow_embedding: bool
     backup_dir: str
-    backup_on_calendar: str
     image_api: str
     image_gateway: str
 
@@ -204,7 +203,6 @@ def load(path):
         grafana_root_url=_get(grafana, "root_url", str, "", "grafana."),
         grafana_allow_embedding=_get(grafana, "allow_embedding", bool, False, "grafana."),
         backup_dir=_absolute(_get(backup, "dir", str, f"{data_dir}/backups", "backup."), "backup.dir"),
-        backup_on_calendar=_get(backup, "on_calendar", str, "*-*-* 03:00", "backup."),
         image_api=_image(_get(images, "api", str, DEFAULT_IMAGES["api"], "images."), "images.api"),
         image_gateway=_image(
             _get(images, "gateway", str, DEFAULT_IMAGES["gateway"], "images."), "images.gateway"

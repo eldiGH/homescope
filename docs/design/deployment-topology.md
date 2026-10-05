@@ -26,14 +26,16 @@
 > - **A fail-closed first KEK** (`--new-kek` / `--import-kek`).
 > - **Broker auth:** external-broker passwords as operator-set secrets; the
 >   local broker authenticated with a generated password file and ACL.
-> - **The nightly dump timer.**
+> - **A database snapshot for the host's backup job** (`homescope backup
+>   --snapshot DIR`). The nightly timer built first was removed the same day:
+>   scheduling backups is the host's job.
 > - **The `homescope` admin command.**
 >
 > Verified in a throwaway Debian 13 VM (Podman 5.4.2, srv01's version):
 > - all-in-one, then a switch to the server shape against a rootful
 >   host-network broker standing in for asgard's;
 > - thor's dump restored and migrated;
-> - the nightly dump;
+> - the database snapshot;
 > - data on a separate `nofail` disk, including a boot without it;
 > - deselecting a component;
 > - every KEK guard.
@@ -271,7 +273,6 @@ GRAFANA_PUBLISH=127.0.0.1:4000
 GRAFANA_ROOT_URL=https://grafana.odin.mari-code.pl/
 GRAFANA_ALLOW_EMBEDDING=true
 BACKUP_DIR=/srv/homescope/backups
-BACKUP_ON_CALENDAR="*-*-* 03:00"
 ```
 
 ```sh
@@ -570,6 +571,18 @@ Sequence:
 ✅ *Built 2026-10-05 as described. The archive check streamed the dump into
 `pg_restore --list` through `podman exec -i`, and that failed once dumps
 outgrew a pipe buffer, so it now drains stdin.*
+
+⚠️ *Revised later on 2026-10-05, at the owner's request: no timer.* Scheduling
+and keeping backups belongs to the host. The 03:00-before-03:30 arrangement
+below coupled two schedules by the clock: a moved schedule, a slow dump, or
+both `Persistent=` timers catching up together at boot could all make them
+race. The host's backup job now calls `homescope backup --snapshot DIR` right
+before it snapshots files, the way asgard's `srv-backup.sh` already snapshots
+Home Assistant's SQLite into its staging directory. Ordering is then
+guaranteed, and retention and failure handling stay in one place. `--snapshot`
+keeps the stable names and `-Z0`. The root-owned copy stays too, because
+`homescope backup` runs it as root. A timer an earlier deploy installed is
+removed. The text below is kept as written.
 
 *Added 2026-10-05.*
 

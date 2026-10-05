@@ -5,7 +5,7 @@
 #
 # usage: sudo homescope <command> [args]
 #
-#   status                         units, containers and the nightly dump
+#   status                         units and containers
 #   logs <component> [journalctl args]   e.g. logs api -f, logs gateway -n 50
 #   start|stop|restart <component|all>
 #   psql [psql args]               psql in the database, as postgres
@@ -14,7 +14,9 @@
 #   secret set <name>              from stdin, or a prompt on a terminal
 #   secret show <name>             print one (backing up the KEK, reading the admin token)
 #   secret rm <name>
-#   backup                         an on-demand database dump
+#   backup                         an on-demand, timestamped database dump
+#   backup --snapshot DIR          stable, uncompressed dump into DIR, for the
+#                                  host's backup job to call before it runs
 #   config                         the effective /etc/homescope/deploy.toml
 #
 # Components: api, db, grafana, gateway, mqtt. Secrets: kek, admin-token,
@@ -73,8 +75,6 @@ cmd_status() {
 	as_user_systemctl list-units --all --no-pager 'homescope-*'
 	echo
 	homescope_podman ps --all --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-	echo
-	systemctl list-timers --all --no-pager homescope-backup-db.timer 2> /dev/null || true
 	local failed
 	failed="$(as_user_systemctl --failed --no-legend --plain | awk '{print $1}')"
 	if [[ -n $failed ]]; then
@@ -191,12 +191,14 @@ cmd_secret() {
 	esac
 }
 
+# The host's backup job calls `homescope backup --snapshot DIR`; see
+# backup-db.sh for why scheduling is the host's and not homescope's.
 cmd_backup() {
 	local CFG_BACKUP_DIR=/var/lib/homescope/backups
 	if [[ -r $DEFAULT_CONFIG_FILE ]]; then
 		load_config "$DEFAULT_CONFIG_FILE" "$LIB_DIR"
 	fi
-	BACKUP_DIR="$CFG_BACKUP_DIR" /usr/local/sbin/homescope-backup-db
+	BACKUP_DIR="$CFG_BACKUP_DIR" /usr/local/sbin/homescope-backup-db "$@"
 }
 
 main() {
@@ -216,7 +218,7 @@ main() {
 		psql) cmd_psql "$@" ;;
 		podman) homescope_podman "$@" ;;
 		secret) cmd_secret "$@" ;;
-		backup) cmd_backup ;;
+		backup) cmd_backup "$@" ;;
 		config) python3 "$LIB_DIR/config.py" --show "$DEFAULT_CONFIG_FILE" ;;
 		*) die "unknown command: $command (see: homescope help)" ;;
 	esac

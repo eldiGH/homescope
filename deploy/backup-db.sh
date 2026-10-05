@@ -18,9 +18,11 @@
 #        podman exec homescope-db psql -U postgres -c 'DROP DATABASE homescope WITH (FORCE)'
 #        podman exec homescope-db psql -U postgres -c 'CREATE DATABASE homescope OWNER api'
 #   3. Prepare timescaledb (extension version must match the one the dump
-#      was taken with — keep the same container image):
-#        podman exec homescope-db psql -U postgres -d homescope \
-#            -c 'CREATE EXTENSION timescaledb' -c 'SELECT timescaledb_pre_restore()'
+#      was taken with — keep the same container image). IF NOT EXISTS because
+#      the image installs the extension into template1, so step 2's database
+#      already has it:
+#        podman exec homescope-db psql -U postgres -d homescope -v ON_ERROR_STOP=1 \
+#            -c 'CREATE EXTENSION IF NOT EXISTS timescaledb' -c 'SELECT timescaledb_pre_restore()'
 #   4. Restore the dump:
 #        podman exec -i homescope-db pg_restore -U postgres -d homescope < <file>.dump
 #   5. Finish timescaledb bookkeeping:

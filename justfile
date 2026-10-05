@@ -54,6 +54,45 @@ db-seed: deps-db
 db-clear: deps-db
     podman compose -f compose.dev.yml exec -T homescope-db psql -U postgres -d homescope -v ON_ERROR_STOP=1 -c 'TRUNCATE readings, devices RESTART IDENTITY'
 
+# Replace the dev DB with a pg_dump archive, e.g. a production backup. Rehearse
+# a deploy afterwards with `RUN_MIGRATIONS=true just api`.
+[confirm("This DROPS the dev database and replaces it with the dump. Continue?")]
+db-restore dump: deps-db
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dump="$(cd "{{invocation_directory()}}" && realpath -e "{{dump}}")"
+    db="podman compose -f compose.dev.yml exec -T homescope-db"
+
+    # Copied in, never streamed through `exec` stdin: pg_restore --list reads
+    # only the TOC and exits, podman then fails writing the rest of the file
+    # into a closed pipe and reports exit 1 although pg_restore succeeded.
+    container="$(podman compose -f compose.dev.yml ps -q homescope-db)"
+    in_container=/tmp/db-restore.dump
+    podman cp "$dump" "$container:$in_container"
+    trap '$db rm -f "$in_container"' EXIT
+
+    # Validate before dropping anything.
+    $db pg_restore --list "$in_container" > /dev/null
+
+    $db psql -U postgres -qv ON_ERROR_STOP=1 \
+        -c 'DROP DATABASE IF EXISTS homescope WITH (FORCE)' -c 'CREATE DATABASE homescope'
+
+    # IF NOT EXISTS: the timescaledb image installs the extension into template1,
+    # so CREATE DATABASE already carries it. Without it, ON_ERROR_STOP aborts
+    # before pre_restore runs, and pg_restore then fails on the hypertable FKs.
+    # A failure from here on leaves the DB in restoring mode; rerun the recipe.
+    $db psql -U postgres -d homescope -qtAv ON_ERROR_STOP=1 \
+        -c 'CREATE EXTENSION IF NOT EXISTS timescaledb' -c 'SELECT timescaledb_pre_restore()' > /dev/null
+
+    # --no-owner/--no-privileges: dev has no api/grafana roles; everything here
+    # belongs to postgres. Production keeps both (backup-db.sh).
+    $db pg_restore -U postgres -d homescope --no-owner --no-privileges "$in_container"
+
+    $db psql -U postgres -d homescope -qtAv ON_ERROR_STOP=1 -c 'SELECT timescaledb_post_restore()' > /dev/null
+
+    echo "Restored $dump. Migration history:"
+    $db psql -U postgres -d homescope -c 'SELECT version, description FROM _sqlx_migrations ORDER BY version'
+
 [private]
 deps-grafana:
     podman compose -f compose.dev.yml up -d --wait grafana

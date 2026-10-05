@@ -1,0 +1,14 @@
+# Dev broker ACL: the rules a production broker gets for homescope (see
+# docs/design/deployment-topology.md, "Topics and ACL on the central broker"),
+# with the site `dev` standing in for a real one. Keeping them identical is the
+# point: a topic that drifts from these rules fails here, in dev, as an API
+# that receives nothing, instead of first failing on a production broker that
+# does not log ACL denials.
+#
+# No rule = no access. Mosquitto reloads this file only on restart or SIGHUP.
+
+user homescope-api
+topic read homescope/+/sensors/+/envelope
+
+user homescope-dev
+topic write homescope/dev/#

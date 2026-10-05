@@ -10,9 +10,13 @@ services:
 
     volumes:
       - "./deploy/mosquitto/mosquitto.dev.conf:/mosquitto/config/mosquitto.conf:ro"
+      - "./deploy/mosquitto/dev:/mosquitto/config/dev:ro"
 
+    # A publish rather than the usual `$SYS` subscription: the broker refuses
+    # anonymous clients and the production ACL grants nobody `$SYS`. Connecting
+    # proves the broker is up and that logins work.
     healthcheck:
-      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3"]
+      test: ["CMD-SHELL", "mosquitto_pub -u homescope-dev -P \"$$(cat /mosquitto/config/dev/homescope-dev.password)\" -t homescope/dev/healthcheck -n"]
       interval: 5s
       timeout: 3s
       retries: 5

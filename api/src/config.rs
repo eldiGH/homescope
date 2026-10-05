@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use homescope_host_util::env::{env_var, env_var_or};
+use homescope_host_util::{
+    env::{env_var, env_var_or},
+    mqtt::MqttConfig,
+};
 
 pub struct ApiConfig {
     pub db_user: String,
@@ -10,8 +13,7 @@ pub struct ApiConfig {
     pub db_port: u16,
     pub db_pool_max_connections: u32,
     pub run_migrations: bool,
-    pub mqtt_host: String,
-    pub mqtt_port: u16,
+    pub mqtt: MqttConfig,
     pub kek_path: PathBuf,
     pub http_bind: String,
     pub admin_token_path: PathBuf,
@@ -27,8 +29,10 @@ impl ApiConfig {
             db_port: env_var_or("DB_PORT", 5432)?,
             db_pool_max_connections: env_var_or("DB_POOL_MAX_CONNECTIONS", 10)?,
             run_migrations: env_var_or("RUN_MIGRATIONS", false)?,
-            mqtt_host: env_var("MQTT_HOST")?,
-            mqtt_port: env_var_or("MQTT_PORT", 1883)?,
+            // `homescope-api`, not the `api` used before 2026-10: the client id
+            // keys the durable session, so a rename orphans whatever the broker
+            // queued under the old one. It was free while no broker held one.
+            mqtt: MqttConfig::from_env("homescope-api".to_owned())?,
             kek_path: env_var("KEK_PATH")?,
             http_bind: env_var("HTTP_BIND")?,
             admin_token_path: env_var("ADMIN_TOKEN_PATH")?,

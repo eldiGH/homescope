@@ -10,9 +10,9 @@
 
 ## Done
 
-- **Gateway configuration from the environment** — `MQTT_HOST`, `MQTT_PORT`
-  and `RECEIVER_PATH` (default `/dev/homescope-receiver`), read in
-  `gateway/src/config.rs`. The quadlet sets `MQTT_HOST`.
+- **Gateway configuration from the environment** — `SITE`, `RECEIVER_PATH`
+  (default `/dev/homescope-receiver`) and the shared MQTT settings
+  (`host_util::mqtt`), read in `gateway/src/config.rs`.
 - **A stable name for the dongle** — `deploy/udev/99-homescope-receiver.rules`,
   installed by `deploy.sh`'s `setup_udev_rule`, links `/dev/homescope-receiver`
   to whichever `ttyACM<n>` the dongle enumerated as. It matches VID/PID plus the

@@ -12,9 +12,10 @@
 //!   CRC). Pulls `crc` and `memchr`. Sensor, receiver and gateway need it; a
 //!   consumer that only speaks JSON does not.
 //! - **`serde`** — `Serialize`/`Deserialize` for the shared types, plus the
-//!   `reading` and `observation_envelope` DTOs. Pulls `serde`, `chrono` and
-//!   `base64`, and turns on `alloc`. Host-side in practice, but it still
-//!   builds for `thumbv7em-none-eabi`.
+//!   `reading` and `observation_envelope` DTOs, and the MQTT addressing that
+//!   goes with the envelope: `site` and `envelope_topic`. Pulls `serde`,
+//!   `chrono` and `base64`, and turns on `alloc`. Host-side in practice, but it
+//!   still builds for `thumbv7em-none-eabi`.
 //! - **`defmt`** — `defmt::Format` for the shared types, so firmware can log
 //!   them over RTT. Pulls `defmt`.
 //!
@@ -49,6 +50,15 @@ pub mod frame;
 
 #[cfg(feature = "serde")]
 pub mod observation_envelope;
+
+// Not serde types; they sit behind `serde` because that is the feature that
+// brings `alloc` (a `Site` owns its string) and the one both the gateway and
+// the API, the topic's only users, already enable.
+#[cfg(feature = "serde")]
+pub mod site;
+
+#[cfg(feature = "serde")]
+pub mod envelope_topic;
 
 // `reading` decodes an envelope end to end, so it needs all three: `serde` for
 // the envelope, `codec` for `packet`, `crypto` to open it. Gating it on `serde`

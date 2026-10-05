@@ -420,7 +420,11 @@ changes, which the owner writes:
   verified that. The API logs "Subscribed to sensors" once the *request* is
   queued, so a denied subscription looks healthy forever. rumqttc surfaces
   `Packet::SubAck` with per-topic return codes, and a failure code there should
-  be an error.
+  be an error. ⚠️ *Built, then corrected 2026-10-05:* on Mosquitto 2.0.22 a
+  missing **read** rule does not fail the SUBACK. `acl_file` grants the
+  subscription and drops every delivery, so the check catches only QoS
+  downgrades and brokers or plugins that do refuse. The real guard for a
+  missing rule is the dev broker carrying the production ACL.
 - **Optional: MQTT v5** (`rumqttc::v5`). Under 3.1.1 a QoS 1 publish that the
   ACL denies is still PUBACKed, so the gateway cannot see the denial. Under v5
   the PUBACK carries "Not authorized". That makes ACL mistakes visible in the

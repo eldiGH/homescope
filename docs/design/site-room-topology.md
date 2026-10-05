@@ -9,7 +9,10 @@
 > ⚠️ **Revised 2026-10-05.** The data model is now `sites`, `rooms` and
 > `device_placements` tables (placement history) rather than columns on
 > `devices`. The topic prefix stays, re-argued for a world with AEAD. The
-> schema and the prefix are now independent pieces of work. See
+> schema and the prefix are now independent pieces of work. ✅ Both landed
+> 2026-10-05: the schema in migration `20261005101457`, the prefix in
+> `common/src/envelope_topic.rs` (gateway `SITE`, API wildcard subscription,
+> topic parsed into site + device address). See
 > [Revised 2026-10-05](#revised-2026-10-05-sites-rooms-placement-history).
 
 Deployment picture: **two houses on a VPN**, one central Mosquitto broker and a

@@ -1,6 +1,17 @@
 # Mosquitto auth + per-gateway ACLs
 
-> **Status: ⏳ planned — not started.** Checked 2026-09-13: both
+> **Status: 🔶 partly done (2026-10-05).** Both clients authenticate
+> (`host_util::mqtt`: username plus a password read from a file), and the dev
+> broker refuses anonymous clients and enforces the production ACL
+> (`deploy/mosquitto/dev/`). The production broker on srv01 is asgard's, so its
+> users and ACL lines are handed over rather than shipped. The broker that
+> homescope's own `broker` component runs is still anonymous — the deploy
+> rework settles it. Users are named `homescope-api` and `homescope-<site>`,
+> not as below. ⚠️ Verified on 2.0.22: a missing **read** rule does not refuse
+> the subscription. It is granted and every delivery is then dropped, so no
+> client-side check can see it.
+>
+> Original status: Checked 2026-09-13: both
 > `deploy/mosquitto/mosquitto.conf` and `mosquitto.dev.conf` still set
 > `allow_anonymous true`. Written 2026-07-14, against the plan of two houses on
 > a VPN, each with its own gateway Pi, publishing to one central broker consumed
@@ -74,7 +85,9 @@ Depends on the site topic prefix, `homescope/<site>/sensors/<device-addr>/envelo
 - ACL and password-file changes need a `SIGHUP` or a restart.
 - The API's durable session (`clean_session=false`) is keyed by client id —
   keep the client id `api` stable when adding credentials, or the broker starts
-  a fresh session and orphans the queued messages.
+  a fresh session and orphans the queued messages. ⚠️ *2026-10-05:* renamed to
+  `homescope-api` anyway, at the one moment it was free — the move to a new
+  broker, which held no session to orphan.
 - TLS is *optional* here, since the VPN already encrypts transport; auth is not.
   If the broker ever listens outside the VPN, revisit: TLS becomes mandatory, and
   `require_certificate` with per-client certificates is the next rung.

@@ -1,6 +1,7 @@
 use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 
 pub mod env;
+pub mod mqtt;
 
 pub fn init() {
     dotenvy::dotenv().ok();

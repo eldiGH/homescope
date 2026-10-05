@@ -439,15 +439,23 @@ the default, and there is no command to change it afterwards — edit
 
 ## MQTT
 
-Not published; debug from inside the container.
+Not published; debug from inside the container. The broker authenticates
+(since 2026-10-05), so subscribe as a user with read access — the API's:
 
 ```bash
-hpodman exec -it homescope-mqtt mosquitto_sub -t 'homescope/#' -v      # everything
-hpodman exec -it homescope-mqtt mosquitto_sub -t 'homescope/sensors/+/envelope' -v
+hpodman exec -it homescope-mqtt mosquitto_sub -u homescope-api -P '…' \
+    -t 'homescope/+/sensors/+/envelope' -v
 ```
 
-The topic segment is the device address in 12 hex — a live way to learn a
-board's AdvA without a probe. Traffic here means the receiver and gateway are
+`homescope/#` shows only what that user's ACL lets it read. ⚠️ An ACL
+denial is **silent** on Mosquitto: a denied publish is acknowledged and
+dropped, and a denied subscription is granted and then receives nothing. To
+see a publish refusal, publish as MQTT v5: `mosquitto_pub -V 5 -q 1 -u … -t …`
+prints `Not authorized`.
+
+Topics are `homescope/<site>/sensors/<device-addr>/envelope`. The site level
+is the publishing gateway's `SITE`; the address level is the device address in
+12 hex — a live way to learn a board's AdvA without a probe. Traffic here means the receiver and gateway are
 healthy, regardless of what the API is doing.
 
 ## Receiver and gateway

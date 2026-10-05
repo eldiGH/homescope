@@ -65,7 +65,7 @@ just dev        # zellij workspace with the whole stack
 just fmt        # rustfmt across BOTH workspaces (see below)
 ```
 
-Both services are configured via env vars (`MQTT_HOST`, `MQTT_PORT`; gateway: `RECEIVER_PATH`, default `/dev/homescope-receiver`; api: `DB_*`, `RUN_MIGRATIONS`), loaded from per-crate `.env` / `.env.default` files by `host-util`'s `init()`.
+Both services are configured via env vars (`MQTT_HOST`, `MQTT_PORT`, optional `MQTT_USERNAME` + `MQTT_PASSWORD_PATH`, `MQTT_CLIENT_ID`; gateway: `SITE` (required), `RECEIVER_PATH`, default `/dev/homescope-receiver`; api: `DB_*`, `RUN_MIGRATIONS`), loaded from per-crate `.env` / `.env.default` files by `host-util`'s `init()`.
 
 Two footguns worth knowing, both from tooling that resolves paths relative to the *current directory*:
 
@@ -92,7 +92,7 @@ Variable-length, content-agnostic frames over USB-CDC (protocol v0.6, 6 + N byte
 
 CRC is CRC-16/IBM-SDLC over len + payload. The payload is a `SensorObservation` — receiver-observed metadata (advertising address, age, RSSI) plus the over-the-air `SensorPacket` forwarded **opaquely**: `[ver: u8][seq: u32][sealed TV section][tag: 16]`, the TV encoding whose ID registry lives in `common`. Both ends share the codec via `common` (`frame::encode`/`frame::parse` + an `Encode` trait for payloads). The TV section is AEAD-sealed on the sensor and opened in the API, so the gateway forwards ciphertext it holds no key for. See [docs/protocol.md](docs/protocol.md) for the full spec.
 
-The gateway republishes each observation as an opaque JSON envelope on MQTT (`homescope/sensors/<device-addr>/envelope`): cleartext `deviceAddr`/`rssi`/`receivedAt` plus the air packet as base64, decoded only by the API.
+The gateway republishes each observation as an opaque JSON envelope on MQTT (`homescope/<site>/sensors/<device-addr>/envelope`): cleartext `deviceAddr`/`rssi`/`receivedAt` plus the air packet as base64, decoded only by the API.
 
 **Air-packet header (v0.6, landed 2026-07-29)**: the air packet carries a `[magic b"HP"][ver: u8]` header in front of `seq`. The magic is air-side only — the receiver checks it, drops foreign `0xFFFF` traffic before it can evict real sensors from the 32-entry dedup cache, and strips it — while `ver` travels downstream for the API to dispatch on. The dongle deliberately never reads `ver`, so a protocol bump never means reflashing it, and a node left on old firmware stays visible instead of vanishing. See [docs/protocol.md](docs/protocol.md#air-packet-magic--version-header).
 

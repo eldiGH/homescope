@@ -3,15 +3,18 @@ use std::time::Duration;
 use anyhow::{Context as _, bail};
 use chrono::Utc;
 use futures::StreamExt;
-use homescope_common::{observation::SensorObservation, observation_envelope::ObservationEnvelope};
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
+use homescope_common::{
+    envelope_topic::EnvelopeTopic, observation::SensorObservation,
+    observation_envelope::ObservationEnvelope, site::Site,
+};
+use rumqttc::{AsyncClient, Event, EventLoop, Packet, QoS};
 use serial2_tokio::SerialPort;
 use tokio::{
     sync::mpsc::{Receiver, channel},
     time::sleep,
 };
 use tokio_util::codec::FramedRead;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{config::GatewayConfig, decoder::FrameDecoder};
 
@@ -20,9 +23,16 @@ mod decoder;
 
 async fn mqtt_task(mut event_loop: EventLoop) {
     loop {
-        if let Err(err) = event_loop.poll().await {
-            error!("mqtt err: {err}");
-            sleep(Duration::from_secs(1)).await;
+        match event_loop.poll().await {
+            // Bad credentials surface here as `ConnectionRefused(NotAuthorized)`.
+            Err(err) => {
+                error!("mqtt err: {err}");
+                sleep(Duration::from_secs(1)).await;
+            }
+
+            Ok(Event::Incoming(Packet::ConnAck(_))) => info!("connected to the MQTT broker"),
+
+            Ok(_) => {}
         }
     }
 }
@@ -30,19 +40,18 @@ async fn mqtt_task(mut event_loop: EventLoop) {
 async fn mqtt_envelope_sender(
     mut envelope_receiver: Receiver<ObservationEnvelope>,
     mqtt_client: AsyncClient,
+    site: Site,
 ) {
     while let Some(envelope) = envelope_receiver.recv().await {
+        let topic = EnvelopeTopic {
+            site: site.clone(),
+            device_addr: envelope.device_addr,
+        };
+
         match serde_json::to_vec(&envelope) {
             Ok(bytes) => {
                 if let Err(err) = mqtt_client
-                    .publish(
-                        // TODO: prefix with this gateway's SITE — see
-                        // docs/design/site-room-topology.md.
-                        format!("homescope/sensors/{}/envelope", envelope.device_addr),
-                        QoS::AtLeastOnce,
-                        false,
-                        bytes,
-                    )
+                    .publish(topic.to_string(), QoS::AtLeastOnce, false, bytes)
                     .await
                 {
                     error!("mqtt publish error: {err}")
@@ -61,13 +70,20 @@ async fn main() -> anyhow::Result<()> {
     homescope_host_util::init();
     let config = GatewayConfig::from_env()?;
 
-    let mqtt_options = MqttOptions::new("gateway", &config.mqtt_host, config.mqtt_port);
-    let (client, event_loop) = AsyncClient::new(mqtt_options, 128);
+    info!(
+        site = %config.site,
+        client_id = %config.mqtt.client_id,
+        "publishing to {}:{}",
+        config.mqtt.host,
+        config.mqtt.port
+    );
+
+    let (client, event_loop) = AsyncClient::new(config.mqtt.options(), 128);
 
     let (envelope_sender, envelope_receiver) = channel::<ObservationEnvelope>(1024);
 
     tokio::spawn(mqtt_task(event_loop));
-    tokio::spawn(mqtt_envelope_sender(envelope_receiver, client));
+    tokio::spawn(mqtt_envelope_sender(envelope_receiver, client, config.site));
 
     let port = SerialPort::open(&config.receiver_path, 115200)
         .with_context(|| format!("opening {}", &config.receiver_path))?;

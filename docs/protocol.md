@@ -303,7 +303,12 @@ dropped and the loop continues with the next frame (this symptom means the
 receiver and gateway disagree about the protocol version).
 
 Each observation is republished as an **opaque JSON envelope** on
-`homescope/sensors/<device-addr>/envelope` (QoS 1): the receiver-observed
+`homescope/<site>/sensors/<device-addr>/envelope` (QoS 1), where `<site>` is
+the publishing gateway's `SITE` (one topic level, `[a-z0-9-]+`) and
+`<device-addr>` is 12 uppercase hex digits. The topic is defined once, in
+`common/src/envelope_topic.rs`: the gateway builds it, the API parses it, and a
+golden test pins it. The API rejects a publish whose topic and envelope name
+different devices. The envelope carries the receiver-observed
 metadata in cleartext, the air packet forwarded byte-for-byte as base64
 (`ObservationEnvelope` in `common/src/observation_envelope.rs`, camelCase):
 
@@ -323,7 +328,7 @@ happens in the API.
 
 ### API side (implemented 2026-07-28)
 
-`homescope-api` subscribes to `homescope/sensors/+/envelope` and turns each
+`homescope-api` subscribes to `homescope/+/sensors/+/envelope` and turns each
 envelope into a row:
 
 1. Resolve `deviceAddr` against the `DeviceRegistry`. Unknown ⇒ warn-once and

@@ -237,10 +237,19 @@ check-sqlx:
     SQLX_OFFLINE=true cargo check -p homescope-api --all-targets
 
 # The deploy scripts: shellcheck, plus the deploy.toml parser's tests. Neither
-# says whether a deploy works — that needs a real host (a throwaway VM).
+# says whether a deploy works — that is test-deploy-vm.
+[doc("Lint the deploy scripts and test the deploy.toml parser")]
 check-deploy:
-    shellcheck -x -s bash -e SC1090,SC1091,SC2034 deploy/deploy.sh deploy/homescope deploy/backup-db.sh deploy/lib/*.sh deploy/components/*.sh
+    shellcheck -x -s bash -e SC1090,SC1091,SC2034 deploy/deploy.sh deploy/homescope deploy/backup-db.sh deploy/lib/*.sh deploy/components/*.sh deploy/test/vm.sh
     python3 -m unittest discover -s deploy/lib
+
+# The deploy, end to end, on a throwaway Debian 13 VM (QEMU + KVM): first deploy,
+# password prompts and flags, KEK guards, backup/restore, a separate data disk,
+# all-in-one, deselecting components. Builds api/gateway from this working tree.
+# ~6 min warm. Flags: --fast (skip reboots), --keep (leave the VM up), --dump FILE.
+[doc("End-to-end deploy test on a throwaway VM")]
+test-deploy-vm *args:
+    bash deploy/test/vm.sh {{args}}
 
 # Regenerate api/.sqlx after changing a query (needs a migrated dev DB)
 [working-directory('api')]

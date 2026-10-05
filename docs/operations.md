@@ -77,6 +77,38 @@ When the containers are up, the deploy checks that the API, and a running
 gateway, **logged in to the broker**. A refused login is reported with the
 fix, not left to be discovered as missing readings.
 
+## Testing a change to the deploy
+
+`just check-deploy` lints the scripts and tests the config parser in seconds.
+Neither says whether a deploy *works*, so before a deploy change goes near a
+real host, run it end to end on a throwaway VM:
+
+```bash
+just test-deploy-vm                 # ~6 min warm (first run: image download + builds); --fast skips the reboots
+just test-deploy-vm --keep          # leave the VM up to poke at afterwards
+just test-deploy-vm --dump <file>   # also restore a real backup, e.g. a production dump
+```
+
+It boots a fresh Debian 13 VM (QEMU + KVM, Podman 5.4 — srv01's version),
+builds `homescope-api` and `homescope-gateway` from your working tree, stands
+up an external broker the way srv01 has one (rootful, host network, per-user
+ACL), and runs these scenarios in order, asserting on output and exit codes:
+
+1. `init` and `--check`;
+2. a first deploy without a terminal (the banner);
+3. the password prompts, then the MQTT login check;
+4. the password flags (wrong, right, unchanged);
+5. the KEK guards;
+6. backup, snapshot and restore;
+7. data on a separate `nofail` disk;
+8. a boot without that disk;
+9. all-in-one with the local broker and its ACL;
+10. deselecting components;
+11. an idempotent rerun.
+
+The Debian image is cached under `~/.cache/homescope/vm`, together with the
+last run's full log (`last-run.log`); everything else is deleted at the end.
+
 ## Machine layout
 
 | What | Where |

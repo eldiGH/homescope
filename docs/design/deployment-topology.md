@@ -207,19 +207,32 @@ The owner's refinements:
   carries the address (and username), and the password is required separately,
   as a podman secret. Deploy fails closed when the file names an external broker
   and the secret is missing.
-- **Validation rules.** Grafana requires the database, because the database is
-  not exposed and Grafana reads it directly. The API requires the database.
-  Either `db` stays a component that `api` requires, or `db` folds into `api` as
-  one component. Still open; folding is recommended, because it makes an invalid
-  combination impossible to write instead of an error to report. No host runs
-  one without the other, and a remote database would be a new `DB_HOST` key
-  anyway. The API and the gateway require a broker. That is either the owned
-  `broker` component, or an external broker address plus its credentials
-  secret.
+- **Three components: `broker`, `api` and `gateway`.** `api` brings its
+  TimescaleDB and its Grafana with it. A database without the API stays empty,
+  because the API is the only writer. Grafana reads that database directly, and
+  the database is not exposed. Folding them together means invalid combinations
+  cannot even be written, instead of being errors deploy has to report. A remote
+  database would be a new `DB_HOST` key, not a component. ✅ *Accepted:* one
+  off-switch inside `api`, `GRAFANA=none`, for a host that runs its own Grafana
+  (asgard plans one for all of odin). That Grafana then reads the database
+  through its loopback port, as the existing read-only `grafana` role.
+- **Every broker may be external.** `api` and `gateway` each require a broker:
+  either the `broker` component, or an external address in the file plus its
+  credentials secret. Homescope does not need to manage any broker, but **ACLs
+  are strongly advised** on an external one.
+- **Recommended topology:** one central broker for the API, plus a broker per
+  remote site that bridges to it and spools across link outages. At the central
+  site the central broker is already local, so its gateway publishes to it
+  directly. A single broker with every site's gateway publishing to it straight
+  over the VPN is a valid setup, but not recommended: a link outage then loses
+  readings for good (see [Why spool at the edge](#why-spool-at-the-edge-and-why-by-default)).
+  When homescope's own `broker` *is* the central one, it must accept remote
+  bridges. That takes a published listener, plus a user and ACL lines for each
+  site, generated from the file.
 
 ```sh
 # srv01 (odin) — the server role plus a direct gateway, external broker
-COMPONENTS="db api grafana gateway"
+COMPONENTS="api gateway"
 SITE=odin
 DATA_DIR=/srv/homescope
 MQTT_HOST=host.containers.internal     # not the host's own IP, see below
@@ -242,7 +255,7 @@ BRIDGE_USER=homescope-thor
 
 ```sh
 # all-in-one
-COMPONENTS="broker db api grafana gateway"
+COMPONENTS="broker api gateway"
 SITE=home
 ```
 
@@ -285,9 +298,9 @@ homescope stays generic.
 - **Parse the config strictly; never `source` it.** Accept `KEY=value` lines and
   a known key list, and `die` on an unknown key. A typo like `COMPONENT=` that
   is silently ignored is exactly the drift a converge script exists to prevent.
-- **Validate combinations up front** (the rules above). `api` and `grafana` require `db`. `api`
-  and `gateway` require a broker, either the `broker` component or `MQTT_HOST`.
-  `BRIDGE_*` requires `broker`. `gateway` requires `SITE`.
+- **Validate combinations up front** (the rules above). `api` and `gateway`
+  require a broker: either the `broker` component, or `MQTT_HOST` plus its
+  credentials secret. `BRIDGE_*` requires `broker`. `gateway` requires `SITE`.
 - **Host values reach containers two ways, chosen by who reads them.** What
   the *application* reads (`MQTT_HOST`, `SITE`, usernames) goes into the
   generated per-service env files that already exist under
@@ -535,12 +548,13 @@ Sequence:
   `X-Frame-Options: deny`. These are host values, so they belong in
   `deploy.conf`. The default stays as today: published on the LAN, anonymous
   viewer.
-- ⚠️ **Open: who owns the Grafana on a shared host.** asgard plans one Grafana
-  for all of odin, with Prometheus as a second source later. Once a non-homescope
+- **Who owns the Grafana on a shared host.** asgard plans one Grafana for all
+  of odin, with Prometheus as a second source later. Once a non-homescope
   source exists, that Grafana is infrastructure, and homescope should ship only
   its datasource and dashboards for the host's Grafana to load. Until then,
-  homescope's Grafana is the cheapest correct answer. Being a *component* makes
-  the handover a one-word change in `deploy.conf`.
+  homescope's Grafana is the cheapest correct answer. ⚠️ *2026-10-05:* Grafana
+  is now part of the `api` component, so the handover is the accepted
+  `GRAFANA=none` switch (see [The deploy script](#the-deploy-script-components-and-a-per-host-config)).
 
 ## What a host must provide
 
@@ -559,6 +573,15 @@ owns the host:
 | Monitoring that also checks the *user* manager: `systemctl --user -M homescope@ --failed` | system-level `--failed` cannot see rootless units |
 
 ## Site and room: ideas for the owner — proposed
+
+> ✅ **Resolved 2026-10-05; the decisions live in
+> [site-room-topology.md](site-room-topology.md#revised-2026-10-05-sites-rooms-placement-history).**
+> Ideas 2–4, 6 and 9–11 were taken as written. Two ideas were superseded:
+> idea 5 (`devices.site`) and idea 7 (site NOT NULL), replaced by `rooms` plus
+> a `device_placements` history, from which a device's site is derived. Idea 8
+> became the move/correction operations on placements. Idea 1 is moot: both
+> halves now proceed, with the schema first. The list below is kept as
+> proposed.
 
 *Added 2026-10-05, not decisions.* [site-room-topology.md](site-room-topology.md)
 settles the shape: gateway `SITE` → topic prefix, `devices.site`/`room` as
@@ -625,6 +648,10 @@ semantics. Accepted ideas move there.
 4. The `gateway` role with the bridging local broker, then the first remote
    site.
 5. NTP verified on every gateway before the second gateway goes live.
+
+⚠️ *Update, later on 2026-10-05:* the owner is proceeding with step 1 now,
+schema first (sites, rooms, placements), with the topic prefix as an
+independent second half. The note below is kept as it was written.
 
 ⚠️ *2026-10-05, as it stands for srv01.* Step 2's code half (credentials from a
 file, client ids, the SUBACK check) is the hard blocker. asgard's broker has

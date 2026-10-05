@@ -16,6 +16,20 @@ accessible, and keyless by design, since decryption lives in the API. The goal:
 a compromised gateway can at worst spam *its own* site's topics. It cannot
 impersonate the other house, and it cannot read anything.
 
+⚠️ *2026-10-05:* the impersonation half of this predates AEAD (2026-07-31). With
+keyless gateways, no topic layout lets a gateway forge a reading. The ACL's job
+is now **containment**:
+
+- A homescope credential can write only under its own `homescope/<site>/`
+  prefix. That is what makes the topic's site trustworthy provenance.
+- It can read nothing.
+- On a *shared* broker, the ACL protects the other systems, and that matters
+  more than anything homescope-internal. Without it, the network's most exposed
+  component could publish into `zigbee2mqtt/#` and drive somebody else's
+  devices.
+
+See [site-room-topology.md](site-room-topology.md#the-topic-prefix-re-argued-after-aead-2026-10-05).
+
 ## Design
 
 Depends on the site topic prefix, `homescope/<site>/sensors/<device-addr>/envelope`
@@ -37,6 +51,11 @@ Depends on the site topic prefix, `homescope/<site>/sensors/<device-addr>/envelo
   user api
   topic read homescope/+/sensors/+/envelope
   ```
+
+  ⚠️ *2026-10-05: names.* On a shared broker every user is named after its
+  service, so these become `homescope-<site>` (one per site, used by that
+  site's gateway or bridge) and `homescope-api`. MQTT client ids are
+  `homescope-…` too. See [deployment-topology.md](deployment-topology.md).
 
 - **Credentials reach each service as files, not environment variables.**
   ⚠️ *Updated 2026-09-13:* this originally said "via env (quadlet

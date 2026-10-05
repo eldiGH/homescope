@@ -22,9 +22,9 @@ How to read them:
 | [packet-tv-aead.md](packet-tv-aead.md) | ✅ Implemented | TV measurement encoding, flash-persisted seq, ChaCha20-Poly1305 on the air packet (protocol v0.5–v0.7) |
 | [ingest-db-error-handling.md](ingest-db-error-handling.md) | ⏳ Planned | Ingest durability through database outages (manual MQTT acks) and the per-device seq check |
 | [api-graceful-shutdown.md](api-graceful-shutdown.md) | ⏳ Planned | Draining ingest and in-flight HTTP requests on SIGTERM |
-| [site-room-topology.md](site-room-topology.md) | 🔶 Partly done | `devices.site`/`room`, the per-gateway topic prefix, and the settled decisions around them |
+| [site-room-topology.md](site-room-topology.md) | 🔶 Partly done | Sites, rooms and placement history (revised 2026-10-05), the per-gateway topic prefix, and the settled decisions around them |
 | [mosquitto-acl.md](mosquitto-acl.md) | ⏳ Planned | Broker authentication and per-gateway topic ACLs |
-| [deployment-topology.md](deployment-topology.md) | ⏳ Planned | Multi-site deployment: one central API + broker, a bridging local broker per remote site (store-and-forward), deployment roles; 2026-10-05: the per-host config `deploy.sh` reads (approach accepted); proposed: data on a separate disk, restore and nightly dumps, site/room ideas |
+| [deployment-topology.md](deployment-topology.md) | ⏳ Planned | Multi-site deployment: one central API + broker, a bridging local broker per remote site (store-and-forward), deployment roles; 2026-10-05: three components (broker / api with db+Grafana / gateway) and the per-host config `deploy.sh` reads (accepted); proposed: data on a separate disk, restore and nightly dumps |
 | [receiver-usb-link.md](receiver-usb-link.md) | 🔶 Partly done | The receiver's VID/PID, its udev rule, and a gateway service bound to the dongle's presence |
 | [firmware-variants.md](firmware-variants.md) | ⏳ Planned | One firmware per board with boot-time sensor detection; the firmware artifact store |
 | [twim-cancel-safety.md](twim-cancel-safety.md) | ⏳ Open bug | The orphaned-DMA hazard in async TWIM, and its fix |

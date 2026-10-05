@@ -48,7 +48,6 @@ impl DeviceRegistry {
                 Some((
                     device.device_addr,
                     Arc::new(Device {
-                        id: device.id,
                         name: device.name,
                         device_addr: device.device_addr,
                         key_valid_from: device.key_valid_from,
@@ -140,7 +139,6 @@ impl DeviceRegistry {
         })?;
 
         let registered_device = Arc::new(Device {
-            id: device.id,
             device_addr: device.device_addr,
             name: device.name,
             key_valid_from: device.key_valid_from,
@@ -168,7 +166,6 @@ impl DeviceRegistry {
             .ok_or(DeviceError::NotFound)?;
 
         let new_device = Arc::new(Device {
-            id: device.id,
             device_addr: device.device_addr,
             name: device.name,
             key_valid_from: device.key_valid_from,
@@ -185,7 +182,6 @@ impl DeviceRegistry {
 }
 
 pub struct Device {
-    pub id: i32,
     pub device_addr: DeviceAddr,
     pub name: String,
     pub key_valid_from: DateTime<Utc>,

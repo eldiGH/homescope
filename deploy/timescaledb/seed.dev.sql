@@ -4,18 +4,22 @@
 --
 --   podman exec -i homescope-homescope-db-1 psql -U postgres -d homescope < deploy/timescaledb/seed.dev.sql
 
-WITH new_devices AS (
+-- n numbers the fake devices 1..6; it shapes each one's baseline, battery and
+-- RSSI below, and stays the same whatever the DB already holds.
+WITH fake AS (
+	SELECT name, n
+	FROM unnest(ARRAY['Living room', 'Bedroom', 'Kitchen', 'Office', 'Garage', 'Attic'])
+		WITH ORDINALITY AS u(name, n)
+),
+new_devices AS (
 	INSERT INTO devices (device_addr, name)
-	SELECT
-		random(0, 281474976710655),
-		name
-	FROM unnest(ARRAY['Living room', 'Bedroom', 'Kitchen', 'Office', 'Garage', 'Attic']) AS name
-	RETURNING id, name
+	SELECT random(0, 281474976710655), name FROM fake
+	RETURNING device_addr, name
 )
-INSERT INTO readings (time, device_id, seq, temp_degc, rh_percent, battery_mv, rssi)
+INSERT INTO readings (time, device_addr, seq, temp_degc, rh_percent, battery_mv, rssi)
 SELECT
 	ts,
-	d.id,
+	d.device_addr,
 	-- seq = elapsed minutes since window start, NOT row_number(): window
 	-- functions run after WHERE, so row_number() would renumber around the
 	-- dropped rows and hide the very seq gaps the drop is meant to create
@@ -25,10 +29,11 @@ SELECT
 		50 - 1.6 * (t.temp - 21)                                           -- RH loosely inverse to temp
 			+ (random() - 0.5) * 3,
 		25), 70),
-	(3230 - d.id * 15 - 3.4 * e.elapsed_days + (random() - 0.5) * 8)::int, -- ~300 mV drain over the window
-	(-60 - d.id * 5 + (random() - 0.5) * 20)::smallint                     -- per-device base + indoor fading
+	(3230 - f.n * 15 - 3.4 * e.elapsed_days + (random() - 0.5) * 8)::int, -- ~300 mV drain over the window
+	(-60 - f.n * 5 + (random() - 0.5) * 20)::smallint                     -- per-device base + indoor fading
 FROM generate_series(now() - interval '90 days', now(), interval '60 seconds') AS ts
 CROSS JOIN new_devices AS d
+JOIN fake AS f USING (name)
 CROSS JOIN LATERAL (
 	SELECT extract(epoch FROM ts - (now() - interval '90 days')) / 86400.0 AS elapsed_days
 ) AS e
@@ -38,7 +43,7 @@ CROSS JOIN LATERAL (
 		CASE d.name
 			WHEN 'Garage' THEN 16.5
 			WHEN 'Attic'  THEN 22.5
-			ELSE 20.0 + d.id * 0.4
+			ELSE 20.0 + f.n * 0.4
 		END
 		-- daily cycle peaking ~15:00 CEST; garage/attic swing harder
 		+ CASE d.name

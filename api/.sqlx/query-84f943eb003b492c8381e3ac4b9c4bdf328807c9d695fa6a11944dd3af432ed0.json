@@ -1,21 +1,10 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\nUPDATE devices SET key=$1, key_valid_from=NOW() WHERE device_addr=$2\nRETURNING id, device_addr, name, key, key_valid_from\n        ",
+  "query": "\nSELECT\n  d.device_addr,\n  d.name,\n  d.key,\n  d.key_valid_from,\n  r.last_seen AS \"last_seen?\"\nFROM\n  devices AS d\n  LEFT JOIN LATERAL (\n    SELECT\n      time AS last_seen\n    FROM\n      readings\n    WHERE\n      device_addr = d.device_addr\n      AND time > d.key_valid_from\n    ORDER BY\n      time DESC\n    LIMIT\n      1\n  ) r ON true\nWHERE\n  d.device_addr = $1\n",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
-        "type_info": "Int4",
-        "origin": {
-          "Table": {
-            "table": "devices",
-            "name": "id"
-          }
-        }
-      },
-      {
-        "ordinal": 1,
         "name": "device_addr",
         "type_info": "Int8",
         "origin": {
@@ -26,7 +15,7 @@
         }
       },
       {
-        "ordinal": 2,
+        "ordinal": 1,
         "name": "name",
         "type_info": "Text",
         "origin": {
@@ -37,7 +26,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 2,
         "name": "key",
         "type_info": "Bytea",
         "origin": {
@@ -48,7 +37,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 3,
         "name": "key_valid_from",
         "type_info": "Timestamptz",
         "origin": {
@@ -57,21 +46,31 @@
             "name": "key_valid_from"
           }
         }
+      },
+      {
+        "ordinal": 4,
+        "name": "last_seen?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "readings",
+            "name": "time"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Bytea",
         "Int8"
       ]
     },
     "nullable": [
       false,
       false,
-      false,
       true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "8580247fae740b23b8a3d14a5b272aa69732b9c809a61548b4c6b7fa06a2bad6"
+  "hash": "84f943eb003b492c8381e3ac4b9c4bdf328807c9d695fa6a11944dd3af432ed0"
 }

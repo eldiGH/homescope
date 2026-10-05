@@ -1,21 +1,10 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\nINSERT INTO devices (name, device_addr, key)\nVALUES ($1, $2, $3)\nRETURNING id, device_addr, name, key, key_valid_from\n        ",
+  "query": "\nINSERT INTO devices (name, device_addr, key)\nVALUES ($1, $2, $3)\nRETURNING device_addr, name, key, key_valid_from\n        ",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
-        "type_info": "Int4",
-        "origin": {
-          "Table": {
-            "table": "devices",
-            "name": "id"
-          }
-        }
-      },
-      {
-        "ordinal": 1,
         "name": "device_addr",
         "type_info": "Int8",
         "origin": {
@@ -26,7 +15,7 @@
         }
       },
       {
-        "ordinal": 2,
+        "ordinal": 1,
         "name": "name",
         "type_info": "Text",
         "origin": {
@@ -37,7 +26,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 2,
         "name": "key",
         "type_info": "Bytea",
         "origin": {
@@ -48,7 +37,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 3,
         "name": "key_valid_from",
         "type_info": "Timestamptz",
         "origin": {
@@ -69,10 +58,9 @@
     "nullable": [
       false,
       false,
-      false,
       true,
       false
     ]
   },
-  "hash": "fdfa842e5b1a2383ca313bb4dae4d403d3efa581499f908484f7cee81f9c6b53"
+  "hash": "81d88cd2fb3fbbbbd716ad9dbbbbd0c1f5358900dcd58a54344b75198d6358d8"
 }

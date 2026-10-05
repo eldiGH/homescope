@@ -455,7 +455,7 @@ key (by design) and can only do L0 plus "does the cleartext header parse".
 **L2 — the real end to end, and the cheapest to build.** Poll
 `GET /devices/{addr}` until a reading appears. Proves RF, receiver, gateway,
 MQTT **and** the API's decrypt under the sealed key. The query is already
-specified in §1: `MAX(seq) FROM readings WHERE device_id = $1 AND time >
+specified in §1: `MAX(seq) FROM readings WHERE device_addr = $1 AND time >
 key_valid_from`, where NULL means "registered but has never reported under
 this key". Cost is one column on the `DeviceSummary` response.
 
@@ -985,7 +985,7 @@ producing authenticated readings under the new key — and that is already
 queryable with the replay check's own query:
 
 ```sql
-SELECT MAX(seq) FROM readings WHERE device_id = $1 AND time > key_valid_from
+SELECT MAX(seq) FROM readings WHERE device_addr = $1 AND time > key_valid_from
 ```
 
 NULL means "registered but has never reported under this key", which is
@@ -1231,7 +1231,7 @@ dark?" → "re-keyed on the 14th, reflash didn't take."
 metadata: the ingest replay check uses it as the **key epoch boundary**, so it
 now carries a load-bearing meaning that the old name actively contradicted.
 See [ingest-db-error-handling.md](ingest-db-error-handling.md) § "Per-device seq check" — the query is
-`MAX(seq) FROM readings WHERE device_id = $1 AND time > key_valid_from`, and a
+`MAX(seq) FROM readings WHERE device_addr = $1 AND time > key_valid_from`, and a
 freshly provisioned device gets NULL, which is what lets its counter restart
 at zero without being rejected as a replay.
 

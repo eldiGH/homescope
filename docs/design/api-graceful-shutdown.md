@@ -113,7 +113,7 @@ process always exits on its own terms.
 Once manual acks land (see
 [ingest-db-error-handling.md](ingest-db-error-handling.md)), envelopes drained
 at shutdown must be acked before the MQTT disconnect, or they are redelivered on
-the next start. That is harmless — `UNIQUE (device_id, seq, time)` makes a
+the next start. That is harmless — `UNIQUE (device_addr, seq, time)` makes a
 redelivered insert a no-op — but it is noise.
 
 ## Concepts this exercise teaches

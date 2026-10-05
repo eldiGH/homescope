@@ -5,12 +5,12 @@ use thiserror::Error;
 
 use crate::devices::keys::SealedDeviceKey;
 
-/// Named in migration 20260716201805. Nothing type-checks this against the
-/// schema — a rename there silently downgrades 409 to 500 here.
-const DEVICE_ADDR_UNIQUE: &str = "devices_device_addr_key";
+/// Named in migration 20261005100951, where `device_addr` became the primary
+/// key. Nothing type-checks this against the schema — a rename there silently
+/// downgrades 409 to 500 here.
+const DEVICE_ADDR_PRIMARY_KEY: &str = "devices_pkey";
 
 struct DeviceRow {
-    id: i32,
     device_addr: i64,
     name: String,
     key: Option<Vec<u8>>,
@@ -23,7 +23,6 @@ struct DeviceRow {
 /// know anything about `readings`, so neither should be handed a type with a
 /// slot for it; see [`DeviceActivity`] for the read side.
 pub struct DeviceRecord {
-    pub id: i32,
     pub device_addr: DeviceAddr,
     pub name: String,
     pub key: Option<Vec<u8>>,
@@ -33,7 +32,6 @@ pub struct DeviceRecord {
 impl From<DeviceRow> for DeviceRecord {
     fn from(value: DeviceRow) -> Self {
         Self {
-            id: value.id,
             device_addr: device_addr_of(value.device_addr),
             name: value.name,
             key: value.key,
@@ -43,7 +41,6 @@ impl From<DeviceRow> for DeviceRecord {
 }
 
 struct DeviceActivityRow {
-    id: i32,
     device_addr: i64,
     name: String,
     key: Option<Vec<u8>>,
@@ -72,7 +69,6 @@ impl From<DeviceActivityRow> for DeviceActivity {
             // Through `DeviceRow`, so the address decode — the one judgment
             // this module makes — exists once and cannot drift between the two.
             record: DeviceRecord::from(DeviceRow {
-                id: value.id,
                 device_addr: value.device_addr,
                 name: value.name,
                 key: value.key,
@@ -95,7 +91,7 @@ pub async fn all_records(pool: &PgPool) -> Result<Vec<DeviceRecord>, sqlx::Error
         DeviceRow,
         "
 SELECT
-    id, device_addr, name, key, key_valid_from
+    device_addr, name, key, key_valid_from
 FROM devices
 "
     )
@@ -112,7 +108,7 @@ FROM devices
 // sqlx macros take a string literal, so a fix to one must be made to both.
 //
 // `ORDER BY time DESC LIMIT 1` rather than `MAX(time)`: it walks
-// `readings (device_id, time DESC)` from the newest end and stops at the first
+// `readings (device_addr, time DESC)` from the newest end and stops at the first
 // row, which is the shape TimescaleDB's ordered append is built for.
 //
 // `"last_seen?"` states the nullability instead of leaving sqlx to infer it
@@ -125,7 +121,6 @@ pub async fn all_activity(pool: &PgPool) -> Result<Vec<DeviceActivity>, sqlx::Er
         DeviceActivityRow,
         r#"
 SELECT
-  d.id,
   d.device_addr,
   d.name,
   d.key,
@@ -139,7 +134,7 @@ FROM
     FROM
       readings
     WHERE
-      device_id = d.id
+      device_addr = d.device_addr
       AND time > d.key_valid_from
     ORDER BY
       time DESC
@@ -165,7 +160,6 @@ pub async fn activity_by_addr(
         DeviceActivityRow,
         r#"
 SELECT
-  d.id,
   d.device_addr,
   d.name,
   d.key,
@@ -179,7 +173,7 @@ FROM
     FROM
       readings
     WHERE
-      device_id = d.id
+      device_addr = d.device_addr
       AND time > d.key_valid_from
     ORDER BY
       time DESC
@@ -213,7 +207,7 @@ pub async fn insert_device(
         r#"
 INSERT INTO devices (name, device_addr, key)
 VALUES ($1, $2, $3)
-RETURNING id, device_addr, name, key, key_valid_from
+RETURNING device_addr, name, key, key_valid_from
         "#,
         device.name,
         device.device_addr.as_i64(),
@@ -248,7 +242,7 @@ RETURNING id, device_addr, name, key, key_valid_from
 }
 
 fn is_duplicate_device_addr(err: &sqlx::Error) -> bool {
-    err.as_database_error().and_then(|d| d.constraint()) == Some(DEVICE_ADDR_UNIQUE)
+    err.as_database_error().and_then(|d| d.constraint()) == Some(DEVICE_ADDR_PRIMARY_KEY)
 }
 
 pub async fn update_key(
@@ -260,7 +254,7 @@ pub async fn update_key(
         DeviceRow,
         r#"
 UPDATE devices SET key=$1, key_valid_from=NOW() WHERE device_addr=$2
-RETURNING id, device_addr, name, key, key_valid_from
+RETURNING device_addr, name, key, key_valid_from
         "#,
         key.as_bytes(),
         device_addr.as_i64()
@@ -296,7 +290,6 @@ mod test {
     #[test]
     fn record_decodes_the_address_and_moves_the_rest() {
         let record = DeviceRecord::from(DeviceRow {
-            id: 1,
             device_addr: 0x0605_0403_0201,
             name: "kitchen".into(),
             key: Some(vec![0xAB; 4]),
@@ -308,7 +301,6 @@ mod test {
             DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]),
             "the column is little-endian: least significant byte first"
         );
-        assert_eq!(record.id, 1);
         assert_eq!(record.name, "kitchen");
         assert_eq!(record.key.as_deref(), Some(&[0xAB, 0xAB, 0xAB, 0xAB][..]));
     }
@@ -322,7 +314,6 @@ mod test {
         let record = DeviceRecord::from(DeviceRow {
             device_addr: 0xFFFF_FFFF_FFFF,
             ..DeviceRow {
-                id: 1,
                 device_addr: 0,
                 name: String::new(),
                 key: None,
@@ -339,7 +330,6 @@ mod test {
     #[test]
     fn record_carries_a_null_key_through() {
         let record = DeviceRecord::from(DeviceRow {
-            id: 1,
             device_addr: 0x0605_0403_0201,
             name: "kitchen".into(),
             key: None,
@@ -351,7 +341,6 @@ mod test {
 
     fn activity_row(last_seen: Option<DateTime<Utc>>) -> DeviceActivityRow {
         DeviceActivityRow {
-            id: 7,
             device_addr: 0x0605_0403_0201,
             name: "kitchen".into(),
             key: Some(vec![0xCD; 4]),
@@ -373,7 +362,6 @@ mod test {
             activity.record.device_addr,
             DeviceAddr([0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
         );
-        assert_eq!(activity.record.id, 7);
         assert_eq!(activity.record.name, "kitchen");
         assert_eq!(activity.record.key.as_deref(), Some(&[0xCD; 4][..]));
         assert_eq!(activity.last_seen, Some(seen));

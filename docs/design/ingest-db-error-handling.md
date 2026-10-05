@@ -70,7 +70,7 @@ Not a one-liner:
   not "data lost".
 - **Redelivery means duplicates.** After a crash with messages unacked, the
   broker resends some that may already be stored. That needs idempotent
-  ingest — **already done** as of 2026-07-28: `UNIQUE (device_id, seq, time)` +
+  ingest — **already done** as of 2026-07-28: `UNIQUE (device_id, seq, time)` (on `device_addr` since 2026-10-05) +
   `ON CONFLICT DO NOTHING`. A redelivery is the *identical* envelope with the
   *identical* `received_at`, so the triple matches and the insert is a no-op.
   (Written before that constraint existed, this bullet once said the seq check
@@ -91,7 +91,7 @@ Three jobs, with very different odds of mattering:
 - **Multi-receiver dedup** — the real one, and not speculative: it arrives with
   the second gateway. Each dongle dedups its own burst through its LRU, then
   both forward one envelope. Different `received_at` ⇒ different `time` ⇒
-  `UNIQUE (device_id, seq, time)` does *not* fire ⇒ two rows for one
+  `UNIQUE (device_addr, seq, time)` does *not* fire ⇒ two rows for one
   measurement.
 - **MQTT redelivery** — already covered. A redelivery is the identical envelope
   with the identical `received_at`, so the triple matches and `ON CONFLICT DO
@@ -113,7 +113,7 @@ Monotonicity, scoped to the key epoch:
 
 ```sql
 SELECT MAX(seq) FROM readings
- WHERE device_id = $1 AND time > <that device's key_valid_from>
+ WHERE device_addr = $1 AND time > <that device's key_valid_from>
 ```
 
 Accept only `seq > MAX`; NULL (no readings under this key yet) accepts
@@ -202,7 +202,7 @@ packets** for that device from then on.
   for it speculatively.
 - **Atomicity rests on the single writer.** One sqlx writer draining one mpsc
   channel serializes the read-then-insert. A second writer task would quietly
-  reintroduce the race, so say so in a comment — and keep `UNIQUE (device_id,
+  reintroduce the race, so say so in a comment — and keep `UNIQUE (device_addr,
   seq, time)` as the backstop. Constraints are enforcement, queries are policy;
   enforcement should survive an application bug.
 
@@ -210,14 +210,14 @@ packets** for that device from then on.
 
 Fine. `time > key_valid_from` constrains the partitioning column, so TimescaleDB
 can exclude every chunk before the epoch, and within the survivors the
-`(device_id, seq, time)` index gives a backward scan that stops at the first
+`(device_addr, seq, time)` index gives a backward scan that stops at the first
 row: a handful of index descents per packet, once a minute per device. The thing
 that would have been expensive — an unbounded `MAX(seq)` across all chunks — is
 exactly what the epoch predicate prevents, so the clause does double duty.
 
 The closest evidence so far is the `lastSeen` query (2026-09-13), which bounds
 `readings` by `key_valid_from` the same way: on the dev database it planned as
-an ordered chunk append over `(device_id, time DESC)`, newest chunk first, with
+an ordered chunk append over `(device_addr, time DESC)`, newest chunk first, with
 older chunks never executed. There the exclusion happens at run time, since the
 epoch comes from a joined row; with the epoch passed as a parameter, it can
 happen at plan time.

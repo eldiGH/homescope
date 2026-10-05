@@ -73,7 +73,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.temp_degc) AS temperature\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
+          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.temp_degc) AS temperature\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -125,7 +125,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.rh_percent) AS humidity\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
+          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.rh_percent) AS humidity\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -175,7 +175,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT DISTINCT ON (r.device_id)\n  d.name AS device,\n  r.battery_mv / 1000.0 AS voltage\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\nORDER BY r.device_id, r.time DESC",
+          "rawSql": "SELECT DISTINCT ON (r.device_addr)\n  d.name AS device,\n  r.battery_mv / 1000.0 AS voltage\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\nORDER BY r.device_addr, r.time DESC",
           "refId": "A"
         }
       ],
@@ -225,7 +225,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  d.name AS device,\n  percentile_cont(0.5) WITHIN GROUP (ORDER BY r.rssi) AS rssi\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE r.time > now() - interval '15 minutes' AND r.device_id IN (${device:csv})\nGROUP BY d.name\nORDER BY d.name",
+          "rawSql": "SELECT\n  d.name AS device,\n  percentile_cont(0.5) WITHIN GROUP (ORDER BY r.rssi) AS rssi\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE r.time > now() - interval '15 minutes' AND r.device_addr IN (${device:csv})\nGROUP BY d.name\nORDER BY d.name",
           "refId": "A"
         }
       ],
@@ -270,7 +270,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  l.time AS \"time\",\n  d.name AS metric,\n  extract(epoch FROM l.time) * 1000 AS \"last seen\"\nFROM devices d\nJOIN LATERAL (\n  SELECT r.time\n  FROM readings r\n  WHERE r.device_id = d.id\n  ORDER BY r.time DESC\n  LIMIT 1\n) l ON true\nWHERE d.id IN (${device:csv})\nORDER BY 1",
+          "rawSql": "SELECT\n  l.time AS \"time\",\n  d.name AS metric,\n  extract(epoch FROM l.time) * 1000 AS \"last seen\"\nFROM devices d\nJOIN LATERAL (\n  SELECT r.time\n  FROM readings r\n  WHERE r.device_addr = d.device_addr\n  ORDER BY r.time DESC\n  LIMIT 1\n) l ON true\nWHERE d.device_addr IN (${device:csv})\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -342,7 +342,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.temp_degc) AS temperature\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
+          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.temp_degc) AS temperature\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -406,7 +406,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.rh_percent) AS humidity\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
+          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.rh_percent) AS humidity\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -470,7 +470,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \"time\", metric, 243.12 * g / (17.62 - g) AS dewpoint\nFROM (\n  SELECT\n    time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n    d.name AS metric,\n    ln(avg(r.rh_percent) / 100.0) + 17.62 * avg(r.temp_degc) / (243.12 + avg(r.temp_degc)) AS g\n  FROM readings r\n  JOIN devices d ON d.id = r.device_id\n  WHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\n  GROUP BY 1, 2\n) s\nORDER BY 1",
+          "rawSql": "SELECT \"time\", metric, 243.12 * g / (17.62 - g) AS dewpoint\nFROM (\n  SELECT\n    time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n    d.name AS metric,\n    ln(avg(r.rh_percent) / 100.0) + 17.62 * avg(r.temp_degc) / (243.12 + avg(r.temp_degc)) AS g\n  FROM readings r\n  JOIN devices d ON d.device_addr = r.device_addr\n  WHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\n  GROUP BY 1, 2\n) s\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -516,7 +516,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  d.name AS device,\n  min(r.temp_degc) AS low,\n  max(r.temp_degc) AS high\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE r.time >= date_trunc('day', now()) AND r.device_id IN (${device:csv})\nGROUP BY d.name\nORDER BY d.name",
+          "rawSql": "SELECT\n  d.name AS device,\n  min(r.temp_degc) AS low,\n  max(r.temp_degc) AS high\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE r.time >= date_trunc('day', now()) AND r.device_addr IN (${device:csv})\nGROUP BY d.name\nORDER BY d.name",
           "refId": "A"
         }
       ],
@@ -588,7 +588,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  percentile_cont(0.5) WITHIN GROUP (ORDER BY r.rssi) AS rssi\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
+          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  percentile_cont(0.5) WITHIN GROUP (ORDER BY r.rssi) AS rssi\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -656,7 +656,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  100.0 * count(*) / greatest(max(r.seq) - min(r.seq) + 1, count(*)) AS delivery\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
+          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  100.0 * count(*) / greatest(max(r.seq) - min(r.seq) + 1, count(*)) AS delivery\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -709,7 +709,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  d.name AS device,\n  g.prev_time AS \"gap start\",\n  g.time AS \"gap end\",\n  extract(epoch FROM g.time - g.prev_time) AS duration\nFROM (\n  SELECT\n    device_id,\n    time,\n    lag(time) OVER (PARTITION BY device_id ORDER BY time) AS prev_time\n  FROM readings\n  WHERE $__timeFilter(time) AND device_id IN (${device:csv})\n) g\nJOIN devices d ON d.id = g.device_id\nWHERE g.time - g.prev_time > interval '5 minutes'\nORDER BY g.prev_time DESC\nLIMIT 100",
+          "rawSql": "SELECT\n  d.name AS device,\n  g.prev_time AS \"gap start\",\n  g.time AS \"gap end\",\n  extract(epoch FROM g.time - g.prev_time) AS duration\nFROM (\n  SELECT\n    device_addr,\n    time,\n    lag(time) OVER (PARTITION BY device_addr ORDER BY time) AS prev_time\n  FROM readings\n  WHERE $__timeFilter(time) AND device_addr IN (${device:csv})\n) g\nJOIN devices d ON d.device_addr = g.device_addr\nWHERE g.time - g.prev_time > interval '5 minutes'\nORDER BY g.prev_time DESC\nLIMIT 100",
           "refId": "A"
         }
       ],
@@ -784,7 +784,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.battery_mv) / 1000.0 AS voltage\nFROM readings r\nJOIN devices d ON d.id = r.device_id\nWHERE $__timeFilter(r.time) AND r.device_id IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
+          "rawSql": "SELECT\n  time_bucket_gapfill('$__interval'::interval, r.time) AS \"time\",\n  d.name AS metric,\n  avg(r.battery_mv) / 1000.0 AS voltage\nFROM readings r\nJOIN devices d ON d.device_addr = r.device_addr\nWHERE $__timeFilter(r.time) AND r.device_addr IN (${device:csv})\nGROUP BY 1, 2\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -834,7 +834,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  device,\n  CASE WHEN m < 0 THEN (2.4 - (b + m * extract(epoch FROM now()))) / m / 86400.0 END AS days\nFROM (\n  SELECT\n    d.name AS device,\n    regr_slope(r.battery_mv / 1000.0, extract(epoch FROM r.time)) AS m,\n    regr_intercept(r.battery_mv / 1000.0, extract(epoch FROM r.time)) AS b\n  FROM readings r\n  JOIN devices d ON d.id = r.device_id\n  WHERE r.time > now() - interval '14 days' AND r.device_id IN (${device:csv})\n  GROUP BY d.name\n) s\nORDER BY device",
+          "rawSql": "SELECT\n  device,\n  CASE WHEN m < 0 THEN (2.4 - (b + m * extract(epoch FROM now()))) / m / 86400.0 END AS days\nFROM (\n  SELECT\n    d.name AS device,\n    regr_slope(r.battery_mv / 1000.0, extract(epoch FROM r.time)) AS m,\n    regr_intercept(r.battery_mv / 1000.0, extract(epoch FROM r.time)) AS b\n  FROM readings r\n  JOIN devices d ON d.device_addr = r.device_addr\n  WHERE r.time > now() - interval '14 days' AND r.device_addr IN (${device:csv})\n  GROUP BY d.name\n) s\nORDER BY device",
           "refId": "A"
         }
       ],
@@ -856,14 +856,14 @@
           "value": ["$__all"]
         },
         "datasource": { "type": "grafana-postgresql-datasource", "uid": "timescaledb" },
-        "definition": "SELECT name AS __text, id AS __value FROM devices ORDER BY name",
+        "definition": "SELECT name AS __text, device_addr AS __value FROM devices ORDER BY name",
         "description": "",
         "includeAll": true,
         "label": "Device",
         "multi": true,
         "name": "device",
         "options": [],
-        "query": "SELECT name AS __text, id AS __value FROM devices ORDER BY name",
+        "query": "SELECT name AS __text, device_addr AS __value FROM devices ORDER BY name",
         "refresh": 1,
         "regex": "",
         "sort": 0,

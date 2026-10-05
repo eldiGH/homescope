@@ -212,11 +212,11 @@ Useful one-liners:
 ```sql
 \dt                                    -- tables
 SELECT * FROM _sqlx_migrations ORDER BY version;   -- what has actually applied
-SELECT id, to_hex(device_addr) AS addr, name,
-       key IS NOT NULL AS has_key, key_valid_from FROM devices ORDER BY id;
+SELECT lpad(to_hex(device_addr), 12, '0') AS addr, name,
+       key IS NOT NULL AS has_key, key_valid_from FROM devices ORDER BY name;
 SELECT count(*), min(time), max(time) FROM readings;
 SELECT d.name, max(r.time) FROM devices d
-  LEFT JOIN readings r ON r.device_id = d.id GROUP BY d.name;
+  LEFT JOIN readings r USING (device_addr) GROUP BY d.name;
 ```
 
 `to_hex(device_addr)` renders the same 12-hex string as the MQTT topic and the
@@ -317,7 +317,7 @@ Anything that speaks the Postgres wire protocol works — `psql`, `pgcli`,
 vim-dadbod, DBeaver. One caveat applies to all of them:
 
 ⚠️ **Do not delete or edit `readings` rows through a result grid.** The table
-has no primary key (only `UNIQUE (device_id, seq, time)`), so a client that
+has no primary key (only `UNIQUE (device_addr, seq, time)`), so a client that
 offers row-level edits falls back to `ctid` — and on a hypertable the rows live
 in chunk tables under `_timescaledb_internal`, where the same `ctid` value
 exists in every chunk. A `ctid`-targeted delete routed through the parent can
@@ -326,7 +326,7 @@ instead:
 
 ```sql
 DELETE FROM readings
-WHERE device_id = 1 AND seq = 12345 AND time = '2026-09-21 13:21:37.712+00';
+WHERE device_addr = x'cea99627bd3f'::bigint AND seq = 12345 AND time = '2026-09-21 13:21:37.712+00';
 ```
 
 For bulk removal, drop chunks rather than rows — a metadata operation instead

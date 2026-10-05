@@ -101,7 +101,7 @@ The gateway republishes each observation as an opaque JSON envelope on MQTT (`ho
 - ✅ Sensor firmware: Coded-PHY extended advertising, +8 dBm, ~20-event bursts, SHT45 + battery SAADC
 - ✅ Receiver firmware: coded extended scanning, USB-CDC framing, robust to host disconnect/reconnect
 - ✅ Gateway: streaming frame decoder → opaque MQTT envelope (pure bridge, semantics-blind; the range-survey page lives on the `reliability-benchmark` branch)
-- ✅ API: MQTT envelope → TV decode → TimescaleDB ingest, device registry (unknown devices dropped, no auto-registration), nullable metric columns, `UNIQUE (device_id, seq, time)`, sqlx migrations
+- ✅ API: MQTT envelope → TV decode → TimescaleDB ingest, device registry (unknown devices dropped, no auto-registration), nullable metric columns, `UNIQUE (device_addr, seq, time)`, sqlx migrations
 - ✅ Grafana: provisioned datasource + dashboard, anonymous viewer
 - ✅ Deployment: Podman quadlets + CI images (ghcr.io) + idempotent deploy script
 - ✅ Hardware: Raytac MDBT50Q-DB-40 survey passed → custom PCB with MDBT50Q-1MV2 is next

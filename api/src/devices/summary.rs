@@ -64,7 +64,6 @@ mod test {
     fn activity(key: Option<Vec<u8>>, last_seen: Option<DateTime<Utc>>) -> DeviceActivity {
         DeviceActivity {
             record: DeviceRecord {
-                id: 1,
                 device_addr: ADDR,
                 name: "kitchen".into(),
                 key,

@@ -69,11 +69,11 @@ transmission. It costs airtime that is nearly free, but see the capacity note
 above.
 
 **2. Overlap breaks the current uniqueness key.** This is the trap. The
-constraint today is `UNIQUE (device_id, seq, time)`, and `seq` is *per packet*.
+constraint today is `UNIQUE (device_addr, seq, time)`, and `seq` is *per packet*.
 Two overlapping packets carrying the same reading have **different `seq`**, so
 the constraint does not collide and the reading is stored twice.
 
-If overlap is adopted, the readings key has to become `UNIQUE (device_id,
+If overlap is adopted, the readings key has to become `UNIQUE (device_addr,
 time)` — `time` is the reading's identity, `seq` is the transmission's. Decide
 that *before* writing the encoder, because it also changes what the planned
 per-device seq check (see

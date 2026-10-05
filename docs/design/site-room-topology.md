@@ -60,7 +60,11 @@ reasons, see
 
 ## Revised 2026-10-05: sites, rooms, placement history
 
-> **Settled with the owner 2026-10-05; supersedes change 1 above.** The
+> **Settled with the owner 2026-10-05; supersedes change 1 above.** ✅ Schema
+> built the same day: migration `20261005101457`, after `20261005100951` made
+> `device_addr` the devices primary key. Nothing reads it yet — the follow-ups
+> listed below are open.
+> The
 > principle stands: placement is owner-asserted device semantics that firmware
 > never sees, so moving a sensor never means a reflash. What changes is the
 > storage. Placement gets its own tables and its own timeline, instead of two
@@ -88,11 +92,12 @@ sites ──< rooms ──< device_placements >── devices
   `UNIQUE (site_id, name)`, because thor's kitchen and freya's kitchen are
   different rooms. On asgard, room names match the Home Assistant areas, so a
   discovery republish can set `suggested_area`.
-- **`device_placements`**: `device_id` (FK), `room_id` (nullable FK),
-  `placed_at timestamptz`, and `UNIQUE (device_id, placed_at)`.
+- **`device_placements`**: `device_addr` (FK to the devices primary key),
+  `room_id` (nullable FK), `placed_at timestamptz`, and
+  `PRIMARY KEY (device_addr, placed_at)`.
   - A placement lasts until the device's next `placed_at`. A view computes
-    that end with `LEAD()`: `placement_periods(device_id, room_id, valid_from,
-    valid_to)`. Overlaps are therefore impossible by construction, and there is
+    that end with `LEAD()`: `placement_periods(device_addr, room_id,
+    valid_from, valid_to)`, where `valid_to` NULL means "still there". Overlaps are therefore impossible by construction, and there is
     nothing to enforce. The stricter shape, a `tstzrange` with an exclusion
     constraint, makes every change two statements and buys nothing here.
   - `room_id` NULL means taken down, for example back in the drawer.

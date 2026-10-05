@@ -27,6 +27,7 @@ How to read them:
 | [deployment-topology.md](deployment-topology.md) | ⏳ Planned | Multi-site deployment: one central API + broker, a bridging local broker per remote site (store-and-forward), deployment roles; 2026-10-05: three components (broker / api with db+Grafana / gateway) and the per-host config `deploy.sh` reads (accepted); proposed: data on a separate disk, restore and nightly dumps |
 | [receiver-usb-link.md](receiver-usb-link.md) | 🔶 Partly done | The receiver's VID/PID, its udev rule, and a gateway service bound to the dongle's presence |
 | [firmware-variants.md](firmware-variants.md) | ⏳ Planned | One firmware per board with boot-time sensor detection; the firmware artifact store |
+| [simulator.md](simulator.md) | ⏳ Proposed | `homescope-sim`: sealed packets from fake devices, as USB-CDC frames into a pseudo-terminal or as MQTT envelopes, with fault injection; closes the decrypt/insert gap hardware-free tests leave |
 | [twim-cancel-safety.md](twim-cancel-safety.md) | ⏳ Open bug | The orphaned-DMA hazard in async TWIM, and its fix |
 | [packet-batching.md](packet-batching.md) | ⏳ Deferred | A protocol v2 body carrying batched readings |
 

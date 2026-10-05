@@ -28,10 +28,20 @@ api_dirs() {
 setup_kek() {
 	local secret="${SECRET_NAMES[kek]}"
 
+	# A KEK already here: repeating the first deploy's exact command must be
+	# safe, so the same file again is a no-op and --new-kek keeps what exists.
+	# Only a *different* KEK is refused — replacing the one in use orphans
+	# every device key.
 	if secret_exists "$secret"; then
-		[[ -z $IMPORT_KEK ]] || die "--import-kek given, but this host already has a KEK. Replacing the KEK in use orphans every device key; if that is really meant, remove it first: sudo homescope secret rm kek"
+		if [[ -n $IMPORT_KEK ]]; then
+			if secret_value "$secret" | cmp -s - "$IMPORT_KEK"; then
+				log "KEK already imported from $IMPORT_KEK"
+				return 0
+			fi
+			die "--import-kek given, but this host already has a different KEK. Replacing the KEK in use orphans every device key; if that is really meant, remove it first: sudo homescope secret rm kek"
+		fi
 		if $NEW_KEK; then
-			die "--new-kek given, but this host already has a KEK"
+			log "This host already has a KEK; keeping it (--new-kek only mints one where none exists)"
 		fi
 		return 0
 	fi
@@ -77,8 +87,14 @@ setup_admin_token() {
 	local secret="${SECRET_NAMES[admin-token]}"
 
 	if secret_exists "$secret"; then
-		[[ -z $IMPORT_ADMIN_TOKEN ]] || die "--import-admin-token given, but this host already has one; replace it with: sudo homescope secret set admin-token"
-		return
+		if [[ -n $IMPORT_ADMIN_TOKEN ]]; then
+			if secret_value "$secret" | cmp -s - "$IMPORT_ADMIN_TOKEN"; then
+				log "Admin token already imported from $IMPORT_ADMIN_TOKEN"
+				return 0
+			fi
+			die "--import-admin-token given, but this host already has a different one; replace it with: sudo homescope secret set admin-token"
+		fi
+		return 0
 	fi
 
 	if [[ -n $IMPORT_ADMIN_TOKEN ]]; then

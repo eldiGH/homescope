@@ -55,6 +55,14 @@ sudo ./deploy/deploy.sh --import-kek kek-file \
 
 Without either flag it stops before touching anything that matters.
 
+With an **external broker**, the first deploy then pauses with an **ACTION
+NEEDED** banner. That is expected: the broker's owner creates the MQTT users and
+hands over their passwords. The banner lists the `sudo homescope secret set …`
+commands and the exact deploy command to repeat. Repeating it is safe: an
+identical `--import-kek` / `--import-admin-token` file is recognised as already
+imported, `--new-kek` keeps a KEK that exists, and only a *different* KEK is
+refused.
+
 ## Machine layout
 
 | What | Where |
@@ -101,6 +109,7 @@ sudo homescope psql                    # psql as postgres, in the database
 sudo homescope podman ps               # podman as the homescope user
 sudo homescope secret list             # set | show | rm <name>
 sudo homescope backup                  # on-demand dump; --snapshot DIR for the host's backup job
+sudo homescope restore <dump>          # replace the database with a pg_dump archive
 sudo homescope config                  # the effective deploy.toml
 ```
 
@@ -200,11 +209,12 @@ sudo homescope secret show admin-token                  # for homescope-provisio
 sudo homescope secret set mqtt-api                      # prompts; or < file
 ```
 
-With an external broker the deploy refuses until both MQTT passwords are set,
-and lists the commands. A password generated earlier for a local broker does
-not count — it would never log in elsewhere. After `secret set mqtt-api`,
-`homescope restart api` applies it; with a local broker, rerun the deploy
-instead, which rebuilds the broker's password file.
+With an external broker the deploy pauses (the ACTION NEEDED banner, exit 0)
+until both MQTT passwords are set. A password generated earlier for a local
+broker does not count — it would never log in elsewhere. During a first deploy,
+rerun the deploy after `secret set`; on a running host, `homescope restart api`
+applies a new `mqtt-api`. With a local broker, always rerun the deploy, which
+rebuilds the broker's password file.
 
 ⚠️ **The KEK is not in the database backups, on purpose.** A dump plus the KEK
 is the whole fleet; a dump alone is inert — only while the two are stored apart.
@@ -383,13 +393,39 @@ a plain systemd timer whose service runs
 `/usr/local/bin/homescope backup --snapshot <dir>` — it then owns that timer
 like any other host job.
 
-Restore is deliberately manual. The full sequence — stop the API, drop and
-recreate the database, `timescaledb_pre_restore`, `pg_restore`,
-`timescaledb_post_restore`, start the API — is in the header of
-[`deploy/backup-db.sh`](../deploy/backup-db.sh), written as `homescope`
-commands. A newer API applies its pending migrations on that start. The
-TimescaleDB version must match the dump's, so restore onto the same image tag.
-To rehearse on a workstation first: `just db-restore <dump>`, then
+**Restore** uses the dump file as it is:
+
+```bash
+sudo homescope restore /srv/archive/thor-rpi5-2026-10-04/<…>.dump
+```
+
+It runs as root, so a root-only archive works directly. It refuses a file that
+is not a `pg_dump` archive, shows the archive's date and source, and asks you to
+type `restore`. Then it:
+
+1. stops the API, the only writer;
+2. drops and recreates the database;
+3. runs `CREATE EXTENSION IF NOT EXISTS timescaledb` and
+   `timescaledb_pre_restore()`;
+4. runs `pg_restore`, then `timescaledb_post_restore()`;
+5. starts the API, which applies any newer migrations;
+6. reports the migrations, the readings, the devices, and whether every device
+   key opened.
+
+The `IF NOT EXISTS` in step 3 is the one step that differs from a textbook
+restore, and it is not in the dump. It is there because the timescaledb image
+installs the extension into `template1`, so a freshly created database already
+has it. The pre/post-restore calls make TimescaleDB's own catalog come back as
+data, instead of being re-created by its DDL hooks.
+
+The TimescaleDB version must match the dump's, so restore onto the same image
+tag. Expect a minute or two for thor's dump on an HDD. About 10 s of that is
+stopping the API, which does not handle SIGTERM yet
+([api-graceful-shutdown.md](design/api-graceful-shutdown.md)). "Some device keys
+did not open" means the imported KEK is not the one the dump was made under;
+the database is fine, so import the right KEK and restart the API. The manual
+steps are in the header of [`deploy/backup-db.sh`](../deploy/backup-db.sh). To
+rehearse on a workstation first: `just db-restore <dump>`, then
 `RUN_MIGRATIONS=true just api`.
 
 ### Migrations
@@ -514,7 +550,7 @@ While the dongle is unplugged the unit sits in `auto-restart`, retrying every
 | --- | --- | --- |
 | Nothing runs after a reboot; `homescope status` warns about the user manager | The data disk did not mount | `systemctl status user@$(id -u homescope).service`, `findmnt /srv` |
 | Deploy: "no KEK yet. Say which case this is" | First deploy without `--new-kek` / `--import-kek` | decide which case it is — never guess on a restore |
-| Deploy: "secrets this host needs are not set yet" | External broker passwords missing | the `homescope secret set …` lines it printed |
+| Deploy: "ACTION NEEDED — … not started yet" | External broker passwords not set yet (expected on a first deploy) | the `homescope secret set …` lines it printed, then the same deploy again |
 | Deploy: "…is under /srv, which fstab lists but is not mounted" | Data disk missing; the deploy refuses to write underneath it | mount it |
 | Deploy: "generated without its host drop-in" | Podman older than 5.0 | upgrade podman |
 | API log: `ConnectionRefused(NotAuthorized)` | Wrong or missing broker password | `homescope secret set mqtt-api`, then restart |

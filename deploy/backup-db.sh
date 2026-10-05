@@ -28,8 +28,12 @@
 # environment (`homescope backup` passes deploy.toml's backup.dir), defaulting
 # to /var/lib/homescope/backups.
 #
-# Restore — destroys the current homescope DB, so every step is manual on
-# purpose:
+# Restore — replaces the current homescope DB, so it asks first:
+#
+#     sudo homescope restore <file>.dump
+#
+# The dump is used as it is. What that command does, step by step (for
+# reference, or for a host without the homescope command):
 #
 #   1. Stop writers:
 #        sudo homescope stop api

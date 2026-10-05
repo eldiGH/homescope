@@ -18,6 +18,11 @@
 #         first deploy of a restored installation
 #     --config PATH   another config file than /etc/homescope/deploy.toml
 #
+# With an external broker, a first deploy pauses ("ACTION NEEDED") until the
+# MQTT passwords are set with `homescope secret set`. Repeating the exact same
+# command afterwards is safe: an imported KEK or token that matches the file is
+# left alone.
+#
 # Two phases. Root does only what needs root — the service user, the udev
 # rule, data directories, secrets, system units, staging the deploy tree —
 # then drops to the homescope user for the rest, so everything created there
@@ -43,6 +48,7 @@ MIN_PODMAN_VERSION="5.0"
 
 CONFIG_FILE="$DEFAULT_CONFIG_FILE"
 NEW_KEK=false
+ORIGINAL_ARGS=()
 IMPORT_KEK=""
 IMPORT_ADMIN_TOKEN=""
 CHECK_ONLY=false
@@ -50,7 +56,8 @@ INIT_ROLE=""
 MISSING_SECRETS=()
 
 usage() {
-	sed -n '3,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	# The header's usage part: from line 3 up to the "Two phases" paragraph.
+	sed -n '3,/^# Two phases/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'
 	exit "${1:-0}"
 }
 
@@ -249,18 +256,34 @@ require_secret() {
 	MISSING_SECRETS+=("$short|$description")
 }
 
+# Not an error: with an external broker this is the expected state of a first
+# deploy — the broker's owner creates the users and hands over the passwords.
+# Everything up to here is done and kept; the containers start on the next run.
+# Exit 0, because nothing went wrong; the banner is what says "not finished".
 report_missing_secrets() {
 	((${#MISSING_SECRETS[@]})) || return 0
 
-	local entry
+	local entry rerun
+	rerun="sudo $(printf '%q ' "$0" "${ORIGINAL_ARGS[@]}")"
 	{
-		echo "ERROR: secrets this host needs are not set yet:"
+		echo
+		echo "======================================================================"
+		echo "  ACTION NEEDED — homescope is set up, but not started yet"
+		echo "======================================================================"
+		echo "  This host publishes to an external MQTT broker, and homescope does"
+		echo "  not have its passwords yet. Set them (each prompts, or pipe a file in):"
+		echo
 		for entry in "${MISSING_SECRETS[@]}"; do
-			echo "    sudo homescope secret set ${entry%%|*}     # ${entry#*|}"
+			echo "      sudo homescope secret set ${entry%%|*}    # ${entry#*|}"
 		done
-		echo "Then run the deploy again."
+		echo
+		echo "  Then run the same deploy again — repeating it is safe:"
+		echo
+		echo "      ${rerun% }"
+		echo "======================================================================"
+		echo
 	} >&2
-	exit 1
+	exit 0
 }
 
 # The homescope user usually cannot read the git checkout (home dirs are 0700,
@@ -325,6 +348,7 @@ print_plan() {
 ### Main ######################################################################
 
 main() {
+	ORIGINAL_ARGS=("$@")
 	parse_args "$@"
 	[[ $EUID -eq 0 ]] || die "This script must run as root: sudo $0 $*"
 

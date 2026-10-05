@@ -17,6 +17,7 @@
 #   backup                         an on-demand, timestamped database dump
 #   backup --snapshot DIR          stable, uncompressed dump into DIR, for the
 #                                  host's backup job to call before it runs
+#   restore <dump> [--yes]         replace the database with a pg_dump archive
 #   config                         the effective /etc/homescope/deploy.toml
 #
 # Components: api, db, grafana, gateway, mqtt. Secrets: kek, admin-token,
@@ -157,7 +158,8 @@ cmd_secret() {
 			log "Set $short."
 			case "$short" in
 				mqtt-api | mqtt-gateway)
-					echo "    Apply it: sudo homescope restart ${short#mqtt-} (with a local broker, rerun deploy.sh instead — it rebuilds the broker's password file)"
+					echo "    In the middle of a first deploy: run that deploy again. Already running: sudo homescope restart ${short#mqtt-}"
+					echo "    (with a local broker, always rerun the deploy — it rebuilds the broker's password file)"
 					;;
 				admin-token) echo "    Apply it: sudo homescope restart api" ;;
 				kek) echo "    Apply it: sudo homescope restart api" ;;
@@ -191,6 +193,96 @@ cmd_secret() {
 	esac
 }
 
+# Replaces the database with a pg_dump archive — the restore procedure that was
+# rehearsed against a production dump, as one command. Runs as root, so a
+# root-only archive path works directly.
+#
+# The dump file is used as it is. The one step that differs from a textbook
+# restore is CREATE EXTENSION *IF NOT EXISTS*: the timescaledb image installs
+# the extension into template1, so the freshly created database already has it.
+# timescaledb_pre_restore()/post_restore() bracket pg_restore so TimescaleDB's
+# own catalog is restored as data, not re-created by its DDL hooks.
+cmd_restore() {
+	local file="" yes=false
+	while (($#)); do
+		case "$1" in
+			--yes) yes=true ;;
+			-*) die "unknown option: $1" ;;
+			*)
+				[[ -z $file ]] || die "usage: homescope restore <dump> [--yes]"
+				file="$1"
+				;;
+		esac
+		shift
+	done
+	[[ -n $file ]] || die "usage: homescope restore <dump> [--yes]"
+	[[ -r $file ]] || die "cannot read $file"
+	[[ -e "$QUADLET_DIR/homescope-db.container" ]] || die "this host does not run the database (the api component)"
+
+	psql_postgres() {
+		homescope_podman exec homescope-db psql -U postgres -v ON_ERROR_STOP=1 -qtA "$@"
+	}
+
+	# The `cat` drains what pg_restore --list leaves unread; without it podman
+	# reports a failed write into the closed pipe although the archive is fine.
+	# The exit status is pg_restore's own — a trailing `cat` would mask it.
+	log "Checking $file"
+	local listing
+	# shellcheck disable=SC2016 # expanded by the container's shell
+	listing="$(homescope_podman exec -i homescope-db sh -c \
+		'pg_restore --list; status=$?; cat > /dev/null; exit $status' < "$file")" ||
+		die "$file is not a pg_dump archive this database can read"
+	grep -E '^;[[:space:]]+(Archive created at|dbname|Dumped from database version)' <<< "$listing" |
+		sed 's/^;[[:space:]]*/    /'
+
+	warn "This REPLACES the database on this host with $file — everything in it now is lost."
+	if ! $yes; then
+		local answer
+		read -rp "Type 'restore' to continue: " answer
+		[[ $answer == restore ]] || die "nothing changed"
+	fi
+
+	trap 'warn "Restore stopped part-way. The database may be incomplete or still in TimescaleDB restore mode, and the API is stopped. Fix the cause and run homescope restore again — it starts from scratch."' ERR
+
+	local started
+	started="$(date +%s)"
+
+	log "Stopping the API, the only writer"
+	as_user_systemctl stop homescope-api.service
+
+	log "Recreating the database"
+	psql_postgres -c 'DROP DATABASE IF EXISTS homescope WITH (FORCE)'
+	psql_postgres -c 'CREATE DATABASE homescope OWNER api'
+	psql_postgres -d homescope \
+		-c 'CREATE EXTENSION IF NOT EXISTS timescaledb' -c 'SELECT timescaledb_pre_restore()' > /dev/null
+
+	log "Restoring"
+	homescope_podman exec -i homescope-db pg_restore -U postgres -d homescope < "$file"
+	psql_postgres -d homescope -c 'SELECT timescaledb_post_restore()' > /dev/null
+	trap - ERR
+
+	log "Starting the API — it applies any newer migrations"
+	as_user_systemctl start homescope-api.service
+
+	local registry="" _
+	for _ in $(seq 1 60); do
+		registry="$(journalctl --no-hostname -o cat --since "@$started" SYSLOG_IDENTIFIER=homescope-api |
+			sed 's/\x1b\[[0-9;]*m//g' | grep -m1 -oE '(device registry loaded|Error).*' || true)"
+		[[ -n $registry ]] && break
+		sleep 1
+	done
+
+	log "Restored:"
+	psql_postgres -d homescope \
+		-c "SELECT '    migrations applied: ' || count(*) FROM _sqlx_migrations" \
+		-c "SELECT '    readings: ' || count(*) || ', newest ' || coalesce(max(time)::text, '-') FROM readings" \
+		-c "SELECT '    devices: ' || count(*) FROM devices"
+	echo "    API: ${registry:-no startup line yet — check: sudo homescope logs api}"
+	if [[ $registry == *"could not be opened"* && $registry != *"(0 keys could not be opened)"* ]]; then
+		warn "some device keys did not open — is this the KEK the dump was made under? (sudo homescope logs api)"
+	fi
+}
+
 # The host's backup job calls `homescope backup --snapshot DIR`; see
 # backup-db.sh for why scheduling is the host's and not homescope's.
 cmd_backup() {
@@ -219,6 +311,7 @@ main() {
 		podman) homescope_podman "$@" ;;
 		secret) cmd_secret "$@" ;;
 		backup) cmd_backup "$@" ;;
+		restore) cmd_restore "$@" ;;
 		config) python3 "$LIB_DIR/config.py" --show "$DEFAULT_CONFIG_FILE" ;;
 		*) die "unknown command: $command (see: homescope help)" ;;
 	esac

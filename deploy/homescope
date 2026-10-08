@@ -5,8 +5,9 @@
 #
 # usage: sudo homescope <command> [args]
 #
-#   status                         units and containers
+#   status                         units and containers; failed units and where to look
 #   logs <component> [journalctl args]   e.g. logs api -f, logs gateway -n 50
+#   logs auto-update [journalctl args]   the image auto-update runs
 #   start|stop|restart <component|all>
 #   psql [psql args]               psql in the database, as postgres
 #   podman <podman args>           podman as the homescope user
@@ -19,9 +20,11 @@
 #                                  host's backup job to call before it runs
 #   restore <dump> [--yes]         replace the database with a pg_dump archive
 #   config                         the effective /etc/homescope/deploy.toml
+#   shell [-c CMD]                 a shell as the homescope user, where
+#                                  systemctl --user and podman work
 #
-# Components: api, db, grafana, gateway, mqtt. Secrets: kek, admin-token,
-# mqtt-api, mqtt-gateway.
+# Components: api, db, grafana, gateway, mqtt, or all. Secrets: kek,
+# admin-token, mqtt-api, mqtt-gateway.
 
 set -euo pipefail
 
@@ -33,7 +36,7 @@ fi
 source "$LIB_DIR/common.sh"
 
 usage() {
-	sed -n '6,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '6,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 	exit "${1:-0}"
 }
 
@@ -76,30 +79,70 @@ cmd_status() {
 	as_user_systemctl list-units --all --no-pager 'homescope-*'
 	echo
 	homescope_podman ps --all --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-	local failed
+
+	# Every failed unit of the user manager, not just homescope-*: the
+	# auto-update timer's service is the one that otherwise fails unseen.
+	local failed unit
 	failed="$(as_user_systemctl --failed --no-legend --plain | awk '{print $1}')"
-	if [[ -n $failed ]]; then
-		echo
-		warn "failed units: $failed"
-	fi
+	[[ -z $failed ]] || echo
+	for unit in $failed; do
+		case "$unit" in
+			homescope-api.service | homescope-db.service | homescope-grafana.service | \
+				homescope-gateway.service | homescope-mqtt.service)
+				unit="${unit#homescope-}"
+				warn "${unit%.service} failed — sudo homescope logs ${unit%.service}"
+				;;
+			podman-auto-update.service)
+				warn "the image auto-update failed — sudo homescope logs auto-update"
+				;;
+			*)
+				warn "$unit failed — sudo homescope shell -c 'systemctl --user status $unit'"
+				;;
+		esac
+	done
 }
 
 # Container output (journald, tagged with the container name) together with
 # the unit's own messages — a failed start shows up only in the latter.
+#
+# Read as root by field, scoped to the homescope user's uid: `journalctl
+# --user` as that user sees its logs only when journald stores them on disk
+# (per-user journal files exist only then), and `journalctl --user-unit` as
+# root looks for root's units. `auto-update` is podman-auto-update.service,
+# which the timer runs every 5 minutes.
 cmd_logs() {
-	[[ $# -ge 1 ]] || die "usage: homescope logs <component> [journalctl args]"
-	local unit
-	unit="$(units_for "$1")"
+	[[ $# -ge 1 ]] || die "usage: homescope logs <component|all|auto-update> [journalctl args]"
+	local list units
+	if [[ $1 == auto-update ]]; then
+		list=podman-auto-update
+	else
+		list="$(units_for "$1")"
+	fi
 	shift
-	journalctl --no-hostname "SYSLOG_IDENTIFIER=$unit" + "_SYSTEMD_USER_UNIT=$unit.service" + "USER_UNIT=$unit.service" "$@"
+	[[ -n $list ]] || die "no homescope units are installed on this host"
+	mapfile -t units <<< "$list"
+
+	local uid unit matches=()
+	uid="$(id -u "$HOMESCOPE_USER")"
+	for unit in "${units[@]}"; do
+		matches+=(+ "_UID=$uid" "SYSLOG_IDENTIFIER=$unit"
+			+ "_UID=$uid" "_SYSTEMD_USER_UNIT=$unit.service"
+			+ "_UID=$uid" "USER_UNIT=$unit.service")
+	done
+	journalctl --no-hostname "${matches[@]:1}" "$@"
 }
 
 cmd_unit_verb() {
 	local verb="$1"
 	[[ $# -ge 2 ]] || die "usage: homescope $verb <component|all>"
-	local units
-	mapfile -t units < <(units_for "$2" | sed 's/$/.service/')
-	as_user_systemctl "$verb" "${units[@]}"
+	# Through a variable, not `< <(units_for …)`: a process substitution's
+	# exit status is lost, so an unknown component would print its error and
+	# then run the verb with no units at all.
+	local list units
+	list="$(units_for "$2")"
+	[[ -n $list ]] || die "no homescope units are installed on this host"
+	mapfile -t units <<< "$list"
+	as_user_systemctl "$verb" "${units[@]/%/.service}"
 }
 
 cmd_psql() {
@@ -283,6 +326,17 @@ cmd_restore() {
 	fi
 }
 
+# An interactive shell as the homescope user — for whatever this command does
+# not cover. A login shell in its home directory, with the environment cleared
+# except for XDG_RUNTIME_DIR, which is what `systemctl --user` and rootless
+# podman need and what `sudo -iu homescope` does not set ("Failed to connect to
+# bus"). `machinectl shell homescope@` does the same with a full login session,
+# but needs the systemd-container package.
+cmd_shell() {
+	XDG_RUNTIME_DIR="/run/user/$(id -u "$HOMESCOPE_USER")" \
+		exec runuser --login "$HOMESCOPE_USER" --whitelist-environment=XDG_RUNTIME_DIR "$@"
+}
+
 # The host's backup job calls `homescope backup --snapshot DIR`; see
 # backup-db.sh for why scheduling is the host's and not homescope's.
 cmd_backup() {
@@ -313,6 +367,7 @@ main() {
 		backup) cmd_backup "$@" ;;
 		restore) cmd_restore "$@" ;;
 		config) python3 "$LIB_DIR/config.py" --show "$DEFAULT_CONFIG_FILE" ;;
+		shell) cmd_shell "$@" ;;
 		*) die "unknown command: $command (see: homescope help)" ;;
 	esac
 }

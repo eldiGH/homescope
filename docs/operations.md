@@ -99,12 +99,13 @@ ACL), and runs these scenarios in order, asserting on output and exit codes:
 3. the password prompts, then the MQTT login check;
 4. the password flags (wrong, right, unchanged);
 5. the KEK guards;
-6. backup, snapshot and restore;
-7. data on a separate `nofail` disk;
-8. a boot without that disk;
-9. all-in-one with the local broker and its ACL;
-10. deselecting components;
-11. an idempotent rerun.
+6. the admin command's `logs` (auto-update included), `shell` and failed-unit report;
+7. backup, snapshot and restore;
+8. data on a separate `nofail` disk;
+9. a boot without that disk;
+10. all-in-one with the local broker and its ACL;
+11. deselecting components;
+12. an idempotent rerun.
 
 The Debian image is cached under `~/.cache/homescope/vm`, together with the
 last run's full log (`last-run.log`); everything else is deleted at the end.
@@ -148,8 +149,9 @@ into its container layer instead of `data_dir`.
 ## The `homescope` command
 
 ```bash
-sudo homescope status                  # units and containers
-sudo homescope logs api -f             # api, db, grafana, gateway, mqtt
+sudo homescope status                  # units, containers, failed units and where to look
+sudo homescope logs api -f             # api, db, grafana, gateway, mqtt, all
+sudo homescope logs auto-update        # the image auto-update runs
 sudo homescope restart gateway         # start | stop | restart, or `all`
 sudo homescope psql                    # psql as postgres, in the database
 sudo homescope podman ps               # podman as the homescope user
@@ -157,6 +159,7 @@ sudo homescope secret list             # set | show | rm <name>
 sudo homescope backup                  # on-demand dump; --snapshot DIR for the host's backup job
 sudo homescope restore <dump>          # replace the database with a pg_dump archive
 sudo homescope config                  # the effective deploy.toml
+sudo homescope shell                   # a shell as homescope; -c CMD for one command
 ```
 
 It hides what rootless podman otherwise needs by hand: running as the
@@ -169,18 +172,30 @@ inside a user namespace that `chdir()`s back to it:
 cannot chdir to /home/pi/Projects/homescope/deploy: Permission denied
 ```
 
-`cd /` first, or open a full session with `sudo machinectl shell homescope@.host`.
+`cd /` first, or work from `sudo homescope shell`: a login shell in the
+`homescope` user's home with `XDG_RUNTIME_DIR` set, so `systemctl --user` and
+`podman` work there. `sudo -iu homescope` does not set it, and `systemctl
+--user` then fails with "Failed to connect to bus". `sudo machinectl shell
+homescope@` is the same with a full login session, if the `systemd-container`
+package is installed.
+
+In either shell, `journalctl --user` shows the user's logs only if journald
+stores them on disk — per-user journal files exist only then. `homescope logs`
+reads them as root and works either way.
 
 ## Logs
 
 `homescope logs <component>` shows what the container printed together with
 systemd's own start/stop/restart records for its unit — a crash loop shows up
-only in the latter. Extra arguments go to `journalctl`:
+only in the latter. `all` interleaves every unit; `auto-update` is the
+timer-driven image update (`podman-auto-update.service`, every 5 minutes).
+Extra arguments go to `journalctl`:
 
 ```bash
 sudo homescope logs api -f
 sudo homescope logs gateway -n 200
 sudo homescope logs api --since '30 min ago' -p warning
+sudo homescope logs auto-update -n 50
 ```
 
 ## Service control
@@ -214,7 +229,13 @@ the pin and rerun the deploy.
 
 ```bash
 sudo homescope podman auto-update --dry-run      # what would change
+sudo homescope logs auto-update -n 50            # what the last runs did
 ```
+
+A failed run shows in `homescope status` and stays failed until the next run
+succeeds. It is not a monitoring signal on its own — one unreachable registry
+fails one run — but a run that keeps failing means the host has stopped
+following `main`.
 
 `podman auto-update` rolls back a container whose new image fails to start —
 but "starts and then exits" is a successful start, so a binary that crashes on a
@@ -600,6 +621,7 @@ While the dongle is unplugged the unit sits in `auto-restart`, retrying every
 | Deploy: "cannot log in to … as homescope-api" | Wrong password, or the broker's owner has not created the user yet | `sudo homescope secret set mqtt-api && sudo homescope restart api` |
 | Deploy: "…is under /srv, which fstab lists but is not mounted" | Data disk missing; the deploy refuses to write underneath it | mount it |
 | Deploy: "generated without its host drop-in" | Podman older than 5.0 | upgrade podman |
+| `homescope status`: "the image auto-update failed" | A registry unreachable or refusing (Docker Hub's anonymous pull limit says `toomanyrequests`), or a new image failed to start and was rolled back | `sudo homescope logs auto-update -n 50` |
 | API log: `ConnectionRefused(NotAuthorized)` | Wrong or missing broker password | `homescope secret set mqtt-api`, then restart |
 | API subscribed, but no readings and no errors | ACL lacks the read rule, or gateway publishes under another site — both silent | `mosquitto_pub -V 5` as the gateway user; check `SITE` |
 | `curl: (56) Recv failure: Connection reset by peer` | Container up, nothing listening inside — usually a stale image | `sudo homescope podman inspect homescope-api --format '{{.ImageName}} {{.Created}}'` |

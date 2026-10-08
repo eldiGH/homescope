@@ -15,7 +15,7 @@
 #
 #   init + --check, a first deploy without a terminal (the banner), the
 #   password prompts, the password flags and the MQTT login check, the KEK
-#   guards, backup/snapshot/restore, data on a separate `nofail` disk, a boot
+#   guards, the admin command's logs/shell/status, backup/snapshot/restore, data on a separate `nofail` disk, a boot
 #   without that disk, the all-in-one shape with its local broker and ACL,
 #   deselecting components, and an idempotent rerun.
 #
@@ -462,6 +462,39 @@ s_kek_guards() {
 	expect_rc 0
 }
 
+s_admin_command() {
+	run 'sudo homescope logs api --no-pager'
+	expect_rc 0
+	expect "connected to the MQTT broker"
+
+	# The deploy ran it once; both systemd's record and podman's table.
+	run 'sudo homescope logs auto-update --no-pager'
+	expect_rc 0
+	expect "podman-auto-update\.service"
+	expect "homescope-db\.service.*registry"
+
+	run 'sudo homescope logs all --no-pager -n 300'
+	expect_rc 0
+	expect "homescope-api"
+	expect "homescope-db"
+
+	run 'sudo homescope restart nonsense'
+	expect_rc 1
+	expect "unknown component: nonsense"
+	expect_not "Too few arguments"
+
+	run 'sudo homescope shell -c "pwd; systemctl --user is-active homescope-api.service; podman ps --format {{.Names}}"'
+	expect_rc 0
+	expect "^/var/lib/homescope$"
+	expect "^active$"
+	expect "^homescope-api$"
+
+	run 'sudo homescope shell -c "systemd-run --user --quiet --unit=vmtest-fails false"; sleep 2; sudo homescope status'
+	expect "vmtest-fails\.service failed — sudo homescope shell -c"
+	run 'sudo homescope shell -c "systemctl --user reset-failed vmtest-fails.service"'
+	expect_rc 0
+}
+
 s_backup_and_restore() {
 	local migrations
 	migrations="$(find "$REPO/api/migrations" -name '*.sql' | wc -l)"
@@ -613,6 +646,7 @@ main() {
 	scenario "password prompts, then the login check" s_password_prompts
 	scenario "password flags: wrong, right, unchanged" s_password_flags
 	scenario "KEK guards" s_kek_guards
+	scenario "admin command: logs, shell, status" s_admin_command
 	scenario "backup, snapshot and restore" s_backup_and_restore
 	scenario "data on a separate nofail disk" s_data_disk
 	if $FAST; then

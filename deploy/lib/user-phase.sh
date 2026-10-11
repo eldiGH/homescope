@@ -95,14 +95,18 @@ user_phase() {
 	mkdir -p "$QUADLET_DIR"
 	rsync -a --delete --checksum "$quadlets/" "$QUADLET_DIR/"
 
-	local dropin_dir="$HOMESCOPE_DIR/.config/systemd/user/podman-auto-update.timer.d"
-	mkdir -p "$dropin_dir"
-	cp "$SCRIPT_DIR/systemd/podman-auto-update.timer.d/override.conf" "$dropin_dir/"
+	# No timer: images update when the operator deploys (the oneshot below),
+	# never unattended. A timer an earlier deploy enabled is removed here.
+	local timer_dropin="$HOMESCOPE_DIR/.config/systemd/user/podman-auto-update.timer.d"
+	if [[ -e $timer_dropin ]] || systemctl --user -q is-enabled podman-auto-update.timer 2> /dev/null; then
+		log "Removing the auto-update timer (images update on deploy now)"
+		systemctl --user disable --now --quiet podman-auto-update.timer 2> /dev/null || true
+		rm -rf "$timer_dropin"
+	fi
 
 	# daemon-reload runs the quadlet generator; it must precede the checks
 	# and the restarts.
 	systemctl --user daemon-reload
-	systemctl --user enable --now --quiet podman-auto-update.timer
 
 	for unit in $(desired_units); do
 		systemctl --user cat "$unit.service" 2> /dev/null | grep -q -- "$HOST_CONFIG_MARKER" ||
@@ -110,8 +114,8 @@ user_phase() {
 	done
 
 	# 'restart' reuses cached images and never contacts a registry; without
-	# this pass a deploy would restart services on stale code. Same oneshot the
-	# timer fires, auto-rollback included. No-op on a first deploy.
+	# this pass a deploy would restart services on stale code. podman's own
+	# oneshot, auto-rollback included. No-op on a first deploy.
 	systemctl --user start podman-auto-update.service
 
 	for unit in $(desired_units); do

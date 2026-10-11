@@ -514,7 +514,7 @@ Every other discovery publisher then needs a `deny homeassistant/+/homescope/#`.
 no one subscribes to, not even for a durable session. So the API must subscribe
 to both `homescope/sensors/+/envelope` and `homescope/+/sensors/+/envelope` for
 one release *before* any gateway switches. API and gateway images
-auto-update independently, so "deploy them together" is not atomic. If a central
+update independently (per-host deploys), so "deploy them together" is not atomic. If a central
 site goes live before the prefix exists, its ACL needs the old topic
 temporarily as well (`read homescope/sensors/+/envelope` for the API, `write
 homescope/sensors/#` for the site user).

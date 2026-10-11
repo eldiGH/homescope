@@ -81,7 +81,8 @@ cmd_status() {
 	homescope_podman ps --all --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 
 	# Every failed unit of the user manager, not just homescope-*: the
-	# auto-update timer's service is the one that otherwise fails unseen.
+	# deploy's image update (podman-auto-update.service) is the one that
+	# otherwise fails unseen.
 	local failed unit
 	failed="$(as_user_systemctl --failed --no-legend --plain | awk '{print $1}')"
 	[[ -z $failed ]] || echo
@@ -109,7 +110,7 @@ cmd_status() {
 # --user` as that user sees its logs only when journald stores them on disk
 # (per-user journal files exist only then), and `journalctl --user-unit` as
 # root looks for root's units. `auto-update` is podman-auto-update.service,
-# which the timer runs every 5 minutes.
+# which the deploy runs once to pull new images.
 cmd_logs() {
 	[[ $# -ge 1 ]] || die "usage: homescope logs <component|all|auto-update> [journalctl args]"
 	local list units

@@ -384,7 +384,7 @@ Configuration comes from env vars via the shared `host-util` crate (dotenv + tra
 All Pi-side services run as **rootless Podman containers under systemd quadlets** (a dedicated `homescope` user with lingering enabled):
 
 - **Quadlets** (`deploy/quadlets/`): `mosquitto`, `timescaledb` (TimescaleDB 2.x / PG 18), `api`, `gateway`, `grafana`, all on a shared podman network; named volumes for broker and DB state.
-- **Images**: GitHub Actions builds ARM images per crate on push to `main` (path-filtered) → `ghcr.io/eldigh/homescope-{gateway,api}`. Quadlets use `AutoUpdate=registry` with the `podman-auto-update` timer, so the Pi picks up new images on its own.
+- **Images**: GitHub Actions builds ARM images per crate on push to `main` (path-filtered) → `ghcr.io/eldigh/homescope-{gateway,api}`. Quadlets use `AutoUpdate=registry`; the deploy runs `podman auto-update` once, so new images land when the operator deploys — no timer.
 - **`deploy/deploy.sh`**: idempotent converge script (`git pull && sudo ./deploy/deploy.sh`) — root phase creates the user, installs the udev rule, and stages the deploy tree; a user phase installs quadlets and config under `~/.config/homescope/`. Secrets are generated once and never overwritten. `deploy/backup-db.sh` handles DB dumps.
 - **udev** (`deploy/udev/`): matches the receiver (VID/PID + product string) and symlinks it to `/dev/homescope-receiver`, which the gateway quadlet passes through via `AddDevice`. Planned tightening: a real VID/PID (pid.codes) + serial match, `TAG+="systemd"` device units so the container's lifecycle binds to device presence (`BindsTo=`), and `ID_MM_DEVICE_IGNORE` to keep ModemManager from writing AT commands into the CDC endpoint.
 - **Grafana**: provisioned TimescaleDB datasource + committed dashboard (`deploy/grafana/`), anonymous viewer access, published on port 4000. The `just grafana-pull` recipe exports UI edits back into the repo.
@@ -455,7 +455,6 @@ homescope/
 │   ├── grafana/           # provisioning (datasource, dashboards) + committed dashboard JSON
 │   ├── mosquitto/         # broker configs (prod + dev)
 │   ├── timescaledb/       # init roles + dev seed SQL
-│   ├── systemd/           # podman-auto-update timer override
 │   └── udev/              # receiver → /dev/homescope-receiver symlink rule
 ├── .github/workflows/     # per-crate ARM container builds → ghcr.io (path-filtered)
 ├── tools/

@@ -78,7 +78,7 @@ Two footguns worth knowing, both from tooling that resolves paths relative to th
 git pull && sudo ./deploy/deploy.sh
 ```
 
-Idempotent — creates the `homescope` user, installs the udev rule and quadlets, generates secrets once, and converges the stack. CI-built images auto-update via `podman-auto-update`.
+Idempotent — creates the `homescope` user, installs the udev rule and quadlets, generates secrets once, and converges the stack. Rerunning it is also how a host picks up new CI-built images (no auto-update timer).
 
 ## Wire protocol (receiver → gateway)
 

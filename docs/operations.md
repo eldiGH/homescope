@@ -188,7 +188,7 @@ reads them as root and works either way.
 `homescope logs <component>` shows what the container printed together with
 systemd's own start/stop/restart records for its unit — a crash loop shows up
 only in the latter. `all` interleaves every unit; `auto-update` is the
-timer-driven image update (`podman-auto-update.service`, every 5 minutes).
+image update the deploy runs (`podman-auto-update.service`).
 Extra arguments go to `journalctl`:
 
 ```bash
@@ -222,10 +222,12 @@ systemctl is-active user@$(id -u homescope).service      # expect: active
 
 ## Updating
 
-Images: push to `main` → GitHub Actions builds the ARM image → ghcr.io → the
-host's auto-update timer pulls it within 5 minutes and restarts the container.
-A host with `[images]` pinned to a `:<sha>` tag does not follow `main`; change
-the pin and rerun the deploy.
+Images: push to `main` → GitHub Actions builds the ARM image → ghcr.io. The
+host picks it up **only when you deploy**: the deploy runs `podman auto-update`
+once, which pulls newer images and restarts their containers. There is no
+timer — an unattended update of `:latest` at a random hour is exactly when a
+bad migration should not land. A host with `[images]` pinned to a `:<sha>` tag
+does not follow `main`; change the pin and rerun the deploy.
 
 ```bash
 sudo homescope podman auto-update --dry-run      # what would change
